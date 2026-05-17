@@ -389,6 +389,80 @@ GET /api/config/status
 
 비밀값 원문은 UI/API 응답에 표시하지 않습니다. `.env`는 `.gitignore`에 포함되어 커밋되지 않습니다.
 
+## Docker 없는 사내 PC 배포
+
+사내 PC마다 Python, Node, 프록시, 루트 CA, Defender/EDR 정책이 다르므로 운영 배포는 개발자 설치 절차와 분리합니다. 권장 방식은 온라인 빌드 PC에서 오프라인 번들 zip을 만들고, 대상 PC에서는 짧은 ASCII 경로에 압축을 푼 뒤 `bootstrap`과 `doctor`를 통과시키는 흐름입니다.
+
+권장 설치 경로:
+
+```powershell
+C:\AppBundle\manualgen
+```
+
+OneDrive, 한글 사용자명 아래의 깊은 경로, 공백이 많은 경로는 피합니다. `output/`, `.env`, Playwright 브라우저 캐시, TTS 모델 캐시가 OneDrive로 동기화되면 파일 잠금과 비밀값 유출 위험이 생깁니다.
+
+### 런타임 디렉터리 규칙
+
+번들형 배포에서는 다음 경로를 repo/bundle 내부로 고정합니다.
+
+```text
+runtime/
+  browsers/       # PLAYWRIGHT_BROWSERS_PATH
+  hf-cache/       # HF_HOME
+  npm-cache/      # NPM_CONFIG_CACHE
+  ffmpeg/bin/     # ffmpeg.exe, ffprobe.exe
+  node/           # portable Node.js
+config/
+  corp-root-ca.pem
+output/
+```
+
+앱은 실행 시 `MANUAL_AGENT_BUNDLE_ROOT` 기준으로 `PLAYWRIGHT_BROWSERS_PATH`, `HF_HOME`, `NPM_CONFIG_CACHE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` 같은 환경값을 기본 보정합니다. 기존 프로세스 환경변수가 있으면 그 값을 우선합니다.
+
+### 운영자 실행 절차
+
+```powershell
+Set-Location C:\AppBundle\manualgen
+.\scripts\bootstrap.ps1
+.\scripts\doctor.ps1
+.\scripts\smoke.ps1 -SkipTests
+.\scripts\start.ps1
+```
+
+`doctor.ps1`는 Python 3.10, Node/npm/npx, FFmpeg, Playwright browser cache, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
+
+```powershell
+.\scripts\doctor.ps1 -Collect
+```
+
+진단 zip은 `output/diagnostics/` 아래에 생성되고, 비밀로 보이는 환경값은 redact됩니다.
+
+### 오프라인 번들 생성
+
+온라인 접근이 가능한 빌드 PC에서 다음 명령으로 번들 골격을 만들 수 있습니다.
+
+```powershell
+.\scripts\build_bundle.ps1
+```
+
+인터넷 접근이 불가능한 환경에서 스크립트 구조만 검증하려면 다운로드를 생략합니다.
+
+```powershell
+.\scripts\build_bundle.ps1 -SkipDownloads
+```
+
+실제 운영 번들은 Python wheels, Playwright Chromium, npm cache, FFmpeg, MeloTTS 모델 캐시, HyperFrames/OpenCode CLI, 사내 루트 CA를 포함해야 합니다. 생성된 `versions.json`은 포함 파일의 SHA256과 버전 식별 정보를 담으며, 설치 PC의 장애 분석 기준점으로 사용합니다.
+
+### 패키지 검증
+
+생성된 job package는 다음 도구로 검사합니다.
+
+```powershell
+python tools\verify_package.py output\jobs\<job_id>\package_manifest.json
+```
+
+검사 항목은 manifest 상태, 주요 artifact 존재 여부, `manual.md` 공백 여부, `audit_log.jsonl` JSONL 무결성, `degradations` 형식입니다.
+
 ## API
 
 Health check:
@@ -454,6 +528,7 @@ backend/
       video.py
     audit.py
     config.py
+    env_bootstrap.py
     main.py
     policies.py
     pipeline.py
@@ -465,16 +540,26 @@ backend/
       sample.html
   tests/
     test_config.py
+    test_env_bootstrap.py
     test_adapters.py
     test_home_ui.py
     test_pipeline.py
     test_policy.py
+    test_verify_package.py
 docs/
   plans/
     2026-05-17-internal-system-manual-video-agent-design.md
     2026-05-17-internal-system-manual-video-agent-implementation-plan.md
   reviews/
     2026-05-17-genspark-architecture-review.md
+scripts/
+  bootstrap.ps1
+  build_bundle.ps1
+  doctor.ps1
+  smoke.ps1
+  start.ps1
+tools/
+  verify_package.py
 ```
 
 핵심 파일:
@@ -483,6 +568,7 @@ docs/
 - [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
 - [backend/app/audit.py](backend/app/audit.py): append-only audit log
 - [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
+- [backend/app/env_bootstrap.py](backend/app/env_bootstrap.py): Docker 없는 번들 런타임 환경 보정
 - [backend/app/policies.py](backend/app/policies.py): 위험 액션 분류와 승인 게이트
 - [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
 - [backend/app/adapters/mcp_client.py](backend/app/adapters/mcp_client.py): MCP stdio JSON-RPC client
@@ -493,6 +579,8 @@ docs/
 - [backend/app/adapters/video.py](backend/app/adapters/video.py): HyperFrames composition/render fallback
 - [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
 - [backend/app/static/styles.css](backend/app/static/styles.css): AI Center inspired 스타일
+- [scripts/doctor.ps1](scripts/doctor.ps1): 사내 PC preflight/진단 수집
+- [tools/verify_package.py](tools/verify_package.py): 생성 패키지 manifest 검증
 
 ## 테스트
 
@@ -513,7 +601,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-25 passed
+31 passed
 ```
 
 ## 보안 및 운영 주의사항

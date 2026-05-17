@@ -150,3 +150,5 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert all("status" in event for event in events)
     assert manifest["degradations"]
     assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
+    assert manifest["environment"]["python_version"]
+    assert manifest["environment"]["playwright_browsers_path"]

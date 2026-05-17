@@ -19,6 +19,7 @@ from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.audit import AuditLog
 from backend.app.config import load_settings
+from backend.app.env_bootstrap import apply_runtime_environment, runtime_fingerprint
 from backend.app.policies import ApprovalGate
 
 
@@ -80,11 +81,14 @@ def run_pipeline(
     base_dir: Path | None = None,
     capture_browser: bool = True,
 ) -> PipelineResult:
+    apply_runtime_environment()
     settings = load_settings()
     output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     dirs = _make_dirs(output_root / "jobs" / job_id)
     audit = AuditLog(run_id=job_id, path=dirs.package / "audit_log.jsonl")
+    environment = runtime_fingerprint()
+    audit.record(actor="environment", status="ok", output_data=environment)
 
     plan = build_plan(request, settings, package_dir=dirs.package)
     audit.record(
@@ -207,7 +211,7 @@ def run_pipeline(
         artifacts=artifacts,
     )
     audit.record(actor="manifest", status="ok", artifacts=[manifest_path])
-    _write_json(manifest_path, _manifest(result, degradations=audit.degradations()))
+    _write_json(manifest_path, _manifest(result, degradations=audit.degradations(), environment=environment))
     return result
 
 
@@ -549,7 +553,12 @@ def _screenshot(page: Any, directory: Path, name: str) -> Path:
     return path
 
 
-def _manifest(result: PipelineResult, *, degradations: list[dict[str, str]] | None = None) -> dict[str, Any]:
+def _manifest(
+    result: PipelineResult,
+    *,
+    degradations: list[dict[str, str]] | None = None,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     package_dir = result.package_dir
     supporting_artifacts = {
         "request": str(package_dir / "request.json"),
@@ -570,6 +579,7 @@ def _manifest(result: PipelineResult, *, degradations: list[dict[str, str]] | No
         "job_id": result.job_id,
         "status": result.status,
         "package_dir": str(result.package_dir),
+        "environment": environment or {},
         "degradations": degradations or [],
         "artifacts": {
             "html_preview": str(result.artifacts.html_preview),
