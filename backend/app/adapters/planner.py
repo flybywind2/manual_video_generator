@@ -20,7 +20,16 @@ def build_plan(
     http_post: HttpPost | None = None,
 ) -> dict[str, Any]:
     if not settings.enable_internal_planner or not settings.llm.is_configured:
-        return deterministic_plan(request, settings.safe_status())
+        trace = {
+            "planner": "local-deterministic",
+            "rag": {"status": "skipped"},
+            "reranker": {"status": "skipped"},
+            "reason": "internal planner disabled or llm not configured",
+        }
+        _write_trace(package_dir, trace)
+        plan = deterministic_plan(request, settings.safe_status())
+        plan["planner_trace"] = trace
+        return plan
 
     post = post_json if http_post is None else http_post
     trace: dict[str, Any] = {"planner": "internal-llm", "rag": None, "reranker": None}

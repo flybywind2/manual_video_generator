@@ -76,6 +76,39 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     assert "Authorization" in calls[0]["headers"]
 
 
+def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_invalid(tmp_path: Path):
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회 방법 영상 만들기",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면이 보이면 완료",
+        input_values={"LOT": "LOT-001"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {"choices": [{"message": {"content": "not-json"}}]}
+
+    plan = build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert plan["source"] == "local-deterministic-planner-fallback"
+    assert plan["planner_error"].startswith("JSONDecodeError:")
+    trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
+    assert trace["planner"] == "internal-llm"
+    assert trace["error"] == plan["planner_error"]
+
+
 def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "melotts"})
     plan = {
@@ -135,6 +168,49 @@ def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_pat
     assert metadata["renderer"] == "hyperframes"
     assert metadata["fallback_video"] == str(fallback_video)
     assert metadata["used_fallback"] is True
+
+
+def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "hyperframes render",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    plan = {
+        "steps": [
+            {
+                "id": "step_intro",
+                "title": "요청 확인",
+                "caption": "요청을 확인합니다.",
+                "narration": "요청을 확인합니다.",
+            }
+        ]
+    }
+
+    def fake_runner(args, **kwargs):
+        output_path = Path(args[args.index("--output") + 1])
+        output_path.write_bytes(b"mp4")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="rendered", stderr="")
+
+    result = render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        command_runner=fake_runner,
+    )
+
+    assert result.video_path.name == "manual_video_agent_usage.mp4"
+    assert result.used_fallback is False
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "completed"
+    assert metadata["video"] == str(result.video_path)
 
 
 def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_path: Path):
@@ -276,6 +352,30 @@ def test_opencode_agent_runs_prompt_in_package_directory(tmp_path: Path):
     assert metadata["agent"] == "build"
     assert metadata["model"] == "openai/gpt-5"
     assert metadata["stdout"] == '{"type":"message","text":"ok"}'
+
+
+def test_opencode_agent_records_failed_command_without_raising(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+            "MANUAL_AGENT_OPENCODE_COMMAND": "opencode run --format json",
+        }
+    )
+
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=2, stdout="", stderr="failed")
+
+    result = run_opencode_agent(
+        plan={"steps": [], "actions": []},
+        package_dir=tmp_path,
+        settings=settings,
+        command_runner=fake_runner,
+    )
+
+    assert result.status == "failed"
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["returncode"] == 2
+    assert metadata["stderr"] == "failed"
 
 
 def test_opencode_agent_skips_when_disabled(tmp_path: Path):

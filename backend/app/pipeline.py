@@ -152,12 +152,14 @@ def run_pipeline(
 def artifact_response(result: PipelineResult) -> dict[str, Any]:
     rel_base = f"/artifacts/jobs/{result.job_id}"
     video_name = result.artifacts.video.name
+    mcp_execution = result.package_dir / "playwright_mcp_execution.json"
     return {
         "job_id": result.job_id,
         "status": result.status,
         "package_dir": str(result.package_dir),
         "plan": result.plan,
         "rehearsal": result.rehearsal,
+        "supporting_artifacts": _supporting_artifact_urls(result, rel_base),
         "artifacts": {
             "html_preview_url": f"{rel_base}/preview.html",
             "markdown_manual_url": f"{rel_base}/manual.md",
@@ -167,12 +169,38 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "approval_log_url": f"{rel_base}/approval_log.json",
             "masking_log_url": f"{rel_base}/masking_log.json",
             "package_manifest_url": f"{rel_base}/package_manifest.json",
+            "request_url": f"{rel_base}/request.json",
+            "planner_trace_url": f"{rel_base}/planner_trace.json",
+            "rehearsal_log_url": f"{rel_base}/rehearsal_log.json",
+            "mcp_calls_url": f"{rel_base}/playwright_mcp_calls.json",
+            "mcp_execution_url": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
             "final_frame_url": f"{rel_base}/final_frame.png" if result.artifacts.final_frame else None,
             "tts_metadata_url": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
             "video_render_metadata_url": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
             "skills_metadata_url": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
+            "opencode_prompt_url": f"{rel_base}/opencode_prompt.md",
             "opencode_metadata_url": f"{rel_base}/opencode_agent.json" if result.artifacts.opencode_metadata else None,
+            "hyperframes_composition_url": f"{rel_base}/hyperframes/index.html",
+            "hyperframes_manifest_url": f"{rel_base}/hyperframes/hyperframes_manifest.json",
         },
+    }
+
+
+def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str, str | None]:
+    mcp_execution = result.package_dir / "playwright_mcp_execution.json"
+    return {
+        "request": f"{rel_base}/request.json",
+        "planner_trace": f"{rel_base}/planner_trace.json",
+        "rehearsal_log": f"{rel_base}/rehearsal_log.json",
+        "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
+        "playwright_mcp_execution": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
+        "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
+        "video_render": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
+        "skills_metadata": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
+        "opencode_prompt": f"{rel_base}/opencode_prompt.md",
+        "opencode_metadata": f"{rel_base}/opencode_agent.json" if result.artifacts.opencode_metadata else None,
+        "hyperframes_composition": f"{rel_base}/hyperframes/index.html",
+        "hyperframes_manifest": f"{rel_base}/hyperframes/hyperframes_manifest.json",
     }
 
 
@@ -457,6 +485,21 @@ def _screenshot(page: Any, directory: Path, name: str) -> Path:
 
 
 def _manifest(result: PipelineResult) -> dict[str, Any]:
+    package_dir = result.package_dir
+    supporting_artifacts = {
+        "request": str(package_dir / "request.json"),
+        "planner_trace": str(package_dir / "planner_trace.json"),
+        "rehearsal_log": str(package_dir / "rehearsal_log.json"),
+        "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),
+        "playwright_mcp_execution": _optional_path(package_dir / "playwright_mcp_execution.json"),
+        "tts_metadata": _optional_path(result.artifacts.tts_metadata),
+        "video_render": _optional_path(result.artifacts.video_render_metadata),
+        "skills_metadata": _optional_path(result.artifacts.skills_metadata),
+        "opencode_prompt": str(package_dir / "opencode_prompt.md"),
+        "opencode_metadata": _optional_path(result.artifacts.opencode_metadata),
+        "hyperframes_composition": str(package_dir / "hyperframes" / "index.html"),
+        "hyperframes_manifest": str(package_dir / "hyperframes" / "hyperframes_manifest.json"),
+    }
     return {
         "job_id": result.job_id,
         "status": result.status,
@@ -477,7 +520,14 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
             "skills_metadata": str(result.artifacts.skills_metadata) if result.artifacts.skills_metadata else None,
             "opencode_metadata": str(result.artifacts.opencode_metadata) if result.artifacts.opencode_metadata else None,
         },
+        "supporting_artifacts": supporting_artifacts,
     }
+
+
+def _optional_path(path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    return str(path)
 
 
 def _write_json(path: Path, data: Any) -> None:

@@ -297,9 +297,12 @@ output/jobs/<job_id>/
     tts_metadata.json
   hyperframes/
     index.html
+    hyperframes_manifest.json
 ```
 
 `MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
+
+`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
 
 ## `.env` 설정
 
@@ -428,6 +431,8 @@ Content-Type: application/json
 POST /api/pipeline/run?capture_browser=false
 ```
 
+응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
+
 ## 프로젝트 구조
 
 ```text
@@ -495,7 +500,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-9 passed
+18 passed
 ```
 
 ## 보안 및 운영 주의사항
