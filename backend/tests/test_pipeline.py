@@ -68,6 +68,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
         "skills_metadata",
         "opencode_prompt",
         "opencode_metadata",
+        "audit_log",
         "hyperframes_composition",
         "hyperframes_manifest",
     }
@@ -109,6 +110,10 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     planner_trace = client.get(body["supporting_artifacts"]["planner_trace"])
     assert planner_trace.status_code == 200
     assert planner_trace.json()["planner"] == "local-deterministic"
+    assert body["artifacts"]["audit_log_url"].endswith("/audit_log.jsonl")
+    audit_response = client.get(body["supporting_artifacts"]["audit_log"])
+    assert audit_response.status_code == 200
+    assert "planner" in audit_response.text
 
 
 def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
@@ -118,3 +123,30 @@ def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
     response = client.get("/artifacts/%2e%2e/README.md")
 
     assert response.status_code == 404
+
+
+def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_TTS_PROVIDER", "melotts")
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001", "라인": "A3"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    audit_path = Path(manifest["supporting_artifacts"]["audit_log"])
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+    assert {event["actor"] for event in events}.issuperset(
+        {"planner", "rehearsal", "approval", "capture", "masking", "tts", "render", "opencode", "manifest"}
+    )
+    assert all(event["run_id"] == result.job_id for event in events)
+    assert all("status" in event for event in events)
+    assert manifest["degradations"]
+    assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])

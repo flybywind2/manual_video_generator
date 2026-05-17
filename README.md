@@ -38,6 +38,7 @@
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
 | HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
 | OpenCode | 어댑터 구현 | 생성 패키지 디렉터리에서 `opencode run` 비대화형 agent pass 실행 |
+| 감사/게이트 | 구현 | `AuditLog`, `RiskPolicy`, `ApprovalGate`, degraded reason을 package manifest에 기록 |
 | PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
 | MP4 | 옵션 | HyperFrames 렌더 성공 시 MP4, 기본은 WebM |
 
@@ -281,6 +282,7 @@ output/jobs/<job_id>/
   manual.pdf
   action_plan.json
   approval_log.json
+  audit_log.jsonl
   planner_trace.json
   rehearsal_log.json
   playwright_mcp_calls.json
@@ -302,7 +304,9 @@ output/jobs/<job_id>/
 
 `MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
 
-`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
+`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, audit log, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
+
+`degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
 
 ## `.env` 설정
 
@@ -433,7 +437,7 @@ Content-Type: application/json
 POST /api/pipeline/run?capture_browser=false
 ```
 
-응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
+응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `audit_log`, `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
 
 ## 프로젝트 구조
 
@@ -448,8 +452,10 @@ backend/
       skills.py
       tts.py
       video.py
+    audit.py
     config.py
     main.py
+    policies.py
     pipeline.py
     static/
       app.js
@@ -462,17 +468,22 @@ backend/
     test_adapters.py
     test_home_ui.py
     test_pipeline.py
+    test_policy.py
 docs/
   plans/
     2026-05-17-internal-system-manual-video-agent-design.md
     2026-05-17-internal-system-manual-video-agent-implementation-plan.md
+  reviews/
+    2026-05-17-genspark-architecture-review.md
 ```
 
 핵심 파일:
 
 - [backend/app/main.py](backend/app/main.py): FastAPI route, static artifact serving
 - [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
+- [backend/app/audit.py](backend/app/audit.py): append-only audit log
 - [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
+- [backend/app/policies.py](backend/app/policies.py): 위험 액션 분류와 승인 게이트
 - [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
 - [backend/app/adapters/mcp_client.py](backend/app/adapters/mcp_client.py): MCP stdio JSON-RPC client
 - [backend/app/adapters/opencode.py](backend/app/adapters/opencode.py): OpenCode CLI agent pass
@@ -502,7 +513,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-21 passed
+25 passed
 ```
 
 ## 보안 및 운영 주의사항

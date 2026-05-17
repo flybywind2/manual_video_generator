@@ -17,7 +17,9 @@ from backend.app.adapters.planner import build_plan
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
+from backend.app.audit import AuditLog
 from backend.app.config import load_settings
+from backend.app.policies import ApprovalGate
 
 
 class PipelineInput(BaseModel):
@@ -37,6 +39,7 @@ class ArtifactPaths(BaseModel):
     approval_log: Path
     masking_log: Path
     package_manifest: Path
+    audit_log: Path
     final_frame: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
     tts_metadata: Path | None = None
@@ -81,30 +84,71 @@ def run_pipeline(
     output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     dirs = _make_dirs(output_root / "jobs" / job_id)
+    audit = AuditLog(run_id=job_id, path=dirs.package / "audit_log.jsonl")
 
     plan = build_plan(request, settings, package_dir=dirs.package)
+    audit.record(
+        actor="planner",
+        status=_planner_audit_status(plan),
+        input_data=request.model_dump(),
+        output_data=plan,
+        degrade_reason=_planner_degrade_reason(plan),
+        artifacts=[dirs.package / "planner_trace.json"],
+    )
     rehearsal = rehearse_plan(plan, settings, dirs.package)
+    audit.record(
+        actor="rehearsal",
+        status=_rehearsal_audit_status(rehearsal),
+        input_data=plan,
+        output_data=rehearsal,
+        degrade_reason=_rehearsal_degrade_reason(rehearsal),
+        artifacts=[dirs.package / "playwright_mcp_calls.json"],
+    )
     _write_json(dirs.package / "request.json", request.model_dump())
     action_plan_path = dirs.package / "action_plan.json"
     approval_log_path = dirs.package / "approval_log.json"
+    approval = ApprovalGate(mode="sample-mvp").approve(plan)
     _write_json(action_plan_path, plan)
-    _write_json(
-        approval_log_path,
-        {
-            "status": "auto-approved-for-sample-mvp",
-            "approved_at": datetime.now().isoformat(timespec="seconds"),
-            "danger_actions": [action for action in plan["actions"] if action.get("requires_approval")],
-        },
+    _write_json(approval_log_path, approval)
+    audit.record(
+        actor="approval",
+        status="ok",
+        input_data=plan.get("actions", []),
+        output_data=approval,
+        artifacts=[approval_log_path],
+        details={"danger_actions": len(approval["danger_actions"])},
     )
     _write_json(dirs.package / "rehearsal_log.json", rehearsal)
 
     if capture_browser:
         capture_result = _capture_with_playwright(request, dirs)
+        capture_status = "ok"
+        capture_degrade_reason = ""
     else:
         capture_result = _create_placeholder_captures(request, dirs)
+        capture_status = "degraded"
+        capture_degrade_reason = "browser_capture_disabled"
+    audit.record(
+        actor="capture",
+        status=capture_status,
+        input_data={"capture_browser": capture_browser, "target_url": request.target_url},
+        output_data={"captures": capture_result["masked_names"], "video": str(capture_result["video"])},
+        degrade_reason=capture_degrade_reason,
+        artifacts=[*capture_result["captures"], capture_result["video"]],
+    )
 
     masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, request.input_values)
+    audit.record(actor="masking", status="ok", input_data=capture_result["masked_names"], artifacts=[masking_log_path])
     tts_result = synthesize_tts(plan, settings, dirs.tts)
+    tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
+    audit.record(
+        actor="tts",
+        status="degraded" if tts_degrade_reason else "ok",
+        input_data=plan.get("steps", []),
+        output_data=tts_result.entries,
+        degrade_reason=tts_degrade_reason,
+        artifacts=[tts_result.metadata_path, *tts_result.audio_paths],
+    )
     html_path = _render_preview(request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
     markdown_path = _render_markdown(request, plan, dirs, capture_result["masked_names"])
     pdf_path = _render_pdf_placeholder(request, dirs)
@@ -118,7 +162,23 @@ def run_pipeline(
         fallback_video=video_path,
         settings=settings,
     )
+    render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
+    audit.record(
+        actor="render",
+        status="degraded" if render_degrade_reason else "ok",
+        input_data={"renderer": settings.video_renderer},
+        output_data={"video": str(video_render.video_path)},
+        degrade_reason=render_degrade_reason,
+        artifacts=[video_render.metadata_path, video_render.video_path, video_render.composition_dir / "index.html"],
+    )
     opencode_result = run_opencode_agent(plan=plan, package_dir=dirs.package, settings=settings)
+    audit.record(
+        actor="opencode",
+        status=opencode_result.status,
+        input_data={"enabled": settings.enable_opencode},
+        output_data={"metadata_path": str(opencode_result.metadata_path)},
+        artifacts=[opencode_result.prompt_path, opencode_result.metadata_path],
+    )
 
     manifest_path = dirs.package / "package_manifest.json"
     artifacts = ArtifactPaths(
@@ -130,6 +190,7 @@ def run_pipeline(
         approval_log=approval_log_path,
         masking_log=masking_log_path,
         package_manifest=manifest_path,
+        audit_log=audit.path,
         final_frame=capture_result.get("final_frame"),
         tts_audio=tts_result.audio_paths,
         tts_metadata=tts_result.metadata_path,
@@ -145,7 +206,8 @@ def run_pipeline(
         rehearsal=rehearsal,
         artifacts=artifacts,
     )
-    _write_json(manifest_path, _manifest(result))
+    audit.record(actor="manifest", status="ok", artifacts=[manifest_path])
+    _write_json(manifest_path, _manifest(result, degradations=audit.degradations()))
     return result
 
 
@@ -159,6 +221,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
         "package_dir": str(result.package_dir),
         "plan": result.plan,
         "rehearsal": result.rehearsal,
+        "degradations": _read_manifest_degradations(result.artifacts.package_manifest),
         "supporting_artifacts": _supporting_artifact_urls(result, rel_base),
         "artifacts": {
             "html_preview_url": f"{rel_base}/preview.html",
@@ -169,6 +232,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "approval_log_url": f"{rel_base}/approval_log.json",
             "masking_log_url": f"{rel_base}/masking_log.json",
             "package_manifest_url": f"{rel_base}/package_manifest.json",
+            "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "request_url": f"{rel_base}/request.json",
             "planner_trace_url": f"{rel_base}/planner_trace.json",
             "rehearsal_log_url": f"{rel_base}/rehearsal_log.json",
@@ -194,6 +258,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "rehearsal_log": f"{rel_base}/rehearsal_log.json",
         "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
         "playwright_mcp_execution": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
+        "audit_log": f"{rel_base}/audit_log.jsonl",
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
         "video_render": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
         "skills_metadata": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
@@ -484,7 +549,7 @@ def _screenshot(page: Any, directory: Path, name: str) -> Path:
     return path
 
 
-def _manifest(result: PipelineResult) -> dict[str, Any]:
+def _manifest(result: PipelineResult, *, degradations: list[dict[str, str]] | None = None) -> dict[str, Any]:
     package_dir = result.package_dir
     supporting_artifacts = {
         "request": str(package_dir / "request.json"),
@@ -492,6 +557,7 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
         "rehearsal_log": str(package_dir / "rehearsal_log.json"),
         "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),
         "playwright_mcp_execution": _optional_path(package_dir / "playwright_mcp_execution.json"),
+        "audit_log": str(result.artifacts.audit_log),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
         "video_render": _optional_path(result.artifacts.video_render_metadata),
         "skills_metadata": _optional_path(result.artifacts.skills_metadata),
@@ -504,6 +570,7 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
         "job_id": result.job_id,
         "status": result.status,
         "package_dir": str(result.package_dir),
+        "degradations": degradations or [],
         "artifacts": {
             "html_preview": str(result.artifacts.html_preview),
             "markdown_manual": str(result.artifacts.markdown_manual),
@@ -513,6 +580,7 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
             "approval_log": str(result.artifacts.approval_log),
             "masking_log": str(result.artifacts.masking_log),
             "package_manifest": str(result.artifacts.package_manifest),
+            "audit_log": str(result.artifacts.audit_log),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
@@ -522,6 +590,53 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
         },
         "supporting_artifacts": supporting_artifacts,
     }
+
+
+def _planner_audit_status(plan: dict[str, Any]) -> str:
+    return "degraded" if plan.get("planner_error") else "ok"
+
+
+def _planner_degrade_reason(plan: dict[str, Any]) -> str:
+    return "planner_fallback" if plan.get("planner_error") else ""
+
+
+def _rehearsal_audit_status(rehearsal: dict[str, Any]) -> str:
+    status = str(rehearsal.get("status", ""))
+    if status.endswith("failed"):
+        return "degraded"
+    if status in {"skipped"}:
+        return "skipped"
+    return "ok"
+
+
+def _rehearsal_degrade_reason(rehearsal: dict[str, Any]) -> str:
+    status = str(rehearsal.get("status", ""))
+    if status.endswith("failed"):
+        return "playwright_mcp_live_failed"
+    return ""
+
+
+def _tts_degrade_reason(entries: list[dict[str, Any]]) -> str:
+    if any(entry.get("provider") == "silent-fallback" for entry in entries):
+        return "tts_silent_fallback"
+    return ""
+
+
+def _render_degrade_reason(used_fallback: bool, renderer: str) -> str:
+    if used_fallback and renderer.lower() == "hyperframes":
+        return "hyperframes_fallback_video"
+    return ""
+
+
+def _read_manifest_degradations(manifest_path: Path) -> list[dict[str, str]]:
+    if not manifest_path.exists():
+        return []
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    degradations = data.get("degradations", [])
+    return degradations if isinstance(degradations, list) else []
 
 
 def _optional_path(path: Path | None) -> str | None:
