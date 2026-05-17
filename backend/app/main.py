@@ -5,10 +5,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import load_settings
-from backend.app.pipeline import PipelineInput, artifact_response, default_output_dir, run_pipeline
+from backend.app.pipeline import PipelineInput, artifact_response, run_pipeline
 
 APP_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = default_output_dir()
+OUTPUT_DIR = Path(load_settings().output_dir).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Manual Video Agent")

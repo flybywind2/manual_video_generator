@@ -110,7 +110,19 @@ class AppSettings:
     rag: RagSettings
     reranker: RerankerSettings
     output_dir: str
+    enable_internal_planner: bool
+    enable_rag_context: bool
+    enable_reranker: bool
+    playwright_mcp_mode: str
+    playwright_mcp_command: str
     tts_provider: str
+    tts_device: str
+    tts_language: str
+    tts_speaker: str
+    tts_speed: float
+    video_renderer: str
+    hyperframes_command: str
+    request_timeout_seconds: float
 
     def safe_status(self) -> dict[str, object]:
         return {
@@ -118,8 +130,22 @@ class AppSettings:
             "vlm": self.vlm.safe_status(),
             "rag": self.rag.safe_status(),
             "reranker": self.reranker.safe_status(),
-            "output_dir": self.output_dir,
-            "tts_provider": self.tts_provider,
+            "runtime": {
+                "output_dir": self.output_dir,
+                "enable_internal_planner": self.enable_internal_planner,
+                "enable_rag_context": self.enable_rag_context,
+                "enable_reranker": self.enable_reranker,
+                "playwright_mcp_mode": self.playwright_mcp_mode,
+                "playwright_mcp_command_set": bool(self.playwright_mcp_command),
+                "tts_provider": self.tts_provider,
+                "tts_device": self.tts_device,
+                "tts_language": self.tts_language,
+                "tts_speaker": self.tts_speaker,
+                "tts_speed": self.tts_speed,
+                "video_renderer": self.video_renderer,
+                "hyperframes_command_set": bool(self.hyperframes_command),
+                "request_timeout_seconds": self.request_timeout_seconds,
+            },
         }
 
 
@@ -176,7 +202,19 @@ def load_settings(
         rag=rag,
         reranker=reranker,
         output_dir=_get(env, "OUTPUT_DIR", "output"),
+        enable_internal_planner=_get_bool(env, "ENABLE_INTERNAL_PLANNER", False),
+        enable_rag_context=_get_bool(env, "ENABLE_RAG_CONTEXT", False),
+        enable_reranker=_get_bool(env, "ENABLE_RERANKER", False),
+        playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),
+        playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest"),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
+        tts_device=_get(env, "TTS_DEVICE", "cpu"),
+        tts_language=_get(env, "TTS_LANGUAGE", "KR"),
+        tts_speaker=_get(env, "TTS_SPEAKER", "KR"),
+        tts_speed=_get_float(env, "TTS_SPEED", 1.0),
+        video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
+        hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx hyperframes render"),
+        request_timeout_seconds=_get_float(env, "REQUEST_TIMEOUT_SECONDS", 30.0),
     )
 
 
@@ -199,6 +237,23 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def _get(env: Mapping[str, str], suffix: str, default: str = "") -> str:
     return env.get(f"{APP_PREFIX}{suffix}", default).strip()
+
+
+def _get_bool(env: Mapping[str, str], suffix: str, default: bool) -> bool:
+    value = _get(env, suffix)
+    if not value:
+        return default
+    return value.lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:
+    value = _get(env, suffix)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _split_csv(value: str) -> list[str]:

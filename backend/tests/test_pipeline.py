@@ -28,8 +28,12 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert result.artifacts.masking_log.exists()
     assert result.artifacts.tts_audio
     assert result.artifacts.package_manifest.exists()
+    assert (result.package_dir / "tts" / "tts_metadata.json").exists()
+    assert (result.package_dir / "hyperframes" / "index.html").exists()
+    assert (result.package_dir / "playwright_mcp_calls.json").exists()
     manifest = result.artifacts.package_manifest.read_text(encoding="utf-8")
     assert '"tts_audio": [' in manifest
+    assert '"video_render"' in manifest
     assert "config_status" in result.plan
 
 

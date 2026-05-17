@@ -2,7 +2,7 @@
 
 사내 시스템 사용 시나리오를 입력하면 로컬 PC에서 사용 매뉴얼 영상과 문서 패키지를 생성하는 MVP입니다.
 
-현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 이후 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, MeloTTS, HyperFrames를 실제 어댑터로 교체해 운영 가능한 파이프라인으로 확장합니다.
+현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, MeloTTS, HyperFrames는 `.env`로 켜고 끌 수 있는 어댑터 경계까지 포함합니다.
 
 ## 무엇을 만드는 시스템인가
 
@@ -14,7 +14,7 @@
 - PDF 매뉴얼 placeholder
 - 실행 action plan JSON
 - 승인/리허설/마스킹 로그
-- TTS 오디오 placeholder
+- TTS 오디오
 - 산출물 manifest
 
 완성된 영상은 이 시스템 안에서 장기 보관하지 않습니다. 생성된 패키지를 관리자가 확인한 뒤 별도 저장소나 게시 시스템에서 관리하는 구조입니다.
@@ -27,17 +27,18 @@
 | 홈 화면 UI | 구현 | `D:\Python\appendix\AI Center DESIGN.md`의 AI Center inspired 디자인 적용 |
 | 샘플 사내 시스템 | 구현 | `/sample`에서 테스트용 MES LOT 조회 화면 제공 |
 | 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
-| Action plan | 구현 | 현재는 deterministic planner |
+| Action plan | 구현 | 기본은 deterministic planner, 옵션으로 내부 LLM planner 호출 |
 | 브라우저 캡처 | 구현 | Playwright로 샘플 화면 캡처 및 WebM 녹화 |
 | 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
 | `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
 | 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
-| `playwright-mcp` | placeholder | 실제 MCP 서버 호출 전 compatible rehearsal log 사용 |
-| 내부 LLM/RAG/VLM/Reranker | adapter 경계 | `.env` 설정과 metadata만 연결된 상태 |
-| MeloTTS | placeholder | 실제 한국어 음성 대신 silent wav 생성 |
-| HyperFrames | placeholder | 실제 renderer 대신 HTML preview와 Playwright WebM 사용 |
+| `playwright-mcp` | 어댑터 구현 | action plan을 MCP tool call manifest로 변환 |
+| 내부 LLM/RAG/Reranker | 어댑터 구현 | `.env`로 켜면 RAG/Reranker context와 LLM JSON planner 호출 |
+| VLM | 설정 준비 | `.env`와 상태 API만 준비, 화면 검수 호출은 다음 단계 |
+| MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
+| HyperFrames | 어댑터 구현 | composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
 | PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
-| MP4 | 미구현 | 현재 기본 영상 산출물은 WebM |
+| MP4 | 옵션 | HyperFrames 렌더 성공 시 MP4, 기본은 WebM |
 
 ## 파이프라인
 
@@ -53,7 +54,7 @@ flowchart LR
     G --> H["WebM / Markdown / PDF / JSON 패키지"]
 ```
 
-현재 `B`, `C`, `F`, `G` 일부는 MVP용 구현입니다. 실제 운영 버전에서는 `B`는 내부 LLM/RAG/Reranker, `C`는 `playwright-mcp`, `F`는 MeloTTS, `G`는 HyperFrames 중심으로 교체합니다.
+현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER` 등을 켜면 내부 LLM/RAG/Reranker, MeloTTS, HyperFrames 어댑터를 사용합니다.
 
 ## 환경 준비
 
@@ -237,11 +238,18 @@ output/jobs/<job_id>/
   manual.pdf
   action_plan.json
   approval_log.json
+  planner_trace.json
+  rehearsal_log.json
+  playwright_mcp_calls.json
   masking_log.json
+  video_render.json
   package_manifest.json
   captures/
   masked/
   tts/
+    tts_metadata.json
+  hyperframes/
+    index.html
 ```
 
 `MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
@@ -266,6 +274,8 @@ MANUAL_AGENT_USER_ID
 MANUAL_AGENT_USER_TYPE
 MANUAL_AGENT_LLM_BASE_URL
 MANUAL_AGENT_LLM_MODEL
+MANUAL_AGENT_ENABLE_INTERNAL_PLANNER
+MANUAL_AGENT_REQUEST_TIMEOUT_SECONDS
 MANUAL_AGENT_VLM_BASE_URL
 MANUAL_AGENT_VLM_MODEL
 MANUAL_AGENT_RAG_INSERT_URL
@@ -274,11 +284,34 @@ MANUAL_AGENT_RAG_DELETE_URL
 MANUAL_AGENT_RAG_API_KEY
 MANUAL_AGENT_RAG_INDEX_NAME
 MANUAL_AGENT_RAG_PERMISSION_GROUPS
+MANUAL_AGENT_ENABLE_RAG_CONTEXT
 MANUAL_AGENT_RERANKER_URL
 MANUAL_AGENT_RERANKER_MODEL
+MANUAL_AGENT_ENABLE_RERANKER
+MANUAL_AGENT_PLAYWRIGHT_MCP_MODE
+MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND
 MANUAL_AGENT_OUTPUT_DIR
 MANUAL_AGENT_TTS_PROVIDER
+MANUAL_AGENT_TTS_DEVICE
+MANUAL_AGENT_TTS_LANGUAGE
+MANUAL_AGENT_TTS_SPEAKER
+MANUAL_AGENT_TTS_SPEED
+MANUAL_AGENT_VIDEO_RENDERER
+MANUAL_AGENT_HYPERFRAMES_COMMAND
 ```
+
+운영 어댑터를 켜는 예시:
+
+```env
+MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
+MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
+MANUAL_AGENT_ENABLE_RERANKER=true
+MANUAL_AGENT_TTS_PROVIDER=melotts
+MANUAL_AGENT_TTS_DEVICE=cuda:0
+MANUAL_AGENT_VIDEO_RENDERER=hyperframes
+```
+
+VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
 
 설정 변경 후 앱을 재시작합니다.
 
@@ -343,6 +376,11 @@ POST /api/pipeline/run?capture_browser=false
 ```text
 backend/
   app/
+    adapters/
+      planner.py
+      rehearsal.py
+      tts.py
+      video.py
     config.py
     main.py
     pipeline.py
@@ -354,6 +392,7 @@ backend/
       sample.html
   tests/
     test_config.py
+    test_adapters.py
     test_home_ui.py
     test_pipeline.py
 docs/
@@ -367,6 +406,10 @@ docs/
 - [backend/app/main.py](backend/app/main.py): FastAPI route, static artifact serving
 - [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
 - [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
+- [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
+- [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP tool call manifest
+- [backend/app/adapters/tts.py](backend/app/adapters/tts.py): MeloTTS/silent fallback
+- [backend/app/adapters/video.py](backend/app/adapters/video.py): HyperFrames composition/render fallback
 - [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
 - [backend/app/static/styles.css](backend/app/static/styles.css): AI Center inspired 스타일
 
@@ -389,7 +432,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-6 passed
+9 passed
 ```
 
 ## 보안 및 운영 주의사항
@@ -403,13 +446,13 @@ python -m pytest -q --basetemp .pytest_tmp
 
 ## 다음 구현 순서
 
-1. 내부 LLM planner 실연동
-2. RAG/Reranker 기반 업무 절차 보강
-3. `playwright-mcp` 리허설 어댑터 실연동
-4. Action JSON 검수 및 편집 UI
-5. MeloTTS 기반 한국어 음성 생성
-6. HyperFrames 기반 HTML-to-video 렌더링
-7. MP4 변환 및 `ffmpeg` 검증
+1. VLM 기반 화면 검수 어댑터
+2. `playwright-mcp` live stdio session 검증
+3. Action JSON 검수 및 편집 UI
+4. 시스템별 selector 학습/고정
+5. HyperFrames 렌더 템플릿 고도화
+6. MP4 변환 및 `ffmpeg` 검증
+7. PDF 정식 렌더러
 8. 시스템별 마스킹 룰과 검수 UI
 9. 운영계 위험 액션 승인 게이트
 

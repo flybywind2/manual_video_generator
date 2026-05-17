@@ -92,13 +92,15 @@ function renderArtifacts(result) {
   artifactStatus.textContent = `작업 ${result.job_id} 패키지가 생성되었습니다.`;
   const links = [
     ["HTML 미리보기", result.artifacts.html_preview_url],
-    ["영상 WebM", result.artifacts.video_url],
+    ["영상", result.artifacts.video_url],
     ["Markdown", result.artifacts.markdown_manual_url],
     ["PDF", result.artifacts.pdf_manual_url],
     ["Action JSON", result.artifacts.action_plan_url],
     ["마스킹 로그", result.artifacts.masking_log_url],
+    ["TTS 메타데이터", result.artifacts.tts_metadata_url],
+    ["렌더링 메타데이터", result.artifacts.video_render_metadata_url],
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
-  ];
+  ].filter(([, url]) => Boolean(url));
   artifactLinks.innerHTML = links
     .map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`)
     .join("");
@@ -115,7 +117,10 @@ async function loadConfigStatus() {
       ["VLM", status.vlm.configured, status.vlm.model || "QWEN3-VL"],
       ["RAG", status.rag.configured, status.rag.index_name || "index 미설정"],
       ["Reranker", status.reranker.configured, status.reranker.model || "model 미설정"],
-      ["TTS", true, status.tts_provider],
+      ["Planner", status.runtime.enable_internal_planner, status.runtime.enable_internal_planner ? "internal LLM" : "local"],
+      ["TTS", true, status.runtime.tts_provider],
+      ["Renderer", true, status.runtime.video_renderer],
+      ["MCP", status.runtime.playwright_mcp_mode !== "off", status.runtime.playwright_mcp_mode],
     ];
     configGrid.innerHTML = rows
       .map(([label, configured, detail]) => {

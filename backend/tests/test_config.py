@@ -25,6 +25,16 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_RAG_PERMISSION_GROUPS=rag-public,manual-private",
                 "MANUAL_AGENT_RERANKER_URL=http://api.net/reranker/v2/rerank",
                 "MANUAL_AGENT_RERANKER_MODEL=bge-reranker-v2-m3-ko",
+                "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true",
+                "MANUAL_AGENT_ENABLE_RAG_CONTEXT=true",
+                "MANUAL_AGENT_ENABLE_RERANKER=true",
+                "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
+                "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest",
+                "MANUAL_AGENT_TTS_PROVIDER=melotts",
+                "MANUAL_AGENT_TTS_DEVICE=cpu",
+                "MANUAL_AGENT_TTS_SPEED=1.1",
+                "MANUAL_AGENT_VIDEO_RENDERER=hyperframes",
+                "MANUAL_AGENT_HYPERFRAMES_COMMAND=npx hyperframes render",
             ]
         ),
         encoding="utf-8",
@@ -37,6 +47,16 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.vlm.base_url == "http://api.net/vl/v1"
     assert settings.rag.permission_groups == ["rag-public", "manual-private"]
     assert settings.reranker.model == "bge-reranker-v2-m3-ko"
+    assert settings.enable_internal_planner is True
+    assert settings.enable_rag_context is True
+    assert settings.enable_reranker is True
+    assert settings.playwright_mcp_mode == "manifest"
+    assert settings.playwright_mcp_command == "npx @playwright/mcp@latest"
+    assert settings.tts_provider == "melotts"
+    assert settings.tts_device == "cpu"
+    assert settings.tts_speed == 1.1
+    assert settings.video_renderer == "hyperframes"
+    assert settings.hyperframes_command == "npx hyperframes render"
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
     assert headers["x-dep-ticket"] == "credential:TICKET-123"
@@ -70,6 +90,7 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert "credential:SECRET" not in rendered
     assert status["llm"]["configured"] is True
     assert status["llm"]["base_url_set"] is True
+    assert "enable_internal_planner" in status["runtime"]
 
 
 def test_config_status_api_does_not_expose_secret_values(monkeypatch):

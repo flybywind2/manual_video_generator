@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import uuid
-import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +12,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from backend.app.adapters.planner import build_plan
+from backend.app.adapters.rehearsal import rehearse_plan
+from backend.app.adapters.tts import synthesize_tts
+from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
 
 
@@ -35,6 +38,8 @@ class ArtifactPaths(BaseModel):
     package_manifest: Path
     final_frame: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
+    tts_metadata: Path | None = None
+    video_render_metadata: Path | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -69,13 +74,13 @@ def run_pipeline(
     base_dir: Path | None = None,
     capture_browser: bool = True,
 ) -> PipelineResult:
-    output_root = Path(base_dir) if base_dir else default_output_dir()
     settings = load_settings()
+    output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     dirs = _make_dirs(output_root / "jobs" / job_id)
 
-    plan = _build_plan(request, settings.safe_status())
-    rehearsal = _rehearse(plan)
+    plan = build_plan(request, settings, package_dir=dirs.package)
+    rehearsal = rehearse_plan(plan, settings, dirs.package)
     _write_json(dirs.package / "request.json", request.model_dump())
     action_plan_path = dirs.package / "action_plan.json"
     approval_log_path = dirs.package / "approval_log.json"
@@ -96,26 +101,35 @@ def run_pipeline(
         capture_result = _create_placeholder_captures(request, dirs)
 
     masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, request.input_values)
-    tts_audio = _synthesize_tts(plan, dirs.tts)
-    html_path = _render_preview(request, plan, dirs, capture_result["masked_names"], tts_audio)
+    tts_result = synthesize_tts(plan, settings, dirs.tts)
+    html_path = _render_preview(request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
     markdown_path = _render_markdown(request, plan, dirs, capture_result["masked_names"])
     pdf_path = _render_pdf_placeholder(request, dirs)
     video_path = capture_result["video"]
     if not video_path.exists():
         video_path = _render_placeholder_video(dirs.package)
+    video_render = render_final_video(
+        plan=plan,
+        package_dir=dirs.package,
+        preview_html=html_path,
+        fallback_video=video_path,
+        settings=settings,
+    )
 
     manifest_path = dirs.package / "package_manifest.json"
     artifacts = ArtifactPaths(
         html_preview=html_path,
         markdown_manual=markdown_path,
         pdf_manual=pdf_path,
-        video=video_path,
+        video=video_render.video_path,
         action_plan=action_plan_path,
         approval_log=approval_log_path,
         masking_log=masking_log_path,
         package_manifest=manifest_path,
         final_frame=capture_result.get("final_frame"),
-        tts_audio=tts_audio,
+        tts_audio=tts_result.audio_paths,
+        tts_metadata=tts_result.metadata_path,
+        video_render_metadata=video_render.metadata_path,
     )
     result = PipelineResult(
         job_id=job_id,
@@ -131,6 +145,7 @@ def run_pipeline(
 
 def artifact_response(result: PipelineResult) -> dict[str, Any]:
     rel_base = f"/artifacts/jobs/{result.job_id}"
+    video_name = result.artifacts.video.name
     return {
         "job_id": result.job_id,
         "status": result.status,
@@ -141,12 +156,14 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "html_preview_url": f"{rel_base}/preview.html",
             "markdown_manual_url": f"{rel_base}/manual.md",
             "pdf_manual_url": f"{rel_base}/manual.pdf",
-            "video_url": f"{rel_base}/manual_video_agent_usage.webm",
+            "video_url": f"{rel_base}/{video_name}",
             "action_plan_url": f"{rel_base}/action_plan.json",
             "approval_log_url": f"{rel_base}/approval_log.json",
             "masking_log_url": f"{rel_base}/masking_log.json",
             "package_manifest_url": f"{rel_base}/package_manifest.json",
             "final_frame_url": f"{rel_base}/final_frame.png" if result.artifacts.final_frame else None,
+            "tts_metadata_url": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
+            "video_render_metadata_url": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
         },
     }
 
@@ -159,70 +176,6 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
     for path in (package_dir, captures, masked, tts, raw_video):
         path.mkdir(parents=True, exist_ok=True)
     return PipelineDirs(package=package_dir, captures=captures, masked=masked, tts=tts, raw_video=raw_video)
-
-
-def _build_plan(request: PipelineInput, config_status: dict[str, object] | None = None) -> dict[str, Any]:
-    lot_value = request.input_values.get("LOT") or request.input_values.get("lot") or "LOT-001"
-    return {
-        "source": "appendix-env-internal-planner-ready"
-        if config_status and config_status["llm"]["configured"]
-        else "local-deterministic-planner",
-        "config_status": config_status or {},
-        "steps": [
-            {
-                "id": "step_intro",
-                "title": "요청 확인",
-                "caption": "입력된 요청과 대상 시스템 정보를 확인합니다.",
-                "narration": "입력된 요청과 대상 시스템 정보를 확인합니다.",
-            },
-            {
-                "id": "step_search",
-                "title": "LOT 검색",
-                "caption": f"LOT 값 {lot_value}를 입력하고 조회합니다.",
-                "narration": f"LOT 값 {lot_value}를 입력하고 조회합니다.",
-            },
-            {
-                "id": "step_detail",
-                "title": "상세 화면 확인",
-                "caption": "상세 화면에서 완료 조건을 확인합니다.",
-                "narration": "상세 화면에서 완료 조건을 확인합니다.",
-            },
-            {
-                "id": "step_export",
-                "title": "산출물 생성",
-                "caption": "캡처, 마스킹, 내레이션, 문서와 영상을 패키징합니다.",
-                "narration": "캡처, 마스킹, 내레이션, 문서와 영상을 패키징합니다.",
-            },
-        ],
-        "actions": [
-            {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_intro"},
-            {"id": "a2", "type": "fill", "selector": "[name='lot']", "value": lot_value, "step_id": "step_search"},
-            {"id": "a3", "type": "click", "selector": "[data-action='search']", "step_id": "step_search"},
-            {"id": "a4", "type": "capture_step", "step_id": "step_search"},
-            {"id": "a5", "type": "click", "selector": "[data-action='detail']", "step_id": "step_detail"},
-            {"id": "a6", "type": "capture_step", "step_id": "step_detail"},
-            {
-                "id": "a7",
-                "type": "danger_approval",
-                "label": "렌더링 확정",
-                "requires_approval": True,
-                "step_id": "step_export",
-                "danger": {"is_danger": True, "reasons": ["keyword:확정"]},
-            },
-        ],
-    }
-
-
-def _rehearse(plan: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "status": "passed",
-        "adapter": "playwright-mcp-compatible-fake",
-        "observations": [
-            "계획 JSON 구조가 유효합니다.",
-            "샘플 시스템에서 검색 필드, 조회 버튼, 상세 버튼을 사용할 수 있습니다.",
-        ],
-        "checked_actions": [action["id"] for action in plan["actions"]],
-    }
 
 
 def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs) -> dict[str, Any]:
@@ -459,16 +412,6 @@ def _render_placeholder_video(package_dir: Path) -> Path:
     return path
 
 
-def _write_silent_wav(path: Path, duration_seconds: float) -> None:
-    sample_rate = 16000
-    frames = int(sample_rate * duration_seconds)
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(b"\x00\x00" * frames)
-
-
 def _inject_recording_helpers(page: Any) -> None:
     page.add_style_tag(
         content="""
@@ -521,6 +464,8 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
             "package_manifest": str(result.artifacts.package_manifest),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
+            "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
+            "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,
         },
     }
 
