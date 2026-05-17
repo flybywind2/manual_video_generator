@@ -260,6 +260,60 @@ def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_
     assert execution["results"]
 
 
+def test_playwright_mcp_manifest_redacts_sensitive_fill_values(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
+    plan = {
+        "steps": [{"id": "step_login", "title": "로그인", "caption": "로그인", "narration": "로그인"}],
+        "actions": [
+            {"id": "a1", "type": "fill", "selector": "[name='password']", "value": "plain-password"},
+            {"id": "a2", "type": "fill", "selector": "[name='lot']", "value": "LOT-001"},
+        ],
+    }
+
+    result = rehearse_plan(plan, settings, tmp_path)
+    calls_text = (tmp_path / "playwright_mcp_calls.json").read_text(encoding="utf-8")
+
+    assert "plain-password" not in calls_text
+    assert "plain-password" not in json.dumps(result, ensure_ascii=False)
+    assert result["candidate_calls"][0]["arguments"]["text"] == "<redacted>"
+    assert result["candidate_calls"][1]["arguments"]["text"] == "LOT-001"
+
+
+def test_playwright_mcp_live_execution_log_redacts_sensitive_fill_values(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
+    plan = {
+        "steps": [{"id": "step_login", "title": "로그인", "caption": "로그인", "narration": "로그인"}],
+        "actions": [
+            {"id": "a1", "type": "fill", "selector": "[name='password']", "value": "plain-password"},
+        ],
+    }
+    tool_arguments = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_run_code"}
+
+        def call_tool(self, name, arguments):
+            tool_arguments.append(arguments)
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+    rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
+    execution_text = (tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8")
+
+    assert "plain-password" in json.dumps(tool_arguments, ensure_ascii=False)
+    assert "plain-password" not in execution_text
+    assert "<redacted>" in execution_text
+
+
 def test_playwright_mcp_live_mode_reports_tool_errors(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
     plan = {

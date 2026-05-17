@@ -21,6 +21,7 @@ from backend.app.audit import AuditLog
 from backend.app.config import load_settings
 from backend.app.env_bootstrap import apply_runtime_environment, runtime_fingerprint
 from backend.app.policies import ApprovalGate
+from backend.app.redaction import redact_sensitive
 
 
 class PipelineInput(BaseModel):
@@ -89,40 +90,43 @@ def run_pipeline(
     audit = AuditLog(run_id=job_id, path=dirs.package / "audit_log.jsonl")
     environment = runtime_fingerprint()
     audit.record(actor="environment", status="ok", output_data=environment)
+    request_payload = redact_sensitive(request.model_dump())
 
     plan = build_plan(request, settings, package_dir=dirs.package)
+    artifact_plan = redact_sensitive(plan)
     audit.record(
         actor="planner",
         status=_planner_audit_status(plan),
-        input_data=request.model_dump(),
-        output_data=plan,
+        input_data=request_payload,
+        output_data=artifact_plan,
         degrade_reason=_planner_degrade_reason(plan),
         artifacts=[dirs.package / "planner_trace.json"],
     )
     rehearsal = rehearse_plan(plan, settings, dirs.package)
+    artifact_rehearsal = redact_sensitive(rehearsal)
     audit.record(
         actor="rehearsal",
         status=_rehearsal_audit_status(rehearsal),
-        input_data=plan,
-        output_data=rehearsal,
+        input_data=artifact_plan,
+        output_data=artifact_rehearsal,
         degrade_reason=_rehearsal_degrade_reason(rehearsal),
         artifacts=[dirs.package / "playwright_mcp_calls.json"],
     )
-    _write_json(dirs.package / "request.json", request.model_dump())
+    _write_json(dirs.package / "request.json", request_payload)
     action_plan_path = dirs.package / "action_plan.json"
     approval_log_path = dirs.package / "approval_log.json"
     approval = ApprovalGate(mode="sample-mvp").approve(plan)
-    _write_json(action_plan_path, plan)
+    _write_json(action_plan_path, artifact_plan)
     _write_json(approval_log_path, approval)
     audit.record(
         actor="approval",
         status="ok",
-        input_data=plan.get("actions", []),
+        input_data=artifact_plan.get("actions", []),
         output_data=approval,
         artifacts=[approval_log_path],
         details={"danger_actions": len(approval["danger_actions"])},
     )
-    _write_json(dirs.package / "rehearsal_log.json", rehearsal)
+    _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
 
     if capture_browser:
         capture_result = _capture_with_playwright(request, dirs)
@@ -206,8 +210,8 @@ def run_pipeline(
         job_id=job_id,
         status="completed",
         package_dir=dirs.package,
-        plan=plan,
-        rehearsal=rehearsal,
+        plan=artifact_plan,
+        rehearsal=artifact_rehearsal,
         artifacts=artifacts,
     )
     audit.record(actor="manifest", status="ok", artifacts=[manifest_path])

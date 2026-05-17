@@ -174,3 +174,32 @@ def test_package_manifest_environment_fingerprint_does_not_include_secret_values
     assert "super-secret-key" not in manifest_text
     assert "credential:SECRET" not in manifest_text
     assert "do-not-echo" not in manifest_text
+
+
+def test_generated_request_artifact_redacts_sensitive_input_values(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={
+                "LOT": "LOT-001",
+                "password": "plain-password",
+                "otp_code": "123456",
+                "api_key": "sk-secret",
+            },
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    request_text = (result.package_dir / "request.json").read_text(encoding="utf-8")
+    audit_text = result.artifacts.audit_log.read_text(encoding="utf-8")
+
+    assert "LOT-001" in request_text
+    assert "plain-password" not in request_text
+    assert "123456" not in request_text
+    assert "sk-secret" not in request_text
+    assert "plain-password" not in audit_text
+    assert "sk-secret" not in audit_text

@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from backend.app.adapters.mcp_client import StdioMcpClient
 from backend.app.config import AppSettings
+from backend.app.redaction import redact_sensitive
 
 
 McpClientFactory = Callable[..., Any]
@@ -20,15 +21,16 @@ def rehearse_plan(
 ) -> dict[str, Any]:
     calls = [_action_to_mcp_call(action) for action in plan.get("actions", [])]
     calls = [call for call in calls if call is not None]
+    artifact_calls = redact_sensitive(calls)
     calls_path = package_dir / "playwright_mcp_calls.json"
-    calls_path.write_text(json.dumps({"calls": calls}, ensure_ascii=False, indent=2), encoding="utf-8")
+    calls_path.write_text(json.dumps({"calls": artifact_calls}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     mode = settings.playwright_mcp_mode.lower()
     if mode in {"off", "disabled", "none"}:
         status = "skipped"
         adapter = "playwright-mcp-disabled"
     elif mode == "live":
-        return _run_live_mcp(plan, settings, package_dir, calls, calls_path, mcp_client_factory)
+        return _run_live_mcp(plan, settings, package_dir, calls, artifact_calls, calls_path, mcp_client_factory)
     else:
         status = "manifest-created"
         adapter = "playwright-mcp-manifest"
@@ -44,7 +46,7 @@ def rehearse_plan(
             "실제 MCP 세션에서는 browser_snapshot으로 ref를 확인한 뒤 click/type call을 확정해야 합니다.",
         ],
         "checked_actions": [action["id"] for action in plan.get("actions", [])],
-        "candidate_calls": calls,
+        "candidate_calls": artifact_calls,
     }
 
 
@@ -53,6 +55,7 @@ def _run_live_mcp(
     settings: AppSettings,
     package_dir: Path,
     calls: list[dict[str, Any]],
+    artifact_calls: list[dict[str, Any]],
     calls_path: Path,
     mcp_client_factory: McpClientFactory | None,
 ) -> dict[str, Any]:
@@ -76,10 +79,17 @@ def _run_live_mcp(
                 if live_call is None:
                     continue
                 result = client.call_tool(live_call["tool"], live_call["arguments"])
+                artifact_action = redact_sensitive(action)
+                artifact_live_call = _action_to_live_mcp_call(artifact_action, available_tools) or redact_sensitive(live_call)
                 if isinstance(result, dict) and result.get("isError"):
                     execution["had_tool_errors"] = True
                 execution["results"].append(
-                    {"action_id": action.get("id"), "tool": live_call["tool"], "arguments": live_call["arguments"], "result": result}
+                    {
+                        "action_id": action.get("id"),
+                        "tool": artifact_live_call["tool"],
+                        "arguments": artifact_live_call["arguments"],
+                        "result": result,
+                    }
                 )
             execution["status"] = "live-failed" if execution.get("had_tool_errors") else "live-completed"
     except Exception as exc:  # noqa: BLE001 - direct Playwright capture remains the fallback path.
@@ -97,7 +107,7 @@ def _run_live_mcp(
             "execution_path": str(execution_path),
             "observations": ["Playwright MCP live session이 action plan을 실행했습니다."],
             "checked_actions": [action["id"] for action in plan.get("actions", [])],
-            "candidate_calls": calls,
+            "candidate_calls": artifact_calls,
         }
     return {
         "status": "live-failed",
@@ -111,7 +121,7 @@ def _run_live_mcp(
             "파이프라인은 Python Playwright 캡처 또는 placeholder 캡처로 계속 진행합니다.",
         ],
         "checked_actions": [action["id"] for action in plan.get("actions", [])],
-        "candidate_calls": calls,
+        "candidate_calls": artifact_calls,
         "error": execution.get("error", ""),
     }
 

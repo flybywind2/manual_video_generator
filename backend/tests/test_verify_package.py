@@ -131,3 +131,87 @@ def test_verify_package_rejects_invalid_degradation_entries(tmp_path: Path):
     errors = verify_package.verify_manifest(manifest_path)
 
     assert "invalid degradation entry at index 0" in errors
+
+
+def test_verify_package_rejects_missing_tts_audio_file(tmp_path: Path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    audio_path = result.artifacts.tts_audio[0]
+    audio_path.unlink()
+
+    verify_package = _load_verify_module()
+    errors = verify_package.verify_manifest(result.artifacts.package_manifest)
+
+    assert f"tts audio path does not exist: {audio_path}" in errors
+
+
+def test_verify_package_rejects_tts_metadata_audio_mismatch(tmp_path: Path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    metadata = json.loads(result.artifacts.tts_metadata.read_text(encoding="utf-8"))
+    metadata["entries"][0]["audio"] = str(tmp_path / "missing.wav")
+    result.artifacts.tts_metadata.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+
+    verify_package = _load_verify_module()
+    errors = verify_package.verify_manifest(result.artifacts.package_manifest)
+
+    assert f"tts metadata audio path does not exist: {tmp_path / 'missing.wav'}" in errors
+
+
+def test_verify_package_rejects_empty_video_file(tmp_path: Path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    result.artifacts.video.write_bytes(b"")
+
+    verify_package = _load_verify_module()
+    errors = verify_package.verify_manifest(result.artifacts.package_manifest)
+
+    assert f"artifact path is empty: video={result.artifacts.video}" in errors
+
+
+def test_verify_package_rejects_empty_tts_audio_file(tmp_path: Path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    audio_path = result.artifacts.tts_audio[0]
+    audio_path.write_bytes(b"")
+
+    verify_package = _load_verify_module()
+    errors = verify_package.verify_manifest(result.artifacts.package_manifest)
+
+    assert f"tts audio path is empty: {audio_path}" in errors

@@ -17,6 +17,16 @@ REQUIRED_ARTIFACTS = {
     "audit_log",
 }
 
+NON_EMPTY_ARTIFACTS = {
+    "html_preview",
+    "markdown_manual",
+    "video",
+    "action_plan",
+    "approval_log",
+    "masking_log",
+    "audit_log",
+}
+
 REQUIRED_SUPPORTING_ARTIFACTS = {
     "request",
     "planner_trace",
@@ -70,6 +80,8 @@ def verify_manifest(manifest_path: Path) -> list[str]:
         path = Path(str(path_value))
         if not path.is_file():
             errors.append(f"artifact path does not exist: {key}={path}")
+        elif key in NON_EMPTY_ARTIFACTS and path.stat().st_size == 0:
+            errors.append(f"artifact path is empty: {key}={path}")
 
     supporting_artifacts = manifest.get("supporting_artifacts")
     if not isinstance(supporting_artifacts, dict):
@@ -92,6 +104,21 @@ def verify_manifest(manifest_path: Path) -> list[str]:
     if audit and audit.exists():
         audit_errors = _verify_audit(audit, manifest.get("job_id", ""))
         errors.extend(audit_errors)
+
+    tts_audio = artifacts.get("tts_audio", [])
+    if not isinstance(tts_audio, list):
+        errors.append("tts_audio must be a list")
+    else:
+        for path_value in tts_audio:
+            path = Path(str(path_value))
+            if not path.is_file():
+                errors.append(f"tts audio path does not exist: {path}")
+            elif path.stat().st_size == 0:
+                errors.append(f"tts audio path is empty: {path}")
+
+    tts_metadata = _path_from(artifacts, "tts_metadata")
+    if tts_metadata and tts_metadata.exists():
+        errors.extend(_verify_tts_metadata(tts_metadata))
 
     degradations = manifest.get("degradations", [])
     if not isinstance(degradations, list):
@@ -125,6 +152,31 @@ def _verify_audit(path: Path, job_id: str) -> list[str]:
                 errors.append(f"audit line {line_number} missing {key}")
         if job_id and event.get("run_id") != job_id:
             errors.append(f"audit line {line_number} run_id mismatch")
+    return errors
+
+
+def _verify_tts_metadata(path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"tts metadata is not valid JSON: {exc}"]
+    entries = metadata.get("entries", [])
+    if not isinstance(entries, list):
+        return ["tts metadata entries must be a list"]
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"tts metadata entry {index} must be an object")
+            continue
+        audio = entry.get("audio")
+        if not audio:
+            errors.append(f"tts metadata entry {index} missing audio")
+            continue
+        audio_path = Path(str(audio))
+        if not audio_path.is_file():
+            errors.append(f"tts metadata audio path does not exist: {audio_path}")
+        elif audio_path.stat().st_size == 0:
+            errors.append(f"tts metadata audio path is empty: {audio_path}")
     return errors
 
 

@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -64,3 +66,31 @@ def test_build_bundle_skip_downloads_creates_manifest_and_zip(tmp_path: Path):
     versions = json.loads((dist / "versions.json").read_text(encoding="utf-8-sig"))
     assert versions["files"]
     assert any(item["path"] == "scripts\\doctor.ps1" for item in versions["files"])
+
+
+def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp_path: Path):
+    output_dir = tmp_path / "manual-output"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_OUTPUT_DIR"] = str(output_dir)
+    env["MANUAL_AGENT_OPENAI_API_KEY"] = "super-secret"
+    env["MANUAL_AGENT_DEP_TICKET"] = "credential:SECRET"
+    command = [
+        _powershell(),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".\\scripts\\doctor.ps1",
+        "-Collect",
+    ]
+
+    subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", env=env)
+
+    zips = list((output_dir / "diagnostics").glob("*.zip"))
+    assert zips
+    with zipfile.ZipFile(zips[0]) as archive:
+        env_text = archive.read("environment.redacted.txt").decode("utf-8-sig")
+    assert "MANUAL_AGENT_OPENAI_API_KEY=<redacted>" in env_text
+    assert "MANUAL_AGENT_DEP_TICKET=<redacted>" in env_text
+    assert "super-secret" not in env_text
+    assert "credential:SECRET" not in env_text

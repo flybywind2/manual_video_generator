@@ -133,7 +133,8 @@ if ($Json) {
 
 if ($Collect) {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $diag = Join-Path $Root "output\diagnostics\$stamp"
+    $diagRoot = Join-Path $env:MANUAL_AGENT_OUTPUT_DIR "diagnostics"
+    $diag = Join-Path $diagRoot $stamp
     New-Item -ItemType Directory -Force -Path $diag | Out-Null
     $checks | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $diag "doctor.json")
     Get-ChildItem Env: | Where-Object { $_.Name -like "MANUAL_AGENT_*" -or $_.Name -in @("PLAYWRIGHT_BROWSERS_PATH", "HF_HOME", "NPM_CONFIG_CACHE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS") } |
