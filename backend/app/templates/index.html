@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Center · Manual Video Agent</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='13' y='3' width='6' height='19' rx='3' fill='%23245BFF'/%3E%3Ccircle cx='16' cy='27' r='4' fill='%2321D4FD'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-nav" aria-label="Global navigation">
+        <a class="brand" href="/" aria-label="AI Center Manual Video Agent home">
+          <span class="brand-mark" aria-hidden="true">
+            <span class="brand-bar"></span>
+            <span class="brand-dot"></span>
+          </span>
+          <span>AI Center · Manual Video Agent</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a class="is-active" href="/">작업</a>
+          <a href="#artifacts">산출물</a>
+          <a href="#security">보안</a>
+          <a href="#settings">설정</a>
+        </nav>
+        <div class="session-tag">
+          <span class="session-dot" aria-hidden="true"></span>
+          Local Safe Session
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="step-rail" aria-label="Workflow steps">
+          <div class="rail-title">Workflow</div>
+          <ol class="step-list">
+            <li class="step is-active"><span>1</span><strong>요청 입력</strong></li>
+            <li class="step"><span>2</span><strong>계획 검수</strong></li>
+            <li class="step"><span>3</span><strong>MCP 리허설</strong></li>
+            <li class="step"><span>4</span><strong>자막·내레이션</strong></li>
+            <li class="step"><span>5</span><strong>미리보기</strong></li>
+            <li class="step"><span>6</span><strong>렌더링</strong></li>
+          </ol>
+        </aside>
+
+        <section class="content">
+          <section class="hero-panel" aria-labelledby="page-title">
+            <svg class="connection-field" viewBox="0 0 600 220" aria-hidden="true">
+              <path d="M74 152 C148 56 244 40 338 94 S486 161 554 52" />
+              <path d="M132 184 C205 123 272 136 342 156 S457 169 522 119" />
+              <circle cx="74" cy="152" r="5" />
+              <circle cx="184" cy="78" r="4" />
+              <circle cx="338" cy="94" r="6" />
+              <circle cx="452" cy="151" r="4" />
+              <circle cx="554" cy="52" r="5" />
+              <circle cx="132" cy="184" r="4" />
+              <circle cx="342" cy="156" r="5" />
+              <circle cx="522" cy="119" r="4" />
+            </svg>
+            <div class="hero-copy">
+              <div class="origin-label">
+                <span class="origin-dot" aria-hidden="true"></span>
+                Local AI workflow
+              </div>
+              <h1 id="page-title">사내 시스템 매뉴얼 영상 생성</h1>
+              <p>한 번의 요청에서 리허설, 캡처, 마스킹, 내레이션, 영상 렌더까지 연결합니다.</p>
+            </div>
+            <div class="identity-symbol" aria-hidden="true">
+              <span class="identity-bar"></span>
+              <span class="identity-dot"></span>
+            </div>
+          </section>
+
+          <section class="primary-grid">
+            <article class="work-panel" aria-labelledby="new-job-title">
+              <div class="panel-header">
+                <div>
+                  <h2 id="new-job-title">새 영상 작업</h2>
+                  <p>대상 시스템을 하나 지정하고, 완료 조건과 실행 입력값을 확정합니다.</p>
+                </div>
+                <span class="panel-state">Draft</span>
+              </div>
+
+              <form class="job-form" id="job-form">
+                <label class="field field-wide">
+                  <span>요청문</span>
+                  <textarea name="request" rows="3">MES에서 LOT 조회 방법 영상 만들기</textarea>
+                </label>
+                <label class="field">
+                  <span>대상 URL</span>
+                  <input name="url" value="http://127.0.0.1:8000/sample" />
+                </label>
+                <label class="field">
+                  <span>계정 역할</span>
+                  <input name="role" value="작업자" />
+                </label>
+                <label class="field field-wide">
+                  <span>완료 조건</span>
+                  <input name="done" value="상세 화면이 보이면 완료" />
+                </label>
+                <div class="field field-wide">
+                  <span>입력값</span>
+                  <div class="chip-row" aria-label="Scenario input values">
+                    <button class="value-chip" type="button">LOT=LOT-001</button>
+                    <button class="value-chip" type="button">라인=A3</button>
+                    <button class="value-chip add-chip" type="button">+ 값 추가</button>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button class="button primary" type="submit">
+                    <span class="play-icon" aria-hidden="true"></span>
+                    파이프라인 실행
+                  </button>
+                  <button class="button secondary" id="load-sample" type="button">샘플 불러오기</button>
+                </div>
+              </form>
+            </article>
+
+            <aside class="pipeline-panel" aria-labelledby="pipeline-title">
+              <div class="panel-header compact">
+                <div>
+                  <h2 id="pipeline-title">AI Center Pipeline</h2>
+                  <p>리허설과 본 실행을 분리해 운영계 위험을 낮춥니다.</p>
+                </div>
+              </div>
+              <ol class="pipeline-list">
+                <li class="pipeline-node is-active">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>LLM Planner</strong>
+                    <small>시나리오와 액션 JSON 생성</small>
+                  </div>
+                </li>
+                <li class="pipeline-node">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>playwright-mcp 리허설</strong>
+                    <small>화면 탐색과 경로 검증</small>
+                  </div>
+                </li>
+                <li class="pipeline-node">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>Playwright Capture</strong>
+                    <small>확정 JSON으로 본 실행</small>
+                  </div>
+                </li>
+                <li class="pipeline-node">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>Masking</strong>
+                    <small>PII와 입력값 자동 블러</small>
+                  </div>
+                </li>
+                <li class="pipeline-node">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>MeloTTS</strong>
+                    <small>한국어 내레이션 생성</small>
+                  </div>
+                </li>
+                <li class="pipeline-node">
+                  <span class="node-dot"></span>
+                  <div>
+                    <strong>HyperFrames</strong>
+                    <small>HTML, MP4, Markdown, PDF 렌더</small>
+                  </div>
+                </li>
+              </ol>
+            </aside>
+          </section>
+
+          <section class="timeline-band" aria-label="Pipeline timeline">
+            <span class="timeline-origin" aria-hidden="true"></span>
+            <span>Plan</span>
+            <span>Rehearse</span>
+            <span>Capture</span>
+            <span>Mask</span>
+            <span>Voice</span>
+            <span>Render</span>
+          </section>
+
+          <section class="artifact-panel" id="artifacts" aria-live="polite">
+            <div>
+              <h2>산출물 패키지</h2>
+              <p id="artifact-status">아직 실행된 작업이 없습니다.</p>
+            </div>
+            <div class="artifact-links" id="artifact-links"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

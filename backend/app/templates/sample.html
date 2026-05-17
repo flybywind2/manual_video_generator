@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sample MES</title>
+    <style>
+      body { margin: 0; background: #f7f9fc; color: #111827; font-family: SamsungOne, Pretendard, Inter, system-ui, sans-serif; }
+      header { padding: 20px 32px; border-bottom: 1px solid #d8e0ec; background: white; display: flex; justify-content: space-between; align-items: center; }
+      main { width: min(1120px, calc(100% - 48px)); margin: 28px auto; display: grid; gap: 18px; }
+      section { background: white; border: 1px solid #d8e0ec; border-radius: 8px; padding: 24px; box-shadow: 0 18px 48px rgba(17,24,39,.06); }
+      h1, h2 { margin: 0 0 12px; }
+      .sample-hero { background: linear-gradient(135deg, #fff, #f1f5ff); }
+      .search-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-top: 14px; }
+      input { min-height: 44px; border: 1px solid #b8c4d6; border-radius: 6px; padding: 10px 12px; font: inherit; }
+      button { min-height: 44px; border: 0; border-radius: 6px; padding: 10px 16px; background: linear-gradient(135deg, #21d4fd, #245bff 45%, #7c3aed); color: white; font-weight: 800; cursor: pointer; }
+      table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+      th, td { padding: 12px 10px; border-bottom: 1px solid #d8e0ec; text-align: left; font-size: 14px; }
+      th { background: #eef3fa; color: #465161; }
+      .detail-panel { display: none; }
+      .detail-panel.is-visible { display: block; }
+      .tag { display: inline-block; padding: 5px 9px; border-radius: 999px; background: #f1f5ff; color: #245bff; font-weight: 800; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Sample MES</strong>
+      <span class="tag">Training Sandbox</span>
+    </header>
+    <main>
+      <section class="sample-hero">
+        <h1>LOT 조회</h1>
+        <p>매뉴얼 영상 생성을 검증하기 위한 샘플 사내 시스템 화면입니다.</p>
+      </section>
+      <section class="search-panel">
+        <h2>검색 조건</h2>
+        <label>
+          LOT 번호
+          <div class="search-row">
+            <input name="lot" value="LOT-001" />
+            <button type="button" data-action="search">조회</button>
+          </div>
+        </label>
+        <table aria-label="LOT search results">
+          <thead>
+            <tr><th>LOT</th><th>라인</th><th>상태</th><th>작업</th></tr>
+          </thead>
+          <tbody id="results">
+            <tr><td>LOT-001</td><td>A3</td><td>대기</td><td><button type="button" data-action="detail">상세 보기</button></td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section class="detail-panel" aria-live="polite">
+        <h2>상세 화면</h2>
+        <p><strong>LOT-001</strong> 상세 화면이 표시되었습니다.</p>
+        <p>완료 조건: 상세 화면이 보이면 완료</p>
+        <span class="tag">조건 충족</span>
+      </section>
+    </main>
+    <script>
+      document.querySelector("[data-action='search']").addEventListener("click", () => {
+        document.querySelector("#results td:nth-child(3)").textContent = "조회 완료";
+      });
+      document.querySelector("[data-action='detail']").addEventListener("click", () => {
+        document.querySelector(".detail-panel").classList.add("is-visible");
+      });
+    </script>
+  </body>
+</html>
