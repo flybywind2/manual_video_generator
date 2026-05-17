@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from backend.app.config import load_settings
+
 
 class PipelineInput(BaseModel):
     request_text: str
@@ -68,10 +70,11 @@ def run_pipeline(
     capture_browser: bool = True,
 ) -> PipelineResult:
     output_root = Path(base_dir) if base_dir else default_output_dir()
+    settings = load_settings()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     dirs = _make_dirs(output_root / "jobs" / job_id)
 
-    plan = _build_plan(request)
+    plan = _build_plan(request, settings.safe_status())
     rehearsal = _rehearse(plan)
     _write_json(dirs.package / "request.json", request.model_dump())
     action_plan_path = dirs.package / "action_plan.json"
@@ -158,10 +161,13 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
     return PipelineDirs(package=package_dir, captures=captures, masked=masked, tts=tts, raw_video=raw_video)
 
 
-def _build_plan(request: PipelineInput) -> dict[str, Any]:
+def _build_plan(request: PipelineInput, config_status: dict[str, object] | None = None) -> dict[str, Any]:
     lot_value = request.input_values.get("LOT") or request.input_values.get("lot") or "LOT-001"
     return {
-        "source": "local-deterministic-planner",
+        "source": "appendix-env-internal-planner-ready"
+        if config_status and config_status["llm"]["configured"]
+        else "local-deterministic-planner",
+        "config_status": config_status or {},
         "steps": [
             {
                 "id": "step_intro",

@@ -367,7 +367,8 @@ a {
 
 .work-panel,
 .pipeline-panel,
-.timeline-band {
+.timeline-band,
+.config-panel {
   border: 1px solid var(--hairline);
   border-radius: 8px;
   background: var(--canvas-raised);
@@ -677,6 +678,78 @@ a {
   box-shadow: 0 18px 48px rgba(17, 24, 39, 0.06);
 }
 
+.config-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.7fr) minmax(0, 1.3fr);
+  gap: 20px;
+  padding: 22px 24px;
+}
+
+.config-panel h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 21px;
+  line-height: 28px;
+}
+
+.config-panel p {
+  margin: 6px 0 0;
+  color: var(--body);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.config-item {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+
+.config-item strong,
+.config-item span,
+.config-item small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-item strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.config-item span {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.config-item small {
+  margin-top: 3px;
+  color: var(--mute);
+  font-size: 11px;
+}
+
+.config-item.configured span {
+  color: #087f6d;
+}
+
+.config-item.missing span,
+.config-error {
+  color: var(--danger);
+}
+
 .artifact-panel h2 {
   margin: 0;
   color: var(--ink-strong);
@@ -800,5 +873,10 @@ a {
 
   .artifact-links {
     justify-content: flex-start;
+  }
+
+  .config-panel,
+  .config-grid {
+    grid-template-columns: 1fr;
   }
 }

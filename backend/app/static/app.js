@@ -5,6 +5,9 @@ const pipelineNodes = Array.from(document.querySelectorAll(".pipeline-node"));
 const artifactStatus = document.querySelector("#artifact-status");
 const artifactLinks = document.querySelector("#artifact-links");
 const submitButton = form?.querySelector("button[type='submit']");
+const configGrid = document.querySelector("#config-grid");
+
+loadConfigStatus();
 
 sampleButton?.addEventListener("click", () => {
   form.elements.request.value = "MES에서 LOT 조회 방법 영상 만들기";
@@ -99,4 +102,29 @@ function renderArtifacts(result) {
   artifactLinks.innerHTML = links
     .map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`)
     .join("");
+}
+
+async function loadConfigStatus() {
+  if (!configGrid) return;
+  try {
+    const response = await fetch("/api/config/status");
+    if (!response.ok) throw new Error(`config status failed: ${response.status}`);
+    const status = await response.json();
+    const rows = [
+      ["LLM", status.llm.configured, status.llm.model || "QWEN3"],
+      ["VLM", status.vlm.configured, status.vlm.model || "QWEN3-VL"],
+      ["RAG", status.rag.configured, status.rag.index_name || "index 미설정"],
+      ["Reranker", status.reranker.configured, status.reranker.model || "model 미설정"],
+      ["TTS", true, status.tts_provider],
+    ];
+    configGrid.innerHTML = rows
+      .map(([label, configured, detail]) => {
+        const state = configured ? "configured" : "missing";
+        const text = configured ? "Configured" : "Missing";
+        return `<div class="config-item ${state}"><strong>${label}</strong><span>${text}</span><small>${detail}</small></div>`;
+      })
+      .join("");
+  } catch (error) {
+    configGrid.innerHTML = `<span class="config-error">${error.message || "설정 상태를 불러오지 못했습니다."}</span>`;
+  }
 }

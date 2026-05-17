@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.config import load_settings
 from backend.app.pipeline import PipelineInput, artifact_response, default_output_dir, run_pipeline
 
 APP_DIR = Path(__file__).resolve().parent
@@ -18,6 +19,11 @@ app.mount("/artifacts", StaticFiles(directory=OUTPUT_DIR), name="artifacts")
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/config/status")
+def config_status() -> dict[str, object]:
+    return load_settings().safe_status()
 
 
 @app.get("/", response_class=HTMLResponse)

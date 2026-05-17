@@ -30,6 +30,7 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert result.artifacts.package_manifest.exists()
     manifest = result.artifacts.package_manifest.read_text(encoding="utf-8")
     assert '"tts_audio": [' in manifest
+    assert "config_status" in result.plan
 
 
 def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):

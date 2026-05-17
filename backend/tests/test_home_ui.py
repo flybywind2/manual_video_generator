@@ -16,3 +16,4 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "파이프라인 실행" in body
     assert "AI Center Pipeline" in body
     assert "MeloTTS" in body
+    assert ".env 설정 상태" in body
