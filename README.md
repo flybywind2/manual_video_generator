@@ -1,43 +1,425 @@
 # Manual Video Agent
 
-로컬 PC에서 사내 시스템 사용 시나리오를 샘플 브라우저 캡처, 마스킹, 내레이션, HTML/WebM/Markdown/PDF 패키지로 생성하는 MVP입니다.
+사내 시스템 사용 시나리오를 입력하면 로컬 PC에서 사용 매뉴얼 영상과 문서 패키지를 생성하는 MVP입니다.
 
-## `.env` 설정
+현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 이후 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, MeloTTS, HyperFrames를 실제 어댑터로 교체해 운영 가능한 파이프라인으로 확장합니다.
 
-`D:\Python\appendix\appendix.md`의 내부 API 예시값은 `.env`로 관리합니다.
+## 무엇을 만드는 시스템인가
 
-1. `.env.example`을 `.env`로 복사합니다.
-2. `MANUAL_AGENT_*` 값들을 사내 발급값으로 채웁니다.
-3. 앱을 재시작합니다.
-4. 홈 화면의 `.env 설정 상태` 패널 또는 `/api/config/status`에서 구성 여부만 확인합니다.
+관리자가 "MES에서 LOT 조회 방법 영상 만들기" 같은 시나리오를 입력하면 다음 산출물을 만듭니다.
 
-비밀값은 UI/API 응답에 표시하지 않습니다. `.env`는 `.gitignore`에 포함되어 커밋되지 않습니다.
+- 브라우저 화면 녹화 영상
+- HTML preview
+- Markdown 매뉴얼
+- PDF 매뉴얼 placeholder
+- 실행 action plan JSON
+- 승인/리허설/마스킹 로그
+- TTS 오디오 placeholder
+- 산출물 manifest
 
-주요 값:
+완성된 영상은 이 시스템 안에서 장기 보관하지 않습니다. 생성된 패키지를 관리자가 확인한 뒤 별도 저장소나 게시 시스템에서 관리하는 구조입니다.
 
-- `MANUAL_AGENT_OPENAI_API_KEY`
-- `MANUAL_AGENT_DEP_TICKET`
-- `MANUAL_AGENT_SEND_SYSTEM_NAME`
-- `MANUAL_AGENT_USER_ID`
-- `MANUAL_AGENT_USER_TYPE`
-- `MANUAL_AGENT_LLM_BASE_URL`
-- `MANUAL_AGENT_LLM_MODEL`
-- `MANUAL_AGENT_VLM_BASE_URL`
-- `MANUAL_AGENT_VLM_MODEL`
-- `MANUAL_AGENT_RAG_RETRIEVE_URL`
-- `MANUAL_AGENT_RAG_API_KEY`
-- `MANUAL_AGENT_RAG_INDEX_NAME`
-- `MANUAL_AGENT_RERANKER_URL`
-- `MANUAL_AGENT_RERANKER_MODEL`
+## 현재 구현 상태
 
-## 실행
+| 영역 | 상태 | 설명 |
+|---|---|---|
+| 로컬 웹앱 | 구현 | FastAPI, Jinja template, vanilla JS 기반 |
+| 홈 화면 UI | 구현 | `D:\Python\appendix\AI Center DESIGN.md`의 AI Center inspired 디자인 적용 |
+| 샘플 사내 시스템 | 구현 | `/sample`에서 테스트용 MES LOT 조회 화면 제공 |
+| 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
+| Action plan | 구현 | 현재는 deterministic planner |
+| 브라우저 캡처 | 구현 | Playwright로 샘플 화면 캡처 및 WebM 녹화 |
+| 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
+| `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
+| 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
+| `playwright-mcp` | placeholder | 실제 MCP 서버 호출 전 compatible rehearsal log 사용 |
+| 내부 LLM/RAG/VLM/Reranker | adapter 경계 | `.env` 설정과 metadata만 연결된 상태 |
+| MeloTTS | placeholder | 실제 한국어 음성 대신 silent wav 생성 |
+| HyperFrames | placeholder | 실제 renderer 대신 HTML preview와 Playwright WebM 사용 |
+| PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
+| MP4 | 미구현 | 현재 기본 영상 산출물은 WebM |
+
+## 파이프라인
+
+```mermaid
+flowchart LR
+    A["관리자 시나리오 입력"] --> B["절차 계획 생성"]
+    B --> C["리허설 로그 생성"]
+    C --> D["Playwright 캡처/녹화"]
+    D --> E["마스킹"]
+    B --> F["TTS 오디오 생성"]
+    E --> G["HTML Preview"]
+    F --> G
+    G --> H["WebM / Markdown / PDF / JSON 패키지"]
+```
+
+현재 `B`, `C`, `F`, `G` 일부는 MVP용 구현입니다. 실제 운영 버전에서는 `B`는 내부 LLM/RAG/Reranker, `C`는 `playwright-mcp`, `F`는 MeloTTS, `G`는 HyperFrames 중심으로 교체합니다.
+
+## 환경 준비
+
+이 프로젝트의 Python 표준 버전은 `3.10.19`입니다. Python 3.11 이상을 전제로 설치하지 않습니다.
+
+### 1. Python 3.10.19 가상환경
+
+Windows에서 Python Launcher가 설치되어 있으면 다음처럼 만듭니다.
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python --version
+```
+
+`python --version`은 다음처럼 보여야 합니다.
+
+```text
+Python 3.10.19
+```
+
+필요 패키지를 설치합니다.
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install fastapi "uvicorn[standard]" pydantic pillow playwright httpx pytest
+python -m playwright install chromium
+```
+
+Playwright 공식 문서는 `pip install playwright` 후 `playwright install`로 브라우저 바이너리를 설치하는 흐름을 안내합니다. 이 프로젝트는 Chromium만 사용하므로 `python -m playwright install chromium`을 기본으로 둡니다.
+
+사내망에서 Playwright 브라우저 다운로드가 막히면 사내 프록시 또는 사내 캐시 경로를 먼저 설정해야 합니다.
+
+```powershell
+$env:HTTPS_PROXY="http://proxy.example:8080"
+python -m playwright install chromium
+```
+
+### 2. FFmpeg
+
+MP4 변환, HyperFrames 렌더링, 오디오 mux 단계에는 `ffmpeg`가 필요합니다. 현재 MVP는 WebM을 직접 생성하므로 필수는 아니지만, HyperFrames 실연동 단계부터는 설치해야 합니다.
+
+```powershell
+winget install --id Gyan.FFmpeg -e
+ffmpeg -version
+```
+
+### 3. Playwright MCP
+
+현재 백엔드 파이프라인은 Python Playwright를 직접 사용합니다. `playwright-mcp`는 Codex 같은 에이전트가 리허설/탐색 단계에서 브라우저를 조작하기 위한 MCP 서버입니다.
+
+Node.js와 `npx`가 필요합니다.
+
+```powershell
+node -v
+npx -v
+```
+
+Codex MCP 서버로 추가할 때는 다음 명령을 사용합니다.
+
+```powershell
+codex mcp add playwright npx "@playwright/mcp@latest"
+```
+
+수동으로 설정할 경우 `~/.codex/config.toml`에 다음 구성을 추가합니다.
+
+```toml
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+```
+
+Windows에서 `npx`가 인식되지 않으면 Node.js 설치 경로가 `PATH`에 들어갔는지 먼저 확인합니다.
+
+### 4. HyperFrames
+
+HyperFrames는 HTML 기반 video composition을 preview/render하는 Node.js 계열 도구입니다. 현재 MVP는 HyperFrames를 직접 호출하지 않고 HTML preview와 Playwright WebM을 생성합니다. MP4 품질 렌더링으로 넘어갈 때 HyperFrames 어댑터를 연결합니다.
+
+필요 조건:
+
+- Node.js `22` 이상
+- FFmpeg
+- 사내망에서 npm registry 접근 또는 사내 npm mirror
+
+설치/검증:
+
+```powershell
+node -v
+ffmpeg -version
+npx hyperframes init manual-video-renderer
+cd manual-video-renderer
+npx hyperframes preview
+npx hyperframes render
+```
+
+에이전트가 HyperFrames composition을 더 정확히 작성하게 하려면 HyperFrames skills를 설치합니다.
+
+```powershell
+npx skills add heygen-com/hyperframes
+```
+
+HyperFrames 저장소 자체를 clone해서 개발할 경우 Git LFS가 필요할 수 있습니다.
+
+```powershell
+winget install GitHub.GitLFS
+git lfs install
+```
+
+### 5. MeloTTS 한국어 TTS
+
+현재 MVP는 silent wav placeholder를 생성합니다. 실제 한국어 내레이션을 만들려면 MeloTTS 어댑터를 붙입니다.
+
+권장 방식은 별도 TTS 가상환경을 두는 것입니다. 이 앱의 표준 Python은 `3.10.19`지만, MeloTTS 공식 문서는 Ubuntu 20.04/Python 3.9 개발·테스트 기준과 Windows Docker 사용 권장을 함께 안내합니다. Windows native 설치가 실패하면 WSL 또는 별도 Python 3.9 TTS 환경으로 분리하는 편이 안전합니다.
+
+Python 3.10.19에서 먼저 시도할 수 있는 설치 흐름:
+
+```powershell
+git clone https://github.com/myshell-ai/MeloTTS.git third_party\MeloTTS
+python -m pip install -e third_party\MeloTTS
+python -m unidic download
+```
+
+한국어 음성 생성 smoke test:
+
+```powershell
+python -c "from melo.api import TTS; model=TTS(language='KR', device='cpu'); spk=model.hps.data.spk2id; model.tts_to_file('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', spk['KR'], 'kr.wav', speed=1.0)"
+```
+
+VRAM 6GB 환경에서는 먼저 `device='cuda:0'`를 시도하고, OOM이 나면 `device='cpu'`로 운영합니다.
+
+```powershell
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+### 6. 설치 확인
+
+```powershell
+python -c "import fastapi, pydantic, PIL, playwright; print('python runtime ok')"
+python -m playwright install --help
+node -v
+npx -v
+ffmpeg -version
+```
+
+## 실행 방법
 
 ```powershell
 python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-열기:
+브라우저에서 다음 주소를 엽니다.
 
 ```text
 http://127.0.0.1:8000
 ```
+
+샘플 사내 시스템 화면은 다음 주소입니다.
+
+```text
+http://127.0.0.1:8000/sample
+```
+
+## 사용 방법
+
+1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 입력값을 확인합니다.
+2. 기본 대상 URL은 `/sample`입니다.
+3. `파이프라인 실행`을 누릅니다.
+4. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
+5. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
+6. 최종 영상 파일은 관리자가 별도 보관합니다.
+
+## 산출물 구조
+
+산출물은 기본적으로 `output/jobs/<job_id>/` 아래에 생성됩니다.
+
+```text
+output/jobs/<job_id>/
+  preview.html
+  manual_video_agent_usage.webm
+  manual.md
+  manual.pdf
+  action_plan.json
+  approval_log.json
+  masking_log.json
+  package_manifest.json
+  captures/
+  masked/
+  tts/
+```
+
+`MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
+
+## `.env` 설정
+
+내부 API 접속값은 `.env`로 관리합니다. 예시 파일은 [.env.example](.env.example)에 있습니다.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+그 다음 `.env`에서 `MANUAL_AGENT_*` 값을 사내 발급값으로 채웁니다.
+
+주요 설정은 다음과 같습니다.
+
+```text
+MANUAL_AGENT_OPENAI_API_KEY
+MANUAL_AGENT_DEP_TICKET
+MANUAL_AGENT_SEND_SYSTEM_NAME
+MANUAL_AGENT_USER_ID
+MANUAL_AGENT_USER_TYPE
+MANUAL_AGENT_LLM_BASE_URL
+MANUAL_AGENT_LLM_MODEL
+MANUAL_AGENT_VLM_BASE_URL
+MANUAL_AGENT_VLM_MODEL
+MANUAL_AGENT_RAG_INSERT_URL
+MANUAL_AGENT_RAG_RETRIEVE_URL
+MANUAL_AGENT_RAG_DELETE_URL
+MANUAL_AGENT_RAG_API_KEY
+MANUAL_AGENT_RAG_INDEX_NAME
+MANUAL_AGENT_RAG_PERMISSION_GROUPS
+MANUAL_AGENT_RERANKER_URL
+MANUAL_AGENT_RERANKER_MODEL
+MANUAL_AGENT_OUTPUT_DIR
+MANUAL_AGENT_TTS_PROVIDER
+```
+
+설정 변경 후 앱을 재시작합니다.
+
+설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
+
+```http
+GET /api/config/status
+```
+
+비밀값 원문은 UI/API 응답에 표시하지 않습니다. `.env`는 `.gitignore`에 포함되어 커밋되지 않습니다.
+
+## API
+
+Health check:
+
+```http
+GET /api/health
+```
+
+설정 상태:
+
+```http
+GET /api/config/status
+```
+
+샘플 화면:
+
+```http
+GET /sample
+```
+
+파이프라인 실행:
+
+```http
+POST /api/pipeline/run
+Content-Type: application/json
+```
+
+예시 요청:
+
+```json
+{
+  "request_text": "MES에서 LOT 조회 방법 영상 만들기",
+  "target_url": "http://127.0.0.1:8000/sample",
+  "role": "작업자",
+  "completion_condition": "상세 화면이 보이면 완료",
+  "input_values": {
+    "LOT": "LOT-001",
+    "라인": "A3"
+  }
+}
+```
+
+빠른 테스트에서 브라우저 캡처를 생략하려면 query parameter를 사용합니다.
+
+```text
+POST /api/pipeline/run?capture_browser=false
+```
+
+## 프로젝트 구조
+
+```text
+backend/
+  app/
+    config.py
+    main.py
+    pipeline.py
+    static/
+      app.js
+      styles.css
+    templates/
+      index.html
+      sample.html
+  tests/
+    test_config.py
+    test_home_ui.py
+    test_pipeline.py
+docs/
+  plans/
+    2026-05-17-internal-system-manual-video-agent-design.md
+    2026-05-17-internal-system-manual-video-agent-implementation-plan.md
+```
+
+핵심 파일:
+
+- [backend/app/main.py](backend/app/main.py): FastAPI route, static artifact serving
+- [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
+- [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
+- [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
+- [backend/app/static/styles.css](backend/app/static/styles.css): AI Center inspired 스타일
+
+## 테스트
+
+Windows/OneDrive 환경에서 pytest cache 또는 temp 권한 경고가 나면 `TMP`, `TEMP`를 `C:\tmp`로 지정합니다.
+
+```powershell
+$env:TMP='C:\tmp'
+$env:TEMP='C:\tmp'
+python -m pytest -q
+```
+
+`C:\tmp`에도 쓰기 권한이 없으면 워크스페이스 내부 임시 디렉터리를 직접 지정합니다.
+
+```powershell
+python -m pytest -q --basetemp .pytest_tmp
+```
+
+현재 기준 기대 결과:
+
+```text
+6 passed
+```
+
+## 보안 및 운영 주의사항
+
+- 운영계 비밀번호, OTP, SSO 토큰을 이 앱 입력값으로 받지 않습니다.
+- `.env` 원문은 커밋하지 않습니다.
+- API key, dep ticket, RAG key는 UI/API에 노출하지 않습니다.
+- 현재 MVP는 샘플 시스템 검증용입니다.
+- 운영계 연결 전에는 위험 액션 승인, selector 검수, 마스킹 검수, 로그 보관 정책이 필요합니다.
+- 자동 클릭/입력 대상은 반드시 테스트 환경에서 먼저 검증해야 합니다.
+
+## 다음 구현 순서
+
+1. 내부 LLM planner 실연동
+2. RAG/Reranker 기반 업무 절차 보강
+3. `playwright-mcp` 리허설 어댑터 실연동
+4. Action JSON 검수 및 편집 UI
+5. MeloTTS 기반 한국어 음성 생성
+6. HyperFrames 기반 HTML-to-video 렌더링
+7. MP4 변환 및 `ffmpeg` 검증
+8. 시스템별 마스킹 룰과 검수 UI
+9. 운영계 위험 액션 승인 게이트
+
+## 참고 자료
+
+- `D:\Python\appendix\appendix.md`: 내부 OpenAI-compatible LLM/VLM, RAG, Reranker API 예시
+- `D:\Python\appendix\AI Center DESIGN.md`: AI Center inspired 디자인 가이드
+- [Playwright Python Library 설치 문서](https://playwright.dev/python/docs/library)
+- [Microsoft Playwright MCP README](https://github.com/microsoft/playwright-mcp)
+- [HyperFrames README](https://github.com/heygen-com/hyperframes)
+- [MeloTTS 설치 문서](https://github.com/myshell-ai/MeloTTS/blob/main/docs/install.md)
+- [docs/plans/2026-05-17-internal-system-manual-video-agent-design.md](docs/plans/2026-05-17-internal-system-manual-video-agent-design.md)
+- [docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md](docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md)
