@@ -122,6 +122,8 @@ class AppSettings:
     tts_speed: float
     video_renderer: str
     hyperframes_command: str
+    enable_hyperframes_skills: bool
+    hyperframes_skills_command: str
     request_timeout_seconds: float
 
     def safe_status(self) -> dict[str, object]:
@@ -144,6 +146,8 @@ class AppSettings:
                 "tts_speed": self.tts_speed,
                 "video_renderer": self.video_renderer,
                 "hyperframes_command_set": bool(self.hyperframes_command),
+                "enable_hyperframes_skills": self.enable_hyperframes_skills,
+                "hyperframes_skills_command_set": bool(self.hyperframes_skills_command),
                 "request_timeout_seconds": self.request_timeout_seconds,
             },
         }
@@ -206,7 +210,7 @@ def load_settings(
         enable_rag_context=_get_bool(env, "ENABLE_RAG_CONTEXT", False),
         enable_reranker=_get_bool(env, "ENABLE_RERANKER", False),
         playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),
-        playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest"),
+        playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest --headless"),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
         tts_device=_get(env, "TTS_DEVICE", "cpu"),
         tts_language=_get(env, "TTS_LANGUAGE", "KR"),
@@ -214,6 +218,8 @@ def load_settings(
         tts_speed=_get_float(env, "TTS_SPEED", 1.0),
         video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
         hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx hyperframes render"),
+        enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
+        hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx hyperframes skills --codex"),
         request_timeout_seconds=_get_float(env, "REQUEST_TIMEOUT_SECONDS", 30.0),
     )
 

@@ -40,6 +40,7 @@ class ArtifactPaths(BaseModel):
     tts_audio: list[Path] = Field(default_factory=list)
     tts_metadata: Path | None = None
     video_render_metadata: Path | None = None
+    skills_metadata: Path | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -130,6 +131,7 @@ def run_pipeline(
         tts_audio=tts_result.audio_paths,
         tts_metadata=tts_result.metadata_path,
         video_render_metadata=video_render.metadata_path,
+        skills_metadata=video_render.skills_metadata_path,
     )
     result = PipelineResult(
         job_id=job_id,
@@ -164,6 +166,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "final_frame_url": f"{rel_base}/final_frame.png" if result.artifacts.final_frame else None,
             "tts_metadata_url": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
             "video_render_metadata_url": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
+            "skills_metadata_url": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
         },
     }
 
@@ -466,6 +469,7 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
             "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,
+            "skills_metadata": str(result.artifacts.skills_metadata) if result.artifacts.skills_metadata else None,
         },
     }
 

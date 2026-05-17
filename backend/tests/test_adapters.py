@@ -1,7 +1,10 @@
 import json
+import subprocess
 from pathlib import Path
 
 from backend.app.adapters.planner import build_plan
+from backend.app.adapters.rehearsal import rehearse_plan
+from backend.app.adapters.skills import ensure_hyperframes_skills
 from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
@@ -131,3 +134,103 @@ def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_pat
     assert metadata["renderer"] == "hyperframes"
     assert metadata["fallback_video"] == str(fallback_video)
     assert metadata["used_fallback"] is True
+
+
+def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND": "npx @playwright/mcp@latest --headless",
+        }
+    )
+    plan = {
+        "steps": [{"id": "step_search", "title": "검색", "caption": "검색", "narration": "검색"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://127.0.0.1:8000/sample", "step_id": "step_search"},
+            {"id": "a2", "type": "fill", "selector": "[name='lot']", "value": "LOT-001", "step_id": "step_search"},
+            {"id": "a3", "type": "click", "selector": "[data-action='search']", "step_id": "step_search"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            calls.append(("initialize", {}))
+            return {"serverInfo": {"name": "fake-playwright"}}
+
+        def list_tools(self):
+            calls.append(("tools/list", {}))
+            return {"browser_navigate", "browser_run_code", "browser_snapshot"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
+
+    assert result["status"] == "live-completed"
+    assert result["adapter"] == "playwright-mcp-live"
+    assert ("browser_navigate", {"url": "http://127.0.0.1:8000/sample"}) in calls
+    assert any(name == "browser_run_code" and "locator" in args["code"] for name, args in calls)
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["status"] == "live-completed"
+    assert execution["results"]
+
+
+def test_playwright_mcp_live_mode_reports_tool_errors(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
+    plan = {
+        "steps": [{"id": "step_search", "title": "검색", "caption": "검색", "narration": "검색"}],
+        "actions": [{"id": "a1", "type": "click", "selector": "[data-action='search']", "step_id": "step_search"}],
+    }
+
+    class ErrorMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_evaluate"}
+
+        def call_tool(self, name, arguments):
+            return {"isError": True, "content": [{"type": "text", "text": "bad args"}]}
+
+    result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: ErrorMcpClient())
+
+    assert result["status"] == "live-failed"
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["had_tool_errors"] is True
+    assert execution["results"][0]["arguments"]["function"].startswith("() =>")
+
+
+def test_hyperframes_skills_command_runs_when_enabled(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS": "true",
+            "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND": "npx hyperframes skills --codex",
+        }
+    )
+
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="skills installed", stderr="")
+
+    result = ensure_hyperframes_skills(settings, tmp_path, command_runner=fake_runner)
+
+    assert result.status == "completed"
+    assert result.metadata_path.exists()
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["enabled"] is True
+    assert Path(metadata["command"][0]).name.lower() in {"npx", "npx.cmd"}
+    assert metadata["command"][1:] == ["hyperframes", "skills", "--codex"]
+    assert metadata["stdout"] == "skills installed"

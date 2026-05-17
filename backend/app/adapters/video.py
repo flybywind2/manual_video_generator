@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.app.adapters.skills import ensure_hyperframes_skills
 from backend.app.config import AppSettings
 
 
@@ -18,6 +20,7 @@ class VideoRenderResult:
     video_path: Path
     composition_dir: Path
     metadata_path: Path
+    skills_metadata_path: Path
     used_fallback: bool
 
 
@@ -42,19 +45,26 @@ def render_final_video(
         "fallback_video": str(fallback_video),
         "used_fallback": True,
     }
+    skills = ensure_hyperframes_skills(settings, package_dir)
+    metadata["skills_metadata"] = str(skills.metadata_path)
+    metadata["skills_status"] = skills.status
     if renderer != "hyperframes":
         metadata["status"] = "skipped"
         metadata["reason"] = "video renderer is not hyperframes"
         _write_metadata(metadata_path, metadata)
-        return VideoRenderResult(fallback_video, composition_dir, metadata_path, True)
+        return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
 
     output_path = package_dir / "manual_video_agent_usage.mp4"
     command = _split_command(settings.hyperframes_command)
+    if command:
+        resolved = shutil.which(command[0])
+        if resolved:
+            command[0] = resolved
     if not command:
         metadata["status"] = "skipped"
         metadata["reason"] = "hyperframes command is empty"
         _write_metadata(metadata_path, metadata)
-        return VideoRenderResult(fallback_video, composition_dir, metadata_path, True)
+        return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
 
     args = [*command, str(composition_dir / "index.html"), "--output", str(output_path)]
     metadata["command"] = args
@@ -68,7 +78,7 @@ def render_final_video(
             metadata["used_fallback"] = False
             metadata["video"] = str(output_path)
             _write_metadata(metadata_path, metadata)
-            return VideoRenderResult(output_path, composition_dir, metadata_path, False)
+            return VideoRenderResult(output_path, composition_dir, metadata_path, skills.metadata_path, False)
         metadata["status"] = "failed"
         metadata["reason"] = "command did not produce output video"
     except Exception as exc:  # noqa: BLE001 - optional external renderer.
@@ -76,7 +86,7 @@ def render_final_video(
         metadata["error"] = f"{type(exc).__name__}: {exc}"
 
     _write_metadata(metadata_path, metadata)
-    return VideoRenderResult(fallback_video, composition_dir, metadata_path, True)
+    return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
 
 
 def _write_hyperframes_composition(plan: dict[str, Any], package_dir: Path, preview_html: Path) -> Path:

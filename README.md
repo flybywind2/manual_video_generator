@@ -32,11 +32,11 @@
 | 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
 | `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
 | 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
-| `playwright-mcp` | 어댑터 구현 | action plan을 MCP tool call manifest로 변환 |
+| `playwright-mcp` | 어댑터 구현 | manifest 생성 또는 live stdio JSON-RPC 실행 |
 | 내부 LLM/RAG/Reranker | 어댑터 구현 | `.env`로 켜면 RAG/Reranker context와 LLM JSON planner 호출 |
 | VLM | 설정 준비 | `.env`와 상태 API만 준비, 화면 검수 호출은 다음 단계 |
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
-| HyperFrames | 어댑터 구현 | composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
+| HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
 | PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
 | MP4 | 옵션 | HyperFrames 렌더 성공 시 MP4, 기본은 WebM |
 
@@ -54,7 +54,7 @@ flowchart LR
     G --> H["WebM / Markdown / PDF / JSON 패키지"]
 ```
 
-현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER` 등을 켜면 내부 LLM/RAG/Reranker, MeloTTS, HyperFrames 어댑터를 사용합니다.
+현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright MCP, MeloTTS, HyperFrames skills/render 어댑터를 실제 실행합니다.
 
 ## 환경 준비
 
@@ -104,7 +104,7 @@ ffmpeg -version
 
 ### 3. Playwright MCP
 
-현재 백엔드 파이프라인은 Python Playwright를 직접 사용합니다. `playwright-mcp`는 Codex 같은 에이전트가 리허설/탐색 단계에서 브라우저를 조작하기 위한 MCP 서버입니다.
+백엔드 파이프라인은 기본 캡처에는 Python Playwright를 직접 사용합니다. `playwright-mcp`는 리허설 단계에서 action plan을 실제 브라우저 tool call로 검증하는 MCP 서버입니다.
 
 Node.js와 `npx`가 필요합니다.
 
@@ -128,6 +128,15 @@ args = ["@playwright/mcp@latest"]
 ```
 
 Windows에서 `npx`가 인식되지 않으면 Node.js 설치 경로가 `PATH`에 들어갔는지 먼저 확인합니다.
+
+앱에서 실제 MCP live session을 켜려면 `.env`를 다음처럼 설정합니다.
+
+```env
+MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
+MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
+```
+
+`live` 모드에서는 백엔드가 MCP 서버를 stdio JSON-RPC로 실행하고 `initialize`, `tools/list`, `tools/call`을 호출합니다. 실행 로그는 `playwright_mcp_execution.json`에 남습니다. 실패해도 파이프라인은 Python Playwright 캡처 또는 placeholder 캡처로 계속 진행합니다.
 
 ### 4. HyperFrames
 
@@ -155,6 +164,15 @@ npx hyperframes render
 ```powershell
 npx skills add heygen-com/hyperframes
 ```
+
+앱에서 skills 설치/확인 커맨드를 실행하게 하려면 다음 값을 켭니다.
+
+```env
+MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
+MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex
+```
+
+이 명령은 렌더링 전에 실행되고 결과는 `hyperframes_skills.json`에 저장됩니다. 사내망에서 npm 접근이 막혀 실패해도 composition 생성과 fallback 영상 생성은 계속됩니다.
 
 HyperFrames 저장소 자체를 clone해서 개발할 경우 Git LFS가 필요할 수 있습니다.
 
@@ -241,7 +259,9 @@ output/jobs/<job_id>/
   planner_trace.json
   rehearsal_log.json
   playwright_mcp_calls.json
+  playwright_mcp_execution.json
   masking_log.json
+  hyperframes_skills.json
   video_render.json
   package_manifest.json
   captures/
@@ -298,6 +318,8 @@ MANUAL_AGENT_TTS_SPEAKER
 MANUAL_AGENT_TTS_SPEED
 MANUAL_AGENT_VIDEO_RENDERER
 MANUAL_AGENT_HYPERFRAMES_COMMAND
+MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS
+MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND
 ```
 
 운영 어댑터를 켜는 예시:
@@ -306,9 +328,11 @@ MANUAL_AGENT_HYPERFRAMES_COMMAND
 MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
 MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
 MANUAL_AGENT_ENABLE_RERANKER=true
+MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
 MANUAL_AGENT_TTS_PROVIDER=melotts
 MANUAL_AGENT_TTS_DEVICE=cuda:0
 MANUAL_AGENT_VIDEO_RENDERER=hyperframes
+MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
 ```
 
 VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
@@ -377,8 +401,10 @@ POST /api/pipeline/run?capture_browser=false
 backend/
   app/
     adapters/
+      mcp_client.py
       planner.py
       rehearsal.py
+      skills.py
       tts.py
       video.py
     config.py
@@ -407,7 +433,9 @@ docs/
 - [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
 - [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
 - [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
-- [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP tool call manifest
+- [backend/app/adapters/mcp_client.py](backend/app/adapters/mcp_client.py): MCP stdio JSON-RPC client
+- [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP manifest/live rehearsal
+- [backend/app/adapters/skills.py](backend/app/adapters/skills.py): HyperFrames skills command execution
 - [backend/app/adapters/tts.py](backend/app/adapters/tts.py): MeloTTS/silent fallback
 - [backend/app/adapters/video.py](backend/app/adapters/video.py): HyperFrames composition/render fallback
 - [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
@@ -447,12 +475,12 @@ python -m pytest -q --basetemp .pytest_tmp
 ## 다음 구현 순서
 
 1. VLM 기반 화면 검수 어댑터
-2. `playwright-mcp` live stdio session 검증
-3. Action JSON 검수 및 편집 UI
-4. 시스템별 selector 학습/고정
-5. HyperFrames 렌더 템플릿 고도화
-6. MP4 변환 및 `ffmpeg` 검증
-7. PDF 정식 렌더러
+2. Action JSON 검수 및 편집 UI
+3. 시스템별 selector 학습/고정
+4. HyperFrames 렌더 템플릿 고도화
+5. MP4 변환 및 `ffmpeg` 검증
+6. PDF 정식 렌더러
+7. 실제 사내 시스템별 SSO/세션 처리 정책
 8. 시스템별 마스킹 룰과 검수 UI
 9. 운영계 위험 액션 승인 게이트
 

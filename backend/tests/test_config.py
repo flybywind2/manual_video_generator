@@ -35,6 +35,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_TTS_SPEED=1.1",
                 "MANUAL_AGENT_VIDEO_RENDERER=hyperframes",
                 "MANUAL_AGENT_HYPERFRAMES_COMMAND=npx hyperframes render",
+                "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true",
+                "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex",
             ]
         ),
         encoding="utf-8",
@@ -57,6 +59,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.tts_speed == 1.1
     assert settings.video_renderer == "hyperframes"
     assert settings.hyperframes_command == "npx hyperframes render"
+    assert settings.enable_hyperframes_skills is True
+    assert settings.hyperframes_skills_command == "npx hyperframes skills --codex"
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
     assert headers["x-dep-ticket"] == "credential:TICKET-123"
