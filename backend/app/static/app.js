@@ -90,16 +90,23 @@ function setArtifactMessage(message) {
 
 function renderArtifacts(result) {
   artifactStatus.textContent = `작업 ${result.job_id} 패키지가 생성되었습니다.`;
+  const supporting = result.supporting_artifacts || {};
   const links = [
     ["HTML 미리보기", result.artifacts.html_preview_url],
     ["영상", result.artifacts.video_url],
     ["Markdown", result.artifacts.markdown_manual_url],
     ["PDF", result.artifacts.pdf_manual_url],
     ["Action JSON", result.artifacts.action_plan_url],
+    ["Planner Trace", supporting.planner_trace || result.artifacts.planner_trace_url],
+    ["리허설 로그", supporting.rehearsal_log || result.artifacts.rehearsal_log_url],
+    ["MCP Calls", supporting.playwright_mcp_calls || result.artifacts.mcp_calls_url],
+    ["MCP 실행 로그", supporting.playwright_mcp_execution || result.artifacts.mcp_execution_url],
     ["마스킹 로그", result.artifacts.masking_log_url],
     ["TTS 메타데이터", result.artifacts.tts_metadata_url],
     ["렌더링 메타데이터", result.artifacts.video_render_metadata_url],
     ["Skills 메타데이터", result.artifacts.skills_metadata_url],
+    ["HyperFrames Composition", supporting.hyperframes_composition || result.artifacts.hyperframes_composition_url],
+    ["OpenCode Prompt", supporting.opencode_prompt || result.artifacts.opencode_prompt_url],
     ["OpenCode 메타데이터", result.artifacts.opencode_metadata_url],
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
   ].filter(([, url]) => Boolean(url));

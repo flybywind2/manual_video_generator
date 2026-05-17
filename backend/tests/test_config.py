@@ -107,6 +107,30 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert "enable_internal_planner" in status["runtime"]
 
 
+def test_process_environment_overrides_env_file_values(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MANUAL_AGENT_LLM_MODEL=file-model",
+                "MANUAL_AGENT_ENABLE_OPENCODE=false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        env_file=env_file,
+        environ={
+            "MANUAL_AGENT_LLM_MODEL": "env-model",
+            "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+        },
+    )
+
+    assert settings.llm.model == "env-model"
+    assert settings.enable_opencode is True
+
+
 def test_config_status_api_does_not_expose_secret_values(monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret")
     monkeypatch.setenv("MANUAL_AGENT_LLM_BASE_URL", "http://api.net:8000/v1")

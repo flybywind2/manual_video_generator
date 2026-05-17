@@ -314,6 +314,8 @@ Copy-Item .env.example .env
 
 그 다음 `.env`에서 `MANUAL_AGENT_*` 값을 사내 발급값으로 채웁니다.
 
+동일한 key가 `.env`와 프로세스 환경변수에 모두 있으면 프로세스 환경변수를 우선합니다. 배포/테스트에서 임시 출력 경로나 모델명을 바꿀 때 `.env`를 수정하지 않아도 됩니다.
+
 주요 설정은 다음과 같습니다.
 
 ```text
@@ -500,7 +502,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-18 passed
+21 passed
 ```
 
 ## 보안 및 운영 주의사항

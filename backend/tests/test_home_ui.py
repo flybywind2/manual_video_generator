@@ -17,3 +17,17 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "AI Center Pipeline" in body
     assert "MeloTTS" in body
     assert ".env 설정 상태" in body
+
+
+def test_static_app_exposes_review_artifact_links():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Planner Trace" in body
+    assert "리허설 로그" in body
+    assert "MCP Calls" in body
+    assert "HyperFrames Composition" in body
+    assert "OpenCode Prompt" in body

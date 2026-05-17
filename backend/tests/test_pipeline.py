@@ -105,3 +105,16 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     assert body["supporting_artifacts"]["planner_trace"].endswith("/planner_trace.json")
     assert body["supporting_artifacts"]["hyperframes_manifest"].endswith("/hyperframes/hyperframes_manifest.json")
     assert Path(body["package_dir"]).exists()
+    assert client.get(body["artifacts"]["html_preview_url"]).status_code == 200
+    planner_trace = client.get(body["supporting_artifacts"]["planner_trace"])
+    assert planner_trace.status_code == 200
+    assert planner_trace.json()["planner"] == "local-deterministic"
+
+
+def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    response = client.get("/artifacts/%2e%2e/README.md")
+
+    assert response.status_code == 404
