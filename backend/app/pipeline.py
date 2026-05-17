@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.planner import build_plan
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.tts import synthesize_tts
@@ -41,6 +42,7 @@ class ArtifactPaths(BaseModel):
     tts_metadata: Path | None = None
     video_render_metadata: Path | None = None
     skills_metadata: Path | None = None
+    opencode_metadata: Path | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -116,6 +118,7 @@ def run_pipeline(
         fallback_video=video_path,
         settings=settings,
     )
+    opencode_result = run_opencode_agent(plan=plan, package_dir=dirs.package, settings=settings)
 
     manifest_path = dirs.package / "package_manifest.json"
     artifacts = ArtifactPaths(
@@ -132,6 +135,7 @@ def run_pipeline(
         tts_metadata=tts_result.metadata_path,
         video_render_metadata=video_render.metadata_path,
         skills_metadata=video_render.skills_metadata_path,
+        opencode_metadata=opencode_result.metadata_path,
     )
     result = PipelineResult(
         job_id=job_id,
@@ -167,6 +171,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "tts_metadata_url": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
             "video_render_metadata_url": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
             "skills_metadata_url": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
+            "opencode_metadata_url": f"{rel_base}/opencode_agent.json" if result.artifacts.opencode_metadata else None,
         },
     }
 
@@ -470,6 +475,7 @@ def _manifest(result: PipelineResult) -> dict[str, Any]:
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
             "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,
             "skills_metadata": str(result.artifacts.skills_metadata) if result.artifacts.skills_metadata else None,
+            "opencode_metadata": str(result.artifacts.opencode_metadata) if result.artifacts.opencode_metadata else None,
         },
     }
 

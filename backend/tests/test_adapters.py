@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 from backend.app.adapters.planner import build_plan
+from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.skills import ensure_hyperframes_skills
 from backend.app.adapters.tts import synthesize_tts
@@ -234,3 +235,53 @@ def test_hyperframes_skills_command_runs_when_enabled(tmp_path: Path):
     assert Path(metadata["command"][0]).name.lower() in {"npx", "npx.cmd"}
     assert metadata["command"][1:] == ["hyperframes", "skills", "--codex"]
     assert metadata["stdout"] == "skills installed"
+
+
+def test_opencode_agent_runs_prompt_in_package_directory(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+            "MANUAL_AGENT_OPENCODE_COMMAND": "opencode run --format json",
+            "MANUAL_AGENT_OPENCODE_AGENT": "build",
+            "MANUAL_AGENT_OPENCODE_MODEL": "openai/gpt-5",
+        }
+    )
+    plan = {
+        "steps": [{"id": "step_intro", "title": "요청 확인", "caption": "요청 확인", "narration": "요청 확인"}],
+        "actions": [{"id": "a1", "type": "navigate", "target": "http://127.0.0.1:8000/sample"}],
+    }
+    (tmp_path / "hyperframes").mkdir()
+    (tmp_path / "hyperframes" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    def fake_runner(args, **kwargs):
+        assert kwargs["cwd"] == str(tmp_path)
+        assert Path(tmp_path / "opencode_prompt.md").exists()
+        assert Path(args[0]).name.lower() in {"opencode", "opencode.exe", "opencode.cmd"}
+        assert args[1:4] == ["run", "--format", "json"]
+        assert "--agent" in args
+        assert "--model" in args
+        assert "Manual Video Agent" in args[-1]
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout='{"type":"message","text":"ok"}', stderr="")
+
+    result = run_opencode_agent(
+        plan=plan,
+        package_dir=tmp_path,
+        settings=settings,
+        command_runner=fake_runner,
+    )
+
+    assert result.status == "completed"
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["enabled"] is True
+    assert metadata["agent"] == "build"
+    assert metadata["model"] == "openai/gpt-5"
+    assert metadata["stdout"] == '{"type":"message","text":"ok"}'
+
+
+def test_opencode_agent_skips_when_disabled(tmp_path: Path):
+    settings = load_settings(environ={})
+    result = run_opencode_agent(plan={"steps": [], "actions": []}, package_dir=tmp_path, settings=settings)
+
+    assert result.status == "skipped"
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["enabled"] is False

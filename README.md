@@ -37,6 +37,7 @@
 | VLM | 설정 준비 | `.env`와 상태 API만 준비, 화면 검수 호출은 다음 단계 |
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
 | HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
+| OpenCode | 어댑터 구현 | 생성 패키지 디렉터리에서 `opencode run` 비대화형 agent pass 실행 |
 | PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
 | MP4 | 옵션 | HyperFrames 렌더 성공 시 MP4, 기본은 WebM |
 
@@ -54,7 +55,7 @@ flowchart LR
     G --> H["WebM / Markdown / PDF / JSON 패키지"]
 ```
 
-현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright MCP, MeloTTS, HyperFrames skills/render 어댑터를 실제 실행합니다.
+현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE` 등을 켜면 내부 LLM/RAG/Reranker, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터를 실제 실행합니다.
 
 ## 환경 준비
 
@@ -217,6 +218,30 @@ npx -v
 ffmpeg -version
 ```
 
+### 7. OpenCode
+
+OpenCode는 생성된 산출물 패키지 디렉터리에서 비대화형 agent pass를 실행하는 선택 기능입니다. OpenCode CLI 문서의 `opencode run [message..]` 형태를 사용합니다.
+
+설치/확인:
+
+```powershell
+npm install -g opencode-ai
+opencode --help
+opencode run --help
+```
+
+앱에서 OpenCode를 켜려면 `.env`를 다음처럼 설정합니다.
+
+```env
+MANUAL_AGENT_ENABLE_OPENCODE=true
+MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json
+MANUAL_AGENT_OPENCODE_AGENT=build
+MANUAL_AGENT_OPENCODE_MODEL=
+MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=600
+```
+
+OpenCode 어댑터는 각 job 패키지에 `opencode_prompt.md`를 만들고, 그 prompt를 `opencode run` 마지막 인자로 넘깁니다. 기본 prompt는 `hyperframes/index.html`, `hyperframes/hyperframes_manifest.json`, `opencode_notes.md`만 편집 대상으로 제한합니다. 실행 결과는 `opencode_agent.json`에 저장됩니다.
+
 ## 실행 방법
 
 ```powershell
@@ -262,6 +287,8 @@ output/jobs/<job_id>/
   playwright_mcp_execution.json
   masking_log.json
   hyperframes_skills.json
+  opencode_prompt.md
+  opencode_agent.json
   video_render.json
   package_manifest.json
   captures/
@@ -320,6 +347,11 @@ MANUAL_AGENT_VIDEO_RENDERER
 MANUAL_AGENT_HYPERFRAMES_COMMAND
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS
 MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND
+MANUAL_AGENT_ENABLE_OPENCODE
+MANUAL_AGENT_OPENCODE_COMMAND
+MANUAL_AGENT_OPENCODE_AGENT
+MANUAL_AGENT_OPENCODE_MODEL
+MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS
 ```
 
 운영 어댑터를 켜는 예시:
@@ -333,6 +365,7 @@ MANUAL_AGENT_TTS_PROVIDER=melotts
 MANUAL_AGENT_TTS_DEVICE=cuda:0
 MANUAL_AGENT_VIDEO_RENDERER=hyperframes
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
+MANUAL_AGENT_ENABLE_OPENCODE=true
 ```
 
 VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
@@ -402,6 +435,7 @@ backend/
   app/
     adapters/
       mcp_client.py
+      opencode.py
       planner.py
       rehearsal.py
       skills.py
@@ -434,6 +468,7 @@ docs/
 - [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
 - [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
 - [backend/app/adapters/mcp_client.py](backend/app/adapters/mcp_client.py): MCP stdio JSON-RPC client
+- [backend/app/adapters/opencode.py](backend/app/adapters/opencode.py): OpenCode CLI agent pass
 - [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP manifest/live rehearsal
 - [backend/app/adapters/skills.py](backend/app/adapters/skills.py): HyperFrames skills command execution
 - [backend/app/adapters/tts.py](backend/app/adapters/tts.py): MeloTTS/silent fallback
@@ -492,5 +527,6 @@ python -m pytest -q --basetemp .pytest_tmp
 - [Microsoft Playwright MCP README](https://github.com/microsoft/playwright-mcp)
 - [HyperFrames README](https://github.com/heygen-com/hyperframes)
 - [MeloTTS 설치 문서](https://github.com/myshell-ai/MeloTTS/blob/main/docs/install.md)
+- [OpenCode CLI 문서](https://opencode.ai/docs/cli/)
 - [docs/plans/2026-05-17-internal-system-manual-video-agent-design.md](docs/plans/2026-05-17-internal-system-manual-video-agent-design.md)
 - [docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md](docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md)

@@ -100,6 +100,7 @@ function renderArtifacts(result) {
     ["TTS 메타데이터", result.artifacts.tts_metadata_url],
     ["렌더링 메타데이터", result.artifacts.video_render_metadata_url],
     ["Skills 메타데이터", result.artifacts.skills_metadata_url],
+    ["OpenCode 메타데이터", result.artifacts.opencode_metadata_url],
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
   ].filter(([, url]) => Boolean(url));
   artifactLinks.innerHTML = links
@@ -123,6 +124,7 @@ async function loadConfigStatus() {
       ["Renderer", true, status.runtime.video_renderer],
       ["Skills", status.runtime.enable_hyperframes_skills, status.runtime.enable_hyperframes_skills ? "enabled" : "disabled"],
       ["MCP", status.runtime.playwright_mcp_mode !== "off", status.runtime.playwright_mcp_mode],
+      ["OpenCode", status.runtime.enable_opencode, status.runtime.enable_opencode ? (status.runtime.opencode_agent || "enabled") : "disabled"],
     ];
     configGrid.innerHTML = rows
       .map(([label, configured, detail]) => {

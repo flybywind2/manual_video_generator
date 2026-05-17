@@ -37,6 +37,11 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_HYPERFRAMES_COMMAND=npx hyperframes render",
                 "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true",
                 "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex",
+                "MANUAL_AGENT_ENABLE_OPENCODE=true",
+                "MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json",
+                "MANUAL_AGENT_OPENCODE_AGENT=build",
+                "MANUAL_AGENT_OPENCODE_MODEL=openai/gpt-5",
+                "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=900",
             ]
         ),
         encoding="utf-8",
@@ -61,6 +66,11 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.hyperframes_command == "npx hyperframes render"
     assert settings.enable_hyperframes_skills is True
     assert settings.hyperframes_skills_command == "npx hyperframes skills --codex"
+    assert settings.enable_opencode is True
+    assert settings.opencode_command == "opencode run --format json"
+    assert settings.opencode_agent == "build"
+    assert settings.opencode_model == "openai/gpt-5"
+    assert settings.opencode_timeout_seconds == 900
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
     assert headers["x-dep-ticket"] == "credential:TICKET-123"

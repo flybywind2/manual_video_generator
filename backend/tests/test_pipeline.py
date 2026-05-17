@@ -32,10 +32,12 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert (result.package_dir / "hyperframes" / "index.html").exists()
     assert (result.package_dir / "playwright_mcp_calls.json").exists()
     assert (result.package_dir / "hyperframes_skills.json").exists()
+    assert (result.package_dir / "opencode_agent.json").exists()
     manifest = result.artifacts.package_manifest.read_text(encoding="utf-8")
     assert '"tts_audio": [' in manifest
     assert '"video_render"' in manifest
     assert '"skills_metadata"' in manifest
+    assert '"opencode_metadata"' in manifest
     assert "config_status" in result.plan
 
 

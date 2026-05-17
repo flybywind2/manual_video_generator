@@ -124,6 +124,11 @@ class AppSettings:
     hyperframes_command: str
     enable_hyperframes_skills: bool
     hyperframes_skills_command: str
+    enable_opencode: bool
+    opencode_command: str
+    opencode_agent: str
+    opencode_model: str
+    opencode_timeout_seconds: float
     request_timeout_seconds: float
 
     def safe_status(self) -> dict[str, object]:
@@ -148,6 +153,11 @@ class AppSettings:
                 "hyperframes_command_set": bool(self.hyperframes_command),
                 "enable_hyperframes_skills": self.enable_hyperframes_skills,
                 "hyperframes_skills_command_set": bool(self.hyperframes_skills_command),
+                "enable_opencode": self.enable_opencode,
+                "opencode_command_set": bool(self.opencode_command),
+                "opencode_agent": self.opencode_agent,
+                "opencode_model": self.opencode_model,
+                "opencode_timeout_seconds": self.opencode_timeout_seconds,
                 "request_timeout_seconds": self.request_timeout_seconds,
             },
         }
@@ -220,6 +230,11 @@ def load_settings(
         hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx hyperframes render"),
         enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
         hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx hyperframes skills --codex"),
+        enable_opencode=_get_bool(env, "ENABLE_OPENCODE", False),
+        opencode_command=_get(env, "OPENCODE_COMMAND", "opencode run --format json"),
+        opencode_agent=_get(env, "OPENCODE_AGENT"),
+        opencode_model=_get(env, "OPENCODE_MODEL"),
+        opencode_timeout_seconds=_get_float(env, "OPENCODE_TIMEOUT_SECONDS", 600.0),
         request_timeout_seconds=_get_float(env, "REQUEST_TIMEOUT_SECONDS", 30.0),
     )
 
