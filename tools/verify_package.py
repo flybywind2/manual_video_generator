@@ -17,6 +17,20 @@ REQUIRED_ARTIFACTS = {
     "audit_log",
 }
 
+REQUIRED_SUPPORTING_ARTIFACTS = {
+    "request",
+    "planner_trace",
+    "rehearsal_log",
+    "playwright_mcp_calls",
+    "audit_log",
+    "tts_metadata",
+    "video_render",
+    "opencode_prompt",
+    "opencode_metadata",
+    "hyperframes_composition",
+    "hyperframes_manifest",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a generated manual video package manifest.")
@@ -56,6 +70,19 @@ def verify_manifest(manifest_path: Path) -> list[str]:
         path = Path(str(path_value))
         if not path.is_file():
             errors.append(f"artifact path does not exist: {key}={path}")
+
+    supporting_artifacts = manifest.get("supporting_artifacts")
+    if not isinstance(supporting_artifacts, dict):
+        errors.append("supporting_artifacts object missing")
+    else:
+        for key in sorted(REQUIRED_SUPPORTING_ARTIFACTS):
+            path_value = supporting_artifacts.get(key)
+            if not path_value:
+                errors.append(f"supporting artifact missing from manifest: {key}")
+                continue
+            path = Path(str(path_value))
+            if not path.is_file():
+                errors.append(f"supporting artifact path does not exist: {key}={path}")
 
     manual = _path_from(artifacts, "markdown_manual")
     if manual and manual.exists() and not manual.read_text(encoding="utf-8").strip():

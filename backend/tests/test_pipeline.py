@@ -152,3 +152,25 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
     assert manifest["environment"]["python_version"]
     assert manifest["environment"]["playwright_browsers_path"]
+
+
+def test_package_manifest_environment_fingerprint_does_not_include_secret_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret-key")
+    monkeypatch.setenv("MANUAL_AGENT_DEP_TICKET", "credential:SECRET")
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001", "password": "do-not-echo"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    manifest_text = result.artifacts.package_manifest.read_text(encoding="utf-8")
+
+    assert "super-secret-key" not in manifest_text
+    assert "credential:SECRET" not in manifest_text
+    assert "do-not-echo" not in manifest_text

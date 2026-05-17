@@ -60,3 +60,22 @@ def test_build_runtime_environment_reads_runtime_values_from_env_file(tmp_path: 
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == "D:\\pw"
     assert env["HF_HOME"] == "D:\\hf"
     assert env["NPM_CONFIG_CACHE"] == "D:\\npm"
+
+
+def test_build_runtime_environment_prepends_existing_portable_bins(tmp_path: Path):
+    for path in [
+        tmp_path / "runtime" / "python",
+        tmp_path / "runtime" / "node",
+        tmp_path / "runtime" / "ffmpeg" / "bin",
+    ]:
+        path.mkdir(parents=True)
+
+    env = build_runtime_environment(root=tmp_path, environ={"PATH": "C:\\Windows\\System32"})
+
+    parts = env["PATH"].split(";")
+    assert parts[:3] == [
+        str(tmp_path / "runtime" / "python"),
+        str(tmp_path / "runtime" / "node"),
+        str(tmp_path / "runtime" / "ffmpeg" / "bin"),
+    ]
+    assert parts[-1] == "C:\\Windows\\System32"

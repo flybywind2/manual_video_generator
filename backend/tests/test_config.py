@@ -131,6 +131,50 @@ def test_process_environment_overrides_env_file_values(tmp_path: Path):
     assert settings.enable_opencode is True
 
 
+def test_load_settings_reads_manual_agent_env_file_pointer(tmp_path: Path):
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MANUAL_AGENT_LLM_MODEL=file-pointer-model",
+                "MANUAL_AGENT_OUTPUT_DIR=D:\\manual-output",
+                "MANUAL_AGENT_ENABLE_OPENCODE=true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(environ={"MANUAL_AGENT_ENV_FILE": str(env_file)})
+
+    assert settings.llm.model == "file-pointer-model"
+    assert settings.output_dir == "D:\\manual-output"
+    assert settings.enable_opencode is True
+
+
+def test_process_environment_overrides_manual_agent_env_file_pointer(tmp_path: Path):
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MANUAL_AGENT_LLM_MODEL=file-pointer-model",
+                "MANUAL_AGENT_ENABLE_OPENCODE=false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENV_FILE": str(env_file),
+            "MANUAL_AGENT_LLM_MODEL": "process-model",
+            "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+        }
+    )
+
+    assert settings.llm.model == "process-model"
+    assert settings.enable_opencode is True
+
+
 def test_config_status_api_does_not_expose_secret_values(monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret")
     monkeypatch.setenv("MANUAL_AGENT_LLM_BASE_URL", "http://api.net:8000/v1")
@@ -146,3 +190,24 @@ def test_config_status_api_does_not_expose_secret_values(monkeypatch):
     assert "super-secret" not in body
     assert "credential:SECRET" not in body
     assert response.json()["llm"]["configured"] is True
+
+
+def test_config_status_api_reads_manual_agent_env_file_pointer(tmp_path: Path, monkeypatch):
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MANUAL_AGENT_LLM_MODEL=api-pointer-model",
+                "MANUAL_AGENT_ENABLE_OPENCODE=true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MANUAL_AGENT_ENV_FILE", str(env_file))
+
+    response = TestClient(app).get("/api/config/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["llm"]["model"] == "api-pointer-model"
+    assert body["runtime"]["enable_opencode"] is True

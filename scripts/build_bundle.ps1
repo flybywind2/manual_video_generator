@@ -19,6 +19,22 @@ $HfCache = Join-Path $Runtime "hf-cache"
 
 New-Item -ItemType Directory -Force -Path $Dist, $Runtime, $Wheels, $Browsers, $NpmCache, $HfCache | Out-Null
 
+function Get-Sha256 {
+    param([string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha.ComputeHash($stream)
+            return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 Write-Host "Copying source files"
 $exclude = @(".git", ".pytest_cache", ".pytest_tmp", ".playwright-mcp", "output", "dist", "runtime")
 Get-ChildItem -Force $Root | Where-Object { $exclude -notcontains $_.Name } | ForEach-Object {
@@ -58,7 +74,7 @@ $versions = [ordered]@{
 $versions.files = Get-ChildItem -Path $Dist -Recurse -File | Where-Object { $_.FullName -notlike "*\versions.json" } | ForEach-Object {
     [ordered]@{
         path = $_.FullName.Substring($Dist.Length + 1)
-        sha256 = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+        sha256 = Get-Sha256 $_.FullName
         size = $_.Length
     }
 }

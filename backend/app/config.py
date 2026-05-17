@@ -168,9 +168,10 @@ def load_settings(
     env_file: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> AppSettings:
-    dot_env_path = Path(".env") if env_file is None else env_file
+    source_environ = os.environ if environ is None else environ
+    dot_env_path = _settings_env_file(env_file=env_file, environ=source_environ)
     env = parse_env_file(dot_env_path)
-    env.update(dict(os.environ if environ is None else environ))
+    env.update(dict(source_environ))
 
     dep_ticket = _get(env, "DEP_TICKET")
     send_system_name = _get(env, "SEND_SYSTEM_NAME", "manual-video-agent")
@@ -254,6 +255,15 @@ def parse_env_file(path: Path) -> dict[str, str]:
         if key:
             values[key] = value
     return values
+
+
+def _settings_env_file(*, env_file: Path | None, environ: Mapping[str, str]) -> Path:
+    if env_file is not None:
+        return env_file
+    configured = environ.get(f"{APP_PREFIX}ENV_FILE", "").strip()
+    if configured:
+        return Path(configured)
+    return Path(".env")
 
 
 def _get(env: Mapping[str, str], suffix: str, default: str = "") -> str:
