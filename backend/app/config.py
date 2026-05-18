@@ -36,6 +36,7 @@ class OpenAiCompatibleSettings:
 
     def default_headers(self) -> dict[str, str]:
         return {
+            "Accept": "application/json",
             "x-dep-ticket": self.dep_ticket,
             "Send-System-Name": self.send_system_name,
             "User-Id": self.user_id,

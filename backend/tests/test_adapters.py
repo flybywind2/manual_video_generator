@@ -75,6 +75,7 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
     assert result["source"] == "internal-llm"
     assert result["effective_input_values"] == {"사용자ID": "U100"}
     assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
+    assert calls[0]["headers"]["Accept"] == "application/json"
     rendered = (tmp_path / "input_extraction.json").read_text(encoding="utf-8")
     assert "123456" not in rendered
     assert "plain" not in rendered
@@ -154,6 +155,7 @@ def test_browser_agent_decides_next_action_from_page_observation():
     assert action["value"] == "LOT-001"
     assert action["source"] == "browser-agent-llm"
     assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
+    assert calls[0]["headers"]["Accept"] == "application/json"
     assert calls[0]["payload"]["messages"][1]["content"]
 
 
@@ -264,6 +266,7 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
     assert calls[0]["payload"]["model"] == "QWEN3"
     assert "Authorization" in calls[0]["headers"]
+    assert calls[0]["headers"]["Accept"] == "application/json"
 
 
 def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_invalid(tmp_path: Path):

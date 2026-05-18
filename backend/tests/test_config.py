@@ -114,6 +114,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert headers["User-Type"] == "AD_ID"
     assert headers["Prompt-Msg-Id"]
     assert headers["Completion-Msg-Id"]
+    assert headers["Accept"] == "application/json"
 
 
 def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
