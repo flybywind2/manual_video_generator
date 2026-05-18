@@ -1657,7 +1657,7 @@ def _execute_demonstration_capture(
     try:
         _install_demonstration_recorder(page)
         signal_token = _install_demonstration_signal(page, signal_state=signal_state)
-        _apply_step_overlay(page, step)
+        _clear_step_caption_overlay(page)
         completion_signal = _wait_for_demonstration_completion(page, timeout_ms, signal_state, signal_token)
         events = _read_demonstration_events(page)
         _remove_demonstration_signal(page)
@@ -2067,15 +2067,14 @@ def _install_demonstration_recorder(page: Any) -> None:
         }
         return '';
       };
-      const updateCaption = (event) => {
+      const enrichCaption = (event) => {
         const caption = captionFor(event);
-        if (!caption || typeof window.__manualSetCaption !== 'function') return;
-        try { window.__manualSetCaption(caption); } catch {}
+        if (caption) event.caption = caption;
+        return event;
       };
       const push = (event) => {
         if (window.__manualDemonstrationEvents.length >= 500) return;
-        window.__manualDemonstrationEvents.push(event);
-        updateCaption(event);
+        window.__manualDemonstrationEvents.push(enrichCaption(event));
       };
       document.addEventListener('click', (event) => {
         const el = event.target?.closest?.('button,[role="button"],a,input,textarea,select');
@@ -2560,6 +2559,21 @@ def _apply_step_overlay(page: Any, step: dict[str, Any], action: dict[str, Any] 
             # Pointer/focus overlays are recording aids only. A missing helper on
             # an unusual page must not turn a real capture step into a failure.
             pass
+
+
+def _clear_step_caption_overlay(page: Any) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              document.querySelectorAll('.manual-caption').forEach((caption) => caption.remove());
+            }
+            """
+        )
+    except Exception:
+        # Caption cleanup is presentational. Keep direct demonstration capture alive
+        # even if the page is mid-navigation when the cleanup runs.
+        pass
 
 
 def _step_capture_name(step: dict[str, Any], used_names: set[str]) -> str:

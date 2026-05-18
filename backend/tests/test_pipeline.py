@@ -1810,7 +1810,7 @@ def test_demonstration_capture_waits_for_user_signal_instead_of_browser_agent(tm
     assert result["video"].exists()
 
 
-def test_demonstration_recorder_updates_visible_caption_for_recorded_events():
+def test_demonstration_recorder_records_events_without_burned_in_captions():
     calls = []
 
     class FakePage:
@@ -1824,10 +1824,55 @@ def test_demonstration_recorder_updates_visible_caption_for_recorded_events():
 
     script = "\n".join(call[1] for call in calls if call[0] in {"add_init_script", "evaluate"})
     assert "captionFor" in script
-    assert "__manualSetCaption" in script
+    assert "__manualSetCaption" not in script
+    assert "updateCaption" not in script
     assert "클릭:" in script
     assert "입력:" in script
     assert "Enter 입력" in script
+
+
+def test_demonstration_capture_does_not_set_visible_caption_overlay(tmp_path, monkeypatch):
+    calls = []
+
+    class Settings:
+        demonstration_timeout_seconds = 10.0
+
+    class FakePage:
+        def add_init_script(self, script):
+            calls.append(("add_init_script", script))
+
+        def expose_function(self, name, callback):
+            calls.append(("expose_function", name, callback))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", script, args))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    monkeypatch.setattr(pipeline_module, "_wait_for_demonstration_completion", lambda *_args, **_kwargs: "button")
+    monkeypatch.setattr(
+        pipeline_module,
+        "_read_demonstration_events",
+        lambda _page: [{"type": "click", "text": "전송"}],
+    )
+
+    result = pipeline_module._execute_demonstration_capture(
+        FakePage(),
+        PipelineInput(
+            request_text="직접 시연",
+            target_url="http://internal.example.local",
+            role="사용자",
+            completion_condition="완료",
+            execution_mode="demonstration",
+        ),
+        {"steps": [{"id": "step_1", "title": "검색", "caption": "검색합니다.", "narration": "검색합니다."}]},
+        tmp_path,
+        Settings(),
+    )
+
+    assert result["status"] == "ok"
+    assert not any(call[0] == "evaluate" and call[1] == "window.__manualSetCaption" for call in calls)
 
 
 def test_demonstration_events_drive_media_plan_and_subtitles(tmp_path):
