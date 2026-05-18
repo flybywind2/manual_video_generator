@@ -845,6 +845,58 @@ def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path
     assert metadata["video"] == str(result.video_path)
 
 
+def test_hyperframes_render_muxes_tts_audio_into_final_video(tmp_path: Path, monkeypatch):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "hyperframes render",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    audio_1 = tmp_path / "tts" / "01_intro.wav"
+    audio_2 = tmp_path / "tts" / "02_search.wav"
+    audio_1.parent.mkdir()
+    audio_1.write_bytes(b"RIFFaudio1")
+    audio_2.write_bytes(b"RIFFaudio2")
+    plan = {"steps": [{"id": "step_intro", "title": "요청 확인", "caption": "요청을 확인합니다."}]}
+    commands = []
+    monkeypatch.setattr(
+        "backend.app.adapters.video.shutil.which",
+        lambda command: r"C:\tools\ffmpeg.exe" if command == "ffmpeg" else None,
+    )
+
+    def fake_runner(args, **kwargs):
+        commands.append(args)
+        if "--output" in args:
+            Path(args[args.index("--output") + 1]).write_bytes(b"mp4-without-audio")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="rendered", stderr="")
+        output_path = Path(args[-1])
+        output_path.write_bytes(b"muxed")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ffmpeg ok", stderr="")
+
+    result = render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_1, audio_2],
+        command_runner=fake_runner,
+    )
+
+    assert result.video_path.name == "manual_video_agent_usage.mp4"
+    assert result.video_path.read_bytes() == b"muxed"
+    assert any("-f" in command and "concat" in command for command in commands)
+    assert any("-map" in command and "1:a:0" in command for command in commands)
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["audio"]["status"] == "completed"
+    assert metadata["audio"]["input_count"] == 2
+    assert metadata["audio"]["video"] == str(result.video_path)
+
+
 def test_hyperframes_render_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):
     settings = load_settings(
         environ={

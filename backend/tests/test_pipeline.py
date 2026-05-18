@@ -67,6 +67,43 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert "config_status" in result.plan
 
 
+def test_pipeline_passes_tts_audio_to_video_renderer(tmp_path, monkeypatch):
+    captured = {}
+
+    class RenderResult:
+        def __init__(self, package_dir: Path):
+            self.video_path = package_dir / "manual_video_agent_usage.mp4"
+            self.video_path.write_bytes(b"video")
+            self.composition_dir = package_dir / "hyperframes"
+            self.composition_dir.mkdir(exist_ok=True)
+            self.composition_dir.joinpath("index.html").write_text("<html></html>", encoding="utf-8")
+            self.metadata_path = package_dir / "video_render.json"
+            self.metadata_path.write_text("{}", encoding="utf-8")
+            self.skills_metadata_path = package_dir / "hyperframes_skills.json"
+            self.skills_metadata_path.write_text("{}", encoding="utf-8")
+            self.used_fallback = False
+
+    def fake_render_final_video(**kwargs):
+        captured["tts_audio"] = kwargs.get("tts_audio")
+        return RenderResult(kwargs["package_dir"])
+
+    monkeypatch.setattr(pipeline_module, "render_final_video", fake_render_final_video)
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 시스템 사용법",
+            target_url="http://127.0.0.1:8000/sample",
+            role="사용자",
+            completion_condition="완료",
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    assert result.artifacts.tts_audio
+    assert captured["tts_audio"] == result.artifacts.tts_audio
+
+
 def test_supertonic_manual_includes_ai_voice_license_notice(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_TTS_PROVIDER", "supertonic")
     monkeypatch.setenv("MANUAL_AGENT_SUPERTONIC_VOICE", "M1")

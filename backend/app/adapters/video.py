@@ -32,12 +32,14 @@ def render_final_video(
     preview_html: Path,
     fallback_video: Path,
     settings: AppSettings,
+    tts_audio: list[Path] | None = None,
     command_runner: CommandRunner | None = None,
 ) -> VideoRenderResult:
     composition_dir = _write_hyperframes_composition(plan, package_dir, preview_html, fallback_video)
     metadata_path = package_dir / "video_render.json"
     runner = subprocess.run if command_runner is None else command_runner
     renderer = settings.video_renderer.lower()
+    audio_paths = [Path(path) for path in (tts_audio or [])]
 
     metadata: dict[str, Any] = {
         "renderer": renderer,
@@ -52,8 +54,17 @@ def render_final_video(
     if renderer != "hyperframes":
         metadata["status"] = "skipped"
         metadata["reason"] = "video renderer is not hyperframes"
+        final_video = _mux_tts_audio(
+            video_path=fallback_video,
+            audio_paths=audio_paths,
+            package_dir=package_dir,
+            ffmpeg_path=shutil.which("ffmpeg"),
+            runner=runner,
+            metadata=metadata,
+        )
+        metadata["video"] = str(final_video)
         _write_metadata(metadata_path, metadata)
-        return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
+        return VideoRenderResult(final_video, composition_dir, metadata_path, skills.metadata_path, True)
 
     output_path = package_dir / "manual_video_agent_usage.mp4"
     command = _split_command(settings.hyperframes_command)
@@ -64,14 +75,24 @@ def render_final_video(
     if not command:
         metadata["status"] = "skipped"
         metadata["reason"] = "hyperframes command is empty"
+        final_video = _mux_tts_audio(
+            video_path=fallback_video,
+            audio_paths=audio_paths,
+            package_dir=package_dir,
+            ffmpeg_path=shutil.which("ffmpeg"),
+            runner=runner,
+            metadata=metadata,
+        )
+        metadata["video"] = str(final_video)
         _write_metadata(metadata_path, metadata)
-        return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
+        return VideoRenderResult(final_video, composition_dir, metadata_path, skills.metadata_path, True)
 
     ffmpeg_path = shutil.which("ffmpeg")
     metadata["ffmpeg_path"] = ffmpeg_path or ""
     if not ffmpeg_path:
         metadata["status"] = "failed"
         metadata["reason"] = "ffmpeg not found"
+        _record_audio_mux_skip(metadata, audio_paths, reason="ffmpeg not found")
         _write_metadata(metadata_path, metadata)
         return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
 
@@ -90,17 +111,156 @@ def render_final_video(
         if completed.returncode == 0 and output_path.exists():
             metadata["status"] = "completed"
             metadata["used_fallback"] = False
-            metadata["video"] = str(output_path)
+            final_video = _mux_tts_audio(
+                video_path=output_path,
+                audio_paths=audio_paths,
+                package_dir=package_dir,
+                ffmpeg_path=ffmpeg_path,
+                runner=runner,
+                metadata=metadata,
+            )
+            metadata["video"] = str(final_video)
             _write_metadata(metadata_path, metadata)
-            return VideoRenderResult(output_path, composition_dir, metadata_path, skills.metadata_path, False)
+            return VideoRenderResult(final_video, composition_dir, metadata_path, skills.metadata_path, False)
         metadata["status"] = "failed"
         metadata["reason"] = "command did not produce output video"
     except Exception as exc:  # noqa: BLE001 - optional external renderer.
         metadata["status"] = "failed"
         metadata["error"] = f"{type(exc).__name__}: {exc}"
 
+    final_video = _mux_tts_audio(
+        video_path=fallback_video,
+        audio_paths=audio_paths,
+        package_dir=package_dir,
+        ffmpeg_path=ffmpeg_path,
+        runner=runner,
+        metadata=metadata,
+    )
+    metadata["video"] = str(final_video)
     _write_metadata(metadata_path, metadata)
-    return VideoRenderResult(fallback_video, composition_dir, metadata_path, skills.metadata_path, True)
+    return VideoRenderResult(final_video, composition_dir, metadata_path, skills.metadata_path, True)
+
+
+def _mux_tts_audio(
+    *,
+    video_path: Path,
+    audio_paths: list[Path],
+    package_dir: Path,
+    ffmpeg_path: str | None,
+    runner: CommandRunner,
+    metadata: dict[str, Any],
+) -> Path:
+    existing_audio = [path for path in audio_paths if path.exists() and path.stat().st_size > 0]
+    if not existing_audio:
+        metadata["audio"] = {
+            "status": "skipped",
+            "reason": "no_tts_audio",
+            "input_count": len(audio_paths),
+        }
+        return video_path
+    if not ffmpeg_path:
+        _record_audio_mux_skip(metadata, existing_audio, reason="ffmpeg not found")
+        return video_path
+
+    mix_dir = package_dir / "audio_mix"
+    mix_dir.mkdir(parents=True, exist_ok=True)
+    concat_list = mix_dir / "tts_concat.txt"
+    narration_wav = mix_dir / "narration.wav"
+    concat_list.write_text("\n".join(_concat_file_line(path) for path in existing_audio), encoding="utf-8")
+    concat_args = [
+        ffmpeg_path,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        str(narration_wav),
+    ]
+    audio_metadata: dict[str, Any] = {
+        "status": "started",
+        "input_count": len(existing_audio),
+        "inputs": [str(path) for path in existing_audio],
+        "concat_list": str(concat_list),
+        "narration": str(narration_wav),
+    }
+    try:
+        concat_completed = runner(concat_args, cwd=str(package_dir), capture_output=True, text=True, timeout=600)
+        audio_metadata["concat_returncode"] = concat_completed.returncode
+        audio_metadata["concat_stdout"] = concat_completed.stdout[-2000:] if concat_completed.stdout else ""
+        audio_metadata["concat_stderr"] = concat_completed.stderr[-2000:] if concat_completed.stderr else ""
+        if concat_completed.returncode != 0 or not narration_wav.exists():
+            audio_metadata["status"] = "failed"
+            audio_metadata["reason"] = "tts audio concat failed"
+            metadata["audio"] = audio_metadata
+            return video_path
+
+        output_path = package_dir / "manual_video_agent_usage.mp4"
+        mux_output = package_dir / "manual_video_agent_usage.audio.tmp.mp4" if video_path.resolve() == output_path.resolve() else output_path
+        video_codec_args = ["-c:v", "copy"] if video_path.suffix.lower() == ".mp4" else ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        mux_args = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(narration_wav),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            *video_codec_args,
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(mux_output),
+        ]
+        mux_completed = runner(mux_args, cwd=str(package_dir), capture_output=True, text=True, timeout=600)
+        audio_metadata["mux_returncode"] = mux_completed.returncode
+        audio_metadata["mux_stdout"] = mux_completed.stdout[-2000:] if mux_completed.stdout else ""
+        audio_metadata["mux_stderr"] = mux_completed.stderr[-2000:] if mux_completed.stderr else ""
+        if mux_completed.returncode != 0 or not mux_output.exists():
+            audio_metadata["status"] = "failed"
+            audio_metadata["reason"] = "tts audio mux failed"
+            metadata["audio"] = audio_metadata
+            return video_path
+        if mux_output != output_path:
+            return_path = mux_output
+        else:
+            return_path = output_path
+        if mux_output.name.endswith(".tmp.mp4"):
+            mux_output.replace(output_path)
+            return_path = output_path
+        audio_metadata["status"] = "completed"
+        audio_metadata["video"] = str(return_path)
+        metadata["audio"] = audio_metadata
+        return return_path
+    except Exception as exc:  # noqa: BLE001 - narration mux should not block package generation.
+        audio_metadata["status"] = "failed"
+        audio_metadata["error"] = f"{type(exc).__name__}: {exc}"
+        metadata["audio"] = audio_metadata
+        return video_path
+
+
+def _record_audio_mux_skip(metadata: dict[str, Any], audio_paths: list[Path], *, reason: str) -> None:
+    metadata["audio"] = {
+        "status": "failed" if audio_paths else "skipped",
+        "reason": reason if audio_paths else "no_tts_audio",
+        "input_count": len(audio_paths),
+        "inputs": [str(path) for path in audio_paths],
+    }
+
+
+def _concat_file_line(path: Path) -> str:
+    normalized = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+    return f"file '{normalized}'"
 
 
 def _write_hyperframes_composition(plan: dict[str, Any], package_dir: Path, preview_html: Path, fallback_video: Path) -> Path:

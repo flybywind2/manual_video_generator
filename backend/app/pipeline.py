@@ -847,6 +847,7 @@ def rerender_pipeline_package(
         preview_html=html_path,
         fallback_video=source_video,
         settings=settings,
+        tts_audio=tts_result.audio_paths,
     )
     render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
     _record_stage(
@@ -1044,6 +1045,7 @@ def _complete_pipeline_execution(
         preview_html=html_path,
         fallback_video=video_path,
         settings=settings,
+        tts_audio=tts_result.audio_paths,
     )
     render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
     _record_stage(
