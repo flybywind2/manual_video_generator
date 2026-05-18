@@ -1244,9 +1244,16 @@ def _prepare_capture_page(page: Any, target_url: str) -> None:
         pass
     page.wait_for_function(
         """
-        () => document.readyState === 'complete'
-          && document.body
-          && document.body.children.length > 0
+        () => new Promise((resolve) => {
+          const ready = document.readyState === 'complete'
+            && document.body
+            && document.body.children.length > 0;
+          if (!ready) {
+            resolve(false);
+            return;
+          }
+          window.requestAnimationFrame(() => resolve(true));
+        })
         """,
         timeout=10000,
     )
