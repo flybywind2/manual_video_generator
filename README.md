@@ -2,7 +2,7 @@
 
 사내 시스템 사용 시나리오를 입력하면 로컬 PC에서 사용 매뉴얼 영상과 문서 패키지를 생성하는 MVP입니다.
 
-현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, MeloTTS, HyperFrames는 `.env`로 켜고 끌 수 있는 어댑터 경계까지 포함합니다.
+현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, Supertonic/MeloTTS, HyperFrames는 `.env`로 켜고 끌 수 있는 어댑터 경계까지 포함합니다.
 
 ## 무엇을 만드는 시스템인가
 
@@ -37,6 +37,7 @@
 | `playwright-mcp` | 어댑터 구현 | manifest 생성 또는 live stdio JSON-RPC 실행 |
 | 내부 LLM/RAG/Reranker | 어댑터 구현 | `.env`로 켜면 RAG/Reranker context와 LLM JSON planner 호출 |
 | VLM | 설정 준비 | `.env`와 상태 API만 준비, 화면 검수 호출은 다음 단계 |
+| Supertonic 3 TTS | 어댑터 구현 | preset voice만 사용, OpenRAIL-M/AI 음성 고지를 metadata와 manual에 기록 |
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
 | HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
 | OpenCode | 어댑터 구현 | 생성 패키지 디렉터리에서 `opencode run` 비대화형 agent pass 실행 |
@@ -186,9 +187,37 @@ winget install GitHub.GitLFS
 git lfs install
 ```
 
-### 5. MeloTTS 한국어 TTS
+### 5. Supertonic 3 / MeloTTS 한국어 TTS
 
-현재 MVP는 silent wav placeholder를 생성합니다. 실제 한국어 내레이션을 만들려면 MeloTTS 어댑터를 붙입니다.
+권장 TTS는 `Supertone/supertonic-3`입니다. ONNX Runtime 기반 로컬 추론을 사용하고 한국어(`ko`)를 지원합니다. 이 시스템에서는 라이선스/음성권 리스크를 줄이기 위해 **preset voice만 사용**하며, custom voice cloning 또는 임직원 음성 복제는 지원하지 않습니다.
+
+Supertonic 3 설정:
+
+```env
+MANUAL_AGENT_TTS_PROVIDER=supertonic
+MANUAL_AGENT_SUPERTONIC_VOICE=M1
+MANUAL_AGENT_SUPERTONIC_LANG=ko
+MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
+```
+
+설치/검증:
+
+```powershell
+python -m pip install supertonic
+python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'kr.wav')"
+```
+
+사내망/폐쇄망에서는 첫 실행 다운로드를 막기 위해 `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false`를 권장합니다. 모델 assets와 preset voice styles는 빌드 PC에서 미리 받아 번들 캐시(`HF_HOME` 또는 런타임 assets 경로)에 포함하세요.
+
+라이선스/고지 정책:
+
+- Model: `Supertone/supertonic-3`
+- Model license: `BigScience Open RAIL-M License`
+- Voice source: `preset voice` only
+- Generated manuals include an AI voice disclosure when `MANUAL_AGENT_TTS_PROVIDER=supertonic`
+- Generated `tts_metadata.json` includes the model license and preset-only voice policy
+
+MeloTTS는 대체 어댑터로 남겨둡니다. 현재 MVP는 TTS 라이브러리가 없으면 silent wav placeholder를 생성합니다. MeloTTS로 실제 한국어 내레이션을 만들려면 MeloTTS 어댑터를 사용합니다.
 
 권장 방식은 별도 TTS 가상환경을 두는 것입니다. 이 앱의 표준 Python은 `3.10.19`지만, MeloTTS 공식 문서는 Ubuntu 20.04/Python 3.9 개발·테스트 기준과 Windows Docker 사용 권장을 함께 안내합니다. Windows native 설치가 실패하면 WSL 또는 별도 Python 3.9 TTS 환경으로 분리하는 편이 안전합니다.
 
@@ -401,6 +430,9 @@ MANUAL_AGENT_TTS_DEVICE
 MANUAL_AGENT_TTS_LANGUAGE
 MANUAL_AGENT_TTS_SPEAKER
 MANUAL_AGENT_TTS_SPEED
+MANUAL_AGENT_SUPERTONIC_VOICE
+MANUAL_AGENT_SUPERTONIC_LANG
+MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD
 MANUAL_AGENT_VIDEO_RENDERER
 MANUAL_AGENT_HYPERFRAMES_COMMAND
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS
@@ -424,14 +456,16 @@ MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=8
 MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=600
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
-MANUAL_AGENT_TTS_PROVIDER=melotts
-MANUAL_AGENT_TTS_DEVICE=cuda:0
+MANUAL_AGENT_TTS_PROVIDER=supertonic
+MANUAL_AGENT_SUPERTONIC_VOICE=M1
+MANUAL_AGENT_SUPERTONIC_LANG=ko
+MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
 MANUAL_AGENT_VIDEO_RENDERER=hyperframes
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
 MANUAL_AGENT_ENABLE_OPENCODE=true
 ```
 
-VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
+MeloTTS를 사용할 때 VRAM 6GB에서 OOM이 나면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
 
 설정 변경 후 앱을 재시작합니다.
 
@@ -680,7 +714,7 @@ tools/
 - [backend/app/adapters/opencode.py](backend/app/adapters/opencode.py): OpenCode CLI agent pass
 - [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP manifest/live rehearsal
 - [backend/app/adapters/skills.py](backend/app/adapters/skills.py): HyperFrames skills command execution
-- [backend/app/adapters/tts.py](backend/app/adapters/tts.py): MeloTTS/silent fallback
+- [backend/app/adapters/tts.py](backend/app/adapters/tts.py): Supertonic preset voice, MeloTTS, silent fallback
 - [backend/app/adapters/video.py](backend/app/adapters/video.py): HyperFrames composition/render fallback
 - [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
 - [backend/app/static/styles.css](backend/app/static/styles.css): AI Center inspired 스타일

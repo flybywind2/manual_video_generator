@@ -8,6 +8,7 @@ from typing import Mapping
 
 
 APP_PREFIX = "MANUAL_AGENT_"
+SUPERTONIC_PRESET_VOICES = frozenset({f"M{index}" for index in range(1, 6)} | {f"F{index}" for index in range(1, 6)})
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,9 @@ class AppSettings:
     tts_language: str
     tts_speaker: str
     tts_speed: float
+    supertonic_voice: str
+    supertonic_lang: str
+    supertonic_auto_download: bool
     video_renderer: str
     hyperframes_command: str
     enable_hyperframes_skills: bool
@@ -218,6 +222,10 @@ class AppSettings:
                 "tts_language": self.tts_language,
                 "tts_speaker": self.tts_speaker,
                 "tts_speed": self.tts_speed,
+                "supertonic_voice": self.supertonic_voice,
+                "supertonic_lang": self.supertonic_lang,
+                "supertonic_auto_download": self.supertonic_auto_download,
+                "supertonic_custom_voice_allowed": False,
                 "video_renderer": self.video_renderer,
                 "hyperframes_command_set": bool(self.hyperframes_command),
                 "enable_hyperframes_skills": self.enable_hyperframes_skills,
@@ -317,6 +325,9 @@ def load_settings(
         tts_language=_get(env, "TTS_LANGUAGE", "KR"),
         tts_speaker=_get(env, "TTS_SPEAKER", "KR"),
         tts_speed=_get_float(env, "TTS_SPEED", 1.0),
+        supertonic_voice=_normalize_supertonic_voice(_get(env, "SUPERTONIC_VOICE", "M1")),
+        supertonic_lang=_normalize_supertonic_lang(_get(env, "SUPERTONIC_LANG", "ko")),
+        supertonic_auto_download=_get_bool(env, "SUPERTONIC_AUTO_DOWNLOAD", False),
         video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
         hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx --yes hyperframes render"),
         enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
@@ -374,6 +385,20 @@ def _normalize_llm_provider(value: str) -> str:
     if provider in {"ollama", "openai", "generic"}:
         return provider
     return "internal"
+
+
+def _normalize_supertonic_voice(value: str) -> str:
+    voice = value.strip().upper()
+    if voice in SUPERTONIC_PRESET_VOICES:
+        return voice
+    return "M1"
+
+
+def _normalize_supertonic_lang(value: str) -> str:
+    lang = value.strip().lower()
+    if lang == "kr":
+        return "ko"
+    return lang or "ko"
 
 
 def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:

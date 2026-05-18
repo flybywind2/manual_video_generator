@@ -690,6 +690,69 @@ def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_p
     assert metadata["entries"][0]["text"] == "요청을 확인합니다."
 
 
+def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_path: Path, monkeypatch):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_TTS_PROVIDER": "supertonic",
+            "MANUAL_AGENT_SUPERTONIC_VOICE": "F1",
+            "MANUAL_AGENT_SUPERTONIC_LANG": "ko",
+            "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD": "false",
+        }
+    )
+    plan = {
+        "steps": [
+            {
+                "id": "step_intro",
+                "title": "요청 확인",
+                "caption": "요청을 확인합니다.",
+                "narration": "요청을 확인합니다.",
+            }
+        ]
+    }
+    calls = []
+
+    class FakeSupertonicTts:
+        def __init__(self, *, auto_download):
+            calls.append(("init", auto_download))
+
+        def get_voice_style(self, *, voice_name):
+            calls.append(("style", voice_name))
+            return {"preset": voice_name}
+
+        def synthesize(self, text, *, voice_style, lang):
+            calls.append(("synthesize", text, voice_style, lang))
+            return [0.0, 0.1], 1.23
+
+        def save_audio(self, wav, path):
+            calls.append(("save", wav, path))
+            Path(path).write_bytes(b"RIFFsupertonic")
+
+    class FakeSupertonicModule:
+        TTS = FakeSupertonicTts
+
+    monkeypatch.setattr("backend.app.adapters.tts.importlib.import_module", lambda name: FakeSupertonicModule)
+
+    result = synthesize_tts(plan, settings, tmp_path)
+
+    assert result.audio_paths[0].read_bytes() == b"RIFFsupertonic"
+    assert calls[:3] == [
+        ("init", False),
+        ("style", "F1"),
+        ("synthesize", "요청을 확인합니다.", {"preset": "F1"}, "ko"),
+    ]
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["requested_provider"] == "supertonic"
+    assert metadata["license"]["model"] == "Supertone/supertonic-3"
+    assert metadata["license"]["license"] == "BigScience Open RAIL-M License"
+    assert metadata["voice_policy"]["custom_voice_allowed"] is False
+    assert metadata["voice_policy"]["allowed_voice_source"] == "preset"
+    assert "AI 음성 합성" in metadata["ai_voice_disclosure"]
+    assert metadata["entries"][0]["provider"] == "supertonic"
+    assert metadata["entries"][0]["speaker"] == "F1"
+    assert metadata["entries"][0]["language"] == "ko"
+    assert metadata["entries"][0]["voice_source"] == "preset"
+
+
 def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_path: Path):
     settings = load_settings(
         environ={

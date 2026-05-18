@@ -838,7 +838,7 @@ def _complete_pipeline_execution(
         },
     )
     html_path = _render_preview(effective_request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
-    markdown_path = _render_markdown(effective_request, plan, dirs, capture_result["masked_names"])
+    markdown_path = _render_markdown(effective_request, plan, dirs, capture_result["masked_names"], settings)
     pdf_path = _render_pdf_placeholder(effective_request, dirs)
     video_path = capture_result["video"]
     if not video_path.exists():
@@ -2462,7 +2462,7 @@ def _render_preview(
     return path
 
 
-def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, masked_names: list[str]) -> Path:
+def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, masked_names: list[str], settings: Any) -> Path:
     lines = [
         f"# {request.request_text}",
         "",
@@ -2470,9 +2470,21 @@ def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: Pipelin
         f"- 계정 역할: `{request.role}`",
         f"- 완료 조건: {request.completion_condition}",
         "",
-        "## 단계",
-        "",
     ]
+    if str(getattr(settings, "tts_provider", "") or "").lower() in {"supertonic", "supertonic-3"}:
+        lines.extend(
+            [
+                "## 음성 합성 고지",
+                "",
+                "- 이 영상의 내레이션은 AI 음성 합성으로 생성되었습니다.",
+                "- TTS model: `Supertone/supertonic-3`",
+                "- Model license: `BigScience Open RAIL-M License`",
+                f"- Voice source: `preset voice` (`{getattr(settings, 'supertonic_voice', 'M1')}`), custom voice cloning disabled.",
+                "- Use scope: internal training/manual purposes only.",
+                "",
+            ]
+        )
+    lines.extend(["## 단계", ""])
     for index, step in enumerate(plan["steps"][: len(masked_names)], start=1):
         lines.extend(
             [

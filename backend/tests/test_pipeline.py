@@ -63,6 +63,31 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert "config_status" in result.plan
 
 
+def test_supertonic_manual_includes_ai_voice_license_notice(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_TTS_PROVIDER", "supertonic")
+    monkeypatch.setenv("MANUAL_AGENT_SUPERTONIC_VOICE", "M1")
+    monkeypatch.setenv("MANUAL_AGENT_SUPERTONIC_LANG", "ko")
+    monkeypatch.setenv("MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD", "false")
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    manual = result.artifacts.markdown_manual.read_text(encoding="utf-8")
+    assert "AI 음성 합성" in manual
+    assert "Supertone/supertonic-3" in manual
+    assert "BigScience Open RAIL-M License" in manual
+    assert "preset voice" in manual
+
+
 def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
     result = run_pipeline(
         PipelineInput(

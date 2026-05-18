@@ -13,6 +13,9 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
     assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
     assert "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=" in env_example
+    assert "MANUAL_AGENT_SUPERTONIC_VOICE=" in env_example
+    assert "MANUAL_AGENT_SUPERTONIC_LANG=" in env_example
+    assert "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=" in env_example
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -56,6 +59,9 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_TTS_PROVIDER=melotts",
                 "MANUAL_AGENT_TTS_DEVICE=cpu",
                 "MANUAL_AGENT_TTS_SPEED=1.1",
+                "MANUAL_AGENT_SUPERTONIC_VOICE=F2",
+                "MANUAL_AGENT_SUPERTONIC_LANG=ko",
+                "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false",
                 "MANUAL_AGENT_VIDEO_RENDERER=hyperframes",
                 "MANUAL_AGENT_HYPERFRAMES_COMMAND=npx hyperframes render",
                 "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true",
@@ -101,6 +107,9 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.tts_provider == "melotts"
     assert settings.tts_device == "cpu"
     assert settings.tts_speed == 1.1
+    assert settings.supertonic_voice == "F2"
+    assert settings.supertonic_lang == "ko"
+    assert settings.supertonic_auto_download is False
     assert settings.video_renderer == "hyperframes"
     assert settings.hyperframes_command == "npx hyperframes render"
     assert settings.enable_hyperframes_skills is True
@@ -121,6 +130,20 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert headers["Prompt-Msg-Id"]
     assert headers["Completion-Msg-Id"]
     assert headers["Accept"] == "application/json"
+
+
+def test_supertonic_voice_setting_rejects_custom_voice_paths():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_TTS_PROVIDER": "supertonic",
+            "MANUAL_AGENT_SUPERTONIC_VOICE": r"C:\voices\employee.json",
+        }
+    )
+
+    assert settings.supertonic_voice == "M1"
+    status = settings.safe_status()
+    assert status["runtime"]["supertonic_voice"] == "M1"
+    assert status["runtime"]["supertonic_custom_voice_allowed"] is False
 
 
 def test_ollama_llm_provider_uses_openai_compatible_endpoint_without_internal_headers():
