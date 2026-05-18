@@ -10,6 +10,7 @@ const configGrid = document.querySelector("#config-grid");
 const inputValues = document.querySelector("#input-values");
 const inputValueList = inputValues?.querySelector("[data-input-value-list]");
 const artifactEditorModal = document.querySelector("#artifact-editor-modal");
+const artifactEditorFriendly = document.querySelector("#artifact-editor-friendly");
 const artifactEditorText = document.querySelector("#artifact-editor-text");
 const artifactEditorTitle = document.querySelector("#artifact-editor-title");
 const artifactEditorPath = document.querySelector("#artifact-editor-path");
@@ -113,6 +114,12 @@ artifactEditorModal?.addEventListener("click", async (event) => {
   const action = event.target?.closest("[data-action]")?.dataset?.action;
   if (action === "close-artifact-editor") {
     closeArtifactEditor();
+  }
+  if (action === "show-friendly-artifact") {
+    showArtifactEditorMode("friendly");
+  }
+  if (action === "show-raw-artifact") {
+    showArtifactEditorMode("raw");
   }
   if (action === "save-artifact-editor") {
     await saveArtifactEditor();
@@ -382,12 +389,14 @@ function artifactTextApiUrl(url) {
 }
 
 async function openArtifactEditor(url, label = "텍스트 산출물") {
-  if (!artifactEditorModal || !artifactEditorText || !artifactEditorPath || !artifactEditorStatus) return;
+  if (!artifactEditorModal || !artifactEditorText || !artifactEditorPath || !artifactEditorStatus || !artifactEditorFriendly) return;
   const apiUrl = artifactTextApiUrl(url);
   currentArtifactEditor = { url, apiUrl, label };
   artifactEditorModal.hidden = false;
   artifactEditorText.value = "";
   artifactEditorText.disabled = true;
+  artifactEditorFriendly.innerHTML = `<div class="artifact-empty-state">산출물을 불러오는 중입니다.</div>`;
+  showArtifactEditorMode("friendly");
   artifactEditorStatus.textContent = "불러오는 중...";
   artifactEditorPath.textContent = url;
   if (artifactEditorTitle) artifactEditorTitle.textContent = `${label} 편집`;
@@ -401,10 +410,14 @@ async function openArtifactEditor(url, label = "텍스트 산출물") {
     }
     const payload = await response.json();
     artifactEditorText.value = payload.content || "";
+    currentArtifactEditor.contentType = parseArtifactContent(payload.name || url, payload.content || "");
+    renderFriendlyArtifact(currentArtifactEditor.contentType, label);
     artifactEditorText.disabled = false;
-    artifactEditorStatus.textContent = "편집 후 저장할 수 있습니다.";
+    artifactEditorStatus.textContent = currentArtifactEditor.contentType.kind === "plain"
+      ? "원본 편집에서 내용을 수정할 수 있습니다."
+      : "쉬운 보기에서 구조를 확인하고, 원본 편집에서 저장할 수 있습니다.";
     if (artifactEditorSaveButton) artifactEditorSaveButton.disabled = false;
-    artifactEditorText.focus();
+    showArtifactEditorMode(currentArtifactEditor.contentType.kind === "plain" ? "raw" : "friendly");
   } catch (error) {
     artifactEditorStatus.textContent = error.message || "텍스트 산출물을 불러오지 못했습니다.";
   }
@@ -436,6 +449,232 @@ function closeArtifactEditor() {
   if (!artifactEditorModal) return;
   artifactEditorModal.hidden = true;
   currentArtifactEditor = null;
+}
+
+function parseArtifactContent(name, content) {
+  const lowerName = String(name || "").toLowerCase();
+  if (lowerName.endsWith(".json")) {
+    try {
+      return { kind: "json", name, data: JSON.parse(content) };
+    } catch (error) {
+      return { kind: "plain", name, content, error: error.message };
+    }
+  }
+  if (lowerName.endsWith(".jsonl")) {
+    try {
+      const rows = content.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line));
+      return { kind: "jsonl", name, data: rows };
+    } catch (error) {
+      return { kind: "plain", name, content, error: error.message };
+    }
+  }
+  return { kind: "plain", name, content };
+}
+
+function renderFriendlyArtifact(parsed, label) {
+  if (!artifactEditorFriendly) return;
+  if (!parsed || parsed.kind === "plain") {
+    artifactEditorFriendly.innerHTML = `
+      <div class="artifact-empty-state">
+        <strong>${escapeHtml(label)}</strong>
+        <span>이 산출물은 원본 편집 화면에서 바로 수정합니다.</span>
+      </div>
+    `;
+    return;
+  }
+  const data = parsed.data;
+  const summary = renderArtifactSummary(data, parsed.name);
+  const body = renderKnownArtifact(parsed.name, data) || renderGenericJsonValue(data, "전체 내용", 0);
+  artifactEditorFriendly.innerHTML = `
+    <div class="friendly-artifact">
+      ${summary}
+      <div class="friendly-section">
+        ${body}
+      </div>
+    </div>
+  `;
+}
+
+function renderArtifactSummary(data, name) {
+  const pathName = String(name || "").toLowerCase();
+  const items = [];
+  if (Array.isArray(data)) {
+    items.push(["항목", data.length]);
+  } else if (data && typeof data === "object") {
+    if (data.status) items.push(["상태", data.status]);
+    if (data.planner) items.push(["Planner", data.planner]);
+    if (data.renderer) items.push(["Renderer", data.renderer]);
+    if (Array.isArray(data.steps)) items.push(["단계", data.steps.length]);
+    if (Array.isArray(data.actions)) items.push(["액션", data.actions.length]);
+    if (Array.isArray(data.entries)) items.push(["로그", data.entries.length]);
+    if (Array.isArray(data.degradations)) items.push(["Degrade", data.degradations.length]);
+    if (data.artifacts && typeof data.artifacts === "object") items.push(["산출물", Object.keys(data.artifacts).length]);
+    if (!items.length) items.push(["필드", Object.keys(data).length]);
+  }
+  if (pathName.includes("action_plan")) items.unshift(["유형", "Action Plan"]);
+  if (pathName.includes("media_plan")) items.unshift(["유형", "Media Plan"]);
+  if (pathName.includes("package_manifest")) items.unshift(["유형", "Package Manifest"]);
+  if (pathName.includes("tts_metadata")) items.unshift(["유형", "TTS Metadata"]);
+  if (pathName.includes("capture_action_log")) items.unshift(["유형", "Capture Log"]);
+  return `<div class="friendly-summary">${items.map(([key, value]) => `
+    <div class="friendly-summary-card"><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatJsonValue(value))}</strong></div>
+  `).join("")}</div>`;
+}
+
+function renderKnownArtifact(name, data) {
+  const lowerName = String(name || "").toLowerCase();
+  if (!data || typeof data !== "object") return "";
+  if (lowerName.includes("action_plan") || lowerName.includes("media_plan")) {
+    return renderPlanArtifact(data);
+  }
+  if (lowerName.includes("tts_metadata")) {
+    return renderEntryCards(data.entries || [], "음성");
+  }
+  if (lowerName.includes("capture_action_log") || lowerName.includes("rehearsal") || lowerName.includes("mcp")) {
+    return renderEntryCards(Array.isArray(data) ? data : data.entries || data.calls || [], "로그");
+  }
+  if (lowerName.includes("package_manifest")) {
+    return renderManifestArtifact(data);
+  }
+  return "";
+}
+
+function renderPlanArtifact(data) {
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  const actions = Array.isArray(data.actions) ? data.actions : [];
+  return `
+    <div class="friendly-columns">
+      <section>
+        <h3>단계</h3>
+        ${steps.length ? steps.map((step, index) => `
+          <article class="friendly-card">
+            <span>Step ${index + 1}</span>
+            <strong>${escapeHtml(step.title || step.id || "단계")}</strong>
+            <p>${escapeHtml(step.caption || step.narration || "")}</p>
+          </article>
+        `).join("") : `<div class="artifact-empty-state">단계 없음</div>`}
+      </section>
+      <section>
+        <h3>액션</h3>
+        ${actions.length ? actions.map((action, index) => `
+          <article class="friendly-card">
+            <span>${escapeHtml(action.type || "action")} · ${index + 1}</span>
+            <strong>${escapeHtml(action.label || action.text || action.selector || action.target || action.id || "동작")}</strong>
+            <p>${escapeHtml(action.value || action.reason || action.step_id || "")}</p>
+          </article>
+        `).join("") : `<div class="artifact-empty-state">액션 없음</div>`}
+      </section>
+    </div>
+  `;
+}
+
+function renderManifestArtifact(data) {
+  return `
+    <div class="friendly-columns">
+      <section>
+        <h3>주요 산출물</h3>
+        ${renderKeyValueList(data.artifacts || {})}
+      </section>
+      <section>
+        <h3>보조 산출물</h3>
+        ${renderKeyValueList(data.supporting_artifacts || {})}
+      </section>
+    </div>
+    ${Array.isArray(data.degradations) && data.degradations.length ? `
+      <section class="friendly-block">
+        <h3>Degraded 항목</h3>
+        ${renderEntryCards(data.degradations, "Degrade")}
+      </section>
+    ` : ""}
+  `;
+}
+
+function renderEntryCards(entries, label) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return `<div class="artifact-empty-state">${escapeHtml(label)} 항목 없음</div>`;
+  }
+  return `<div class="friendly-card-list">${entries.slice(0, 80).map((entry, index) => `
+    <article class="friendly-card">
+      <span>${escapeHtml(label)} ${index + 1}</span>
+      <strong>${escapeHtml(entry.title || entry.type || entry.actor || entry.step_id || entry.status || "항목")}</strong>
+      <p>${escapeHtml(entry.text || entry.caption || entry.reason || entry.error || entry.degrade_reason || entry.value || "")}</p>
+      ${renderKeyValueList(entry, { compact: true, exclude: ["title", "caption", "text"] })}
+    </article>
+  `).join("")}</div>`;
+}
+
+function renderKeyValueList(value, options = {}) {
+  if (!value || typeof value !== "object") return "";
+  const exclude = new Set(options.exclude || []);
+  return `<dl class="${options.compact ? "friendly-kv compact" : "friendly-kv"}">${Object.entries(value)
+    .filter(([key]) => !exclude.has(key))
+    .slice(0, 80)
+    .map(([key, item]) => `
+      <div><dt>${escapeHtml(formatJsonLabel(key))}</dt><dd>${escapeHtml(formatJsonValue(item))}</dd></div>
+    `).join("")}</dl>`;
+}
+
+function renderGenericJsonValue(value, label = "값", depth = 0) {
+  if (Array.isArray(value)) {
+    return `
+      <details class="friendly-tree" ${depth < 2 ? "open" : ""}>
+        <summary>${escapeHtml(formatJsonLabel(label))} <span>${value.length}개 항목</span></summary>
+        <div>${value.map((item, index) => renderGenericJsonValue(item, `${index + 1}`, depth + 1)).join("")}</div>
+      </details>
+    `;
+  }
+  if (value && typeof value === "object") {
+    return `
+      <details class="friendly-tree" ${depth < 2 ? "open" : ""}>
+        <summary>${escapeHtml(formatJsonLabel(label))} <span>${Object.keys(value).length}개 필드</span></summary>
+        <div>${Object.entries(value).map(([key, item]) => renderGenericJsonValue(item, key, depth + 1)).join("")}</div>
+      </details>
+    `;
+  }
+  return `<div class="friendly-leaf"><span>${escapeHtml(formatJsonLabel(label))}</span><strong>${escapeHtml(formatJsonValue(value))}</strong></div>`;
+}
+
+function showArtifactEditorMode(mode) {
+  const isRaw = mode === "raw";
+  if (artifactEditorFriendly) artifactEditorFriendly.hidden = isRaw;
+  if (artifactEditorText) {
+    artifactEditorText.hidden = !isRaw;
+    if (isRaw) artifactEditorText.focus();
+  }
+  artifactEditorModal?.querySelectorAll(".artifact-editor-tab").forEach((button) => {
+    const action = button.dataset.action;
+    button.classList.toggle("is-active", (isRaw && action === "show-raw-artifact") || (!isRaw && action === "show-friendly-artifact"));
+  });
+}
+
+function formatJsonLabel(value) {
+  const labels = {
+    action_plan: "액션 플랜",
+    approval_log: "승인 로그",
+    capture_action_log: "캡처 로그",
+    completion_condition: "완료 조건",
+    created_at: "생성 시각",
+    current_step: "현재 단계",
+    degrade_reason: "강등 사유",
+    input_values: "입력값",
+    package_manifest: "패키지 매니페스트",
+    request_text: "요청문",
+    target_url: "대상 URL",
+    tts_metadata: "TTS 메타데이터",
+    video_render: "영상 렌더",
+  };
+  const key = String(value || "");
+  return labels[key] || key.replaceAll("_", " ");
+}
+
+function formatJsonValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "예" : "아니오";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value.length > 180 ? `${value.slice(0, 180)}...` : value;
+  if (Array.isArray(value)) return `${value.length}개 항목`;
+  if (typeof value === "object") return `${Object.keys(value).length}개 필드`;
+  return String(value);
 }
 
 function escapeHtml(value) {

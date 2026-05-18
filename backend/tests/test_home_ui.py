@@ -71,6 +71,13 @@ def test_static_app_exposes_review_artifact_links():
     assert "rerenderPackage" in body
     assert "/api/pipeline/rerender/" in body
     assert "패키지 기반 재렌더링" in body
+    assert "renderFriendlyArtifact" in body
+    assert "parseArtifactContent" in body
+    assert "artifactEditorFriendly" in body
+    assert "renderPlanArtifact" in body
+    assert "renderGenericJsonValue" in body
+    assert "원본 편집" in body
+    assert "쉬운 보기" in body
 
 
 def test_home_screen_includes_text_artifact_editor_modal():
@@ -81,7 +88,10 @@ def test_home_screen_includes_text_artifact_editor_modal():
     assert response.status_code == 200
     body = response.text
     assert 'id="artifact-editor-modal"' in body
+    assert 'id="artifact-editor-friendly"' in body
     assert 'id="artifact-editor-text"' in body
+    assert 'data-action="show-friendly-artifact"' in body
+    assert 'data-action="show-raw-artifact"' in body
     assert 'data-action="save-artifact-editor"' in body
     assert 'data-action="close-artifact-editor"' in body
     assert "텍스트 산출물 편집" in body

@@ -247,6 +247,11 @@
           </div>
           <button class="icon-button" type="button" data-action="close-artifact-editor" aria-label="편집 창 닫기">×</button>
         </header>
+        <div class="artifact-editor-tabs" role="tablist" aria-label="산출물 보기 방식">
+          <button class="artifact-editor-tab is-active" type="button" data-action="show-friendly-artifact">쉬운 보기</button>
+          <button class="artifact-editor-tab" type="button" data-action="show-raw-artifact">원본 편집</button>
+        </div>
+        <div id="artifact-editor-friendly" class="artifact-editor-friendly" aria-label="구조화된 산출물 보기"></div>
         <textarea id="artifact-editor-text" spellcheck="false" aria-label="텍스트 산출물 내용"></textarea>
         <footer class="artifact-editor-footer">
           <span id="artifact-editor-status"></span>
