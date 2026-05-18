@@ -270,7 +270,7 @@ function mcpStatusRow(status) {
     return { label: "MCP", state: "disabled", text: "Disabled", detail: "off" };
   }
   if (status.runtime.playwright_mcp_mode === "manifest") {
-    return { label: "MCP", state: "neutral", text: "Manifest", detail: "no live stdio" };
+    return { label: "MCP", state: "neutral", text: "Manifest only", detail: "no rehearsal" };
   }
   return status.runtime.playwright_mcp_command_set
     ? { label: "MCP", state: "ready", text: "Ready", detail: status.runtime.playwright_mcp_mode }

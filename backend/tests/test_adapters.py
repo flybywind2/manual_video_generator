@@ -497,6 +497,69 @@ def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_
     assert execution["results"]
 
 
+def test_playwright_mcp_live_mode_executes_semantic_planner_actions(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
+    plan = {
+        "steps": [{"id": "step_search", "title": "검색", "caption": "검색", "narration": "검색"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://127.0.0.1:8000/sample", "step_id": "step_search"},
+            {"id": "a2", "type": "fill_by_label", "label": "LOT", "value": "LOT-001", "step_id": "step_search"},
+            {"id": "a3", "type": "click_by_text", "texts": ["조회", "검색"], "step_id": "step_search"},
+            {"id": "a4", "type": "capture_step", "step_id": "step_search"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {"serverInfo": {"name": "fake-playwright"}}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code", "browser_snapshot"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
+
+    assert result["status"] == "live-completed"
+    assert result["executed"] is True
+    assert len(calls) == 4
+    assert any(name == "browser_run_code" and "getByLabel" in args["code"] for name, args in calls)
+    assert any(name == "browser_run_code" and "getByRole" in args["code"] and "조회" in args["code"] for name, args in calls)
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["executed"] is True
+    assert execution["attempted_actions"] == 4
+    assert execution["executed_actions"] == 4
+
+
+def test_playwright_mcp_manifest_mode_is_explicitly_not_rehearsed(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
+    plan = {
+        "steps": [{"id": "step_search", "title": "검색", "caption": "검색", "narration": "검색"}],
+        "actions": [
+            {"id": "a1", "type": "fill_by_label", "label": "LOT", "value": "LOT-001", "step_id": "step_search"},
+            {"id": "a2", "type": "click_by_text", "texts": ["조회"], "step_id": "step_search"},
+        ],
+    }
+
+    result = rehearse_plan(plan, settings, tmp_path)
+    calls = json.loads((tmp_path / "playwright_mcp_calls.json").read_text(encoding="utf-8"))["calls"]
+
+    assert result["status"] == "manifest-only"
+    assert result["executed"] is False
+    assert result["requires_live_mode"] is True
+    assert [call["action_id"] for call in calls] == ["a1", "a2"]
+    assert all(call["tool"] == "browser_run_code" for call in calls)
+
+
 def test_playwright_mcp_manifest_redacts_sensitive_fill_values(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
     plan = {

@@ -107,7 +107,7 @@ ffmpeg -version
 
 ### 3. Playwright MCP
 
-백엔드 파이프라인은 기본 캡처에는 Python Playwright를 직접 사용합니다. `playwright-mcp`는 리허설 단계에서 action plan을 실제 브라우저 tool call로 검증하는 MCP 서버입니다.
+백엔드 파이프라인은 기본 캡처에는 Python Playwright를 직접 사용합니다. `playwright-mcp`는 `live` 모드에서 action plan을 실제 브라우저 tool call로 검증하는 MCP 서버입니다. 기본 `manifest` 모드는 실제 리허설이 아니라 후보 MCP call manifest만 생성합니다.
 
 Node.js와 `npx`가 필요합니다.
 
@@ -139,7 +139,7 @@ MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
 MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
 ```
 
-`live` 모드에서는 백엔드가 MCP 서버를 stdio JSON-RPC로 실행하고 `initialize`, `tools/list`, `tools/call`을 호출합니다. 실행 로그는 `playwright_mcp_execution.json`에 남습니다. 실패해도 파이프라인은 Python Playwright 캡처 또는 placeholder 캡처로 계속 진행합니다.
+`live` 모드에서는 백엔드가 MCP 서버를 stdio JSON-RPC로 실행하고 `initialize`, `tools/list`, `tools/call`을 호출합니다. `navigate`, selector 기반 `fill/click`, semantic `fill_by_label/click_by_text`, `capture_step`을 MCP tool call로 실행하며, 실행 로그는 `playwright_mcp_execution.json`에 남습니다. 실패해도 파이프라인은 Python Playwright 캡처 또는 placeholder 캡처로 계속 진행합니다.
 
 ### 4. HyperFrames
 

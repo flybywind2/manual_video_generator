@@ -1839,7 +1839,7 @@ def _rehearsal_audit_status(rehearsal: dict[str, Any]) -> str:
     status = str(rehearsal.get("status", ""))
     if status.endswith("failed"):
         return "degraded"
-    if status in {"skipped"}:
+    if status in {"skipped", "manifest-only"}:
         return "skipped"
     return "ok"
 
