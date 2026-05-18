@@ -48,6 +48,15 @@ def test_static_app_exposes_review_artifact_links():
     assert 'login_mode.value = "";' in body
     assert 'login_mode.value = "none";' not in body
     assert "login_success_selector" in body
+    assert "/api/pipeline/draft" in body
+    assert "/api/pipeline/continue/" in body
+    assert "renderPlanReview" in body
+    assert "continue-workflow" in body
+    assert "계획 승인 후 실행" in body
+    assert 'document.querySelectorAll(".step-list .step")' in body
+    assert "setWorkflowStep(1)" in body
+    assert "setWorkflowStep(5)" in body
+    assert "is-complete" in body
 
 
 def test_static_app_marks_local_disabled_and_none_config_as_neutral_not_missing():

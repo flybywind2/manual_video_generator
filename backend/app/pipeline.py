@@ -72,6 +72,19 @@ class PipelineResult(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
 
+class PipelineDraftResult(BaseModel):
+    job_id: str
+    status: str
+    current_step: str
+    can_continue: bool
+    package_dir: Path
+    plan: dict[str, Any]
+    rehearsal: dict[str, Any]
+    approval: dict[str, Any]
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
 @dataclass(frozen=True)
 class PipelineDirs:
     package: Path
@@ -432,6 +445,267 @@ def run_pipeline(
     )
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
 
+    return _complete_pipeline_execution(
+        job_id=job_id,
+        effective_request=effective_request,
+        plan=plan,
+        artifact_plan=artifact_plan,
+        artifact_rehearsal=artifact_rehearsal,
+        settings=settings,
+        dirs=dirs,
+        audit=audit,
+        terminal=terminal,
+        environment=environment,
+        capture_browser=capture_browser,
+        action_plan_path=action_plan_path,
+        approval_log_path=approval_log_path,
+    )
+
+
+def create_pipeline_draft(
+    request: PipelineInput,
+    *,
+    base_dir: Path | None = None,
+    capture_browser: bool = True,
+) -> PipelineDraftResult:
+    apply_runtime_environment()
+    settings = load_settings()
+    output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
+    job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    dirs = _make_dirs(output_root / "jobs" / job_id)
+    audit = AuditLog(run_id=job_id, path=dirs.package / "audit_log.jsonl")
+    terminal = TerminalRunLogger(enabled=settings.enable_terminal_logs)
+    terminal.record(
+        run_id=job_id,
+        actor="pipeline",
+        status="draft-started",
+        details=_pipeline_start_details(settings, output_root, capture_browser),
+    )
+    terminal.record(run_id=job_id, actor="environment", status="started")
+    environment = runtime_fingerprint()
+    _record_stage(
+        audit,
+        terminal,
+        actor="environment",
+        status="ok",
+        output_data=environment,
+        terminal_details=_environment_terminal_details(environment),
+    )
+    _record_runtime_tool_inventory(audit, terminal, settings=settings, environment=environment, capture_browser=capture_browser)
+    original_request_payload = redact_sensitive(request.model_dump())
+
+    terminal.record(
+        run_id=job_id,
+        actor="input_extractor",
+        status="started",
+        details={
+            "enabled": settings.enable_input_extractor,
+            "llm_configured": settings.llm.is_configured,
+            "explicit_input_count": len(request.input_values),
+        },
+    )
+    input_extraction = extract_input_values(request, settings, package_dir=dirs.package)
+    effective_request = request.model_copy(update={"input_values": input_extraction["effective_input_values"]})
+    request_payload = redact_sensitive(effective_request.model_dump())
+    _record_stage(
+        audit,
+        terminal,
+        actor="input_extractor",
+        status="degraded" if input_extraction.get("status") == "degraded" else str(input_extraction.get("status") or "ok"),
+        input_data=original_request_payload,
+        output_data=redact_sensitive(input_extraction),
+        degrade_reason="input_extractor_fallback" if input_extraction.get("status") == "degraded" else "",
+        artifacts=[dirs.package / "input_extraction.json"],
+        terminal_details={
+            "enabled": settings.enable_input_extractor,
+            "source": input_extraction.get("source", ""),
+            "extracted_count": input_extraction.get("extracted_count", 0),
+            "effective_count": input_extraction.get("effective_count", 0),
+        },
+    )
+
+    terminal.record(
+        run_id=job_id,
+        actor="planner",
+        status="started",
+        details={
+            "internal_planner_enabled": settings.enable_internal_planner,
+            "rag_context_enabled": settings.enable_rag_context,
+            "reranker_enabled": settings.enable_reranker,
+        },
+    )
+    plan = build_plan(effective_request, settings, package_dir=dirs.package)
+    artifact_plan = redact_sensitive(plan)
+    _record_stage(
+        audit,
+        terminal,
+        actor="planner",
+        status=_planner_audit_status(plan),
+        input_data=request_payload,
+        output_data=artifact_plan,
+        degrade_reason=_planner_degrade_reason(plan),
+        artifacts=[dirs.package / "planner_trace.json"],
+        terminal_details={
+            "planner": str(plan.get("planner") or ""),
+            "internal_planner_enabled": settings.enable_internal_planner,
+            "rag_context_enabled": settings.enable_rag_context,
+            "reranker_enabled": settings.enable_reranker,
+            "action_count": len(plan.get("actions") or []),
+            "step_count": len(plan.get("steps") or []),
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="rehearsal",
+        status="started",
+        details={
+            "playwright_mcp_mode": settings.playwright_mcp_mode,
+            "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+        },
+    )
+    rehearsal = rehearse_plan(plan, settings, dirs.package)
+    artifact_rehearsal = redact_sensitive(rehearsal)
+    _record_stage(
+        audit,
+        terminal,
+        actor="rehearsal",
+        status=_rehearsal_audit_status(rehearsal),
+        input_data=artifact_plan,
+        output_data=artifact_rehearsal,
+        degrade_reason=_rehearsal_degrade_reason(rehearsal),
+        artifacts=[dirs.package / "playwright_mcp_calls.json"],
+        terminal_details={
+            "playwright_mcp_mode": settings.playwright_mcp_mode,
+            "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+        },
+    )
+    _write_json(dirs.package / "request.json", request_payload)
+    action_plan_path = dirs.package / "action_plan.json"
+    approval_log_path = dirs.package / "approval_log.json"
+    terminal.record(run_id=job_id, actor="approval", status="started", details={"policy_mode": "sample-mvp"})
+    approval = ApprovalGate(mode="sample-mvp").approve(plan)
+    _write_json(action_plan_path, artifact_plan)
+    _write_json(approval_log_path, approval)
+    _record_stage(
+        audit,
+        terminal,
+        actor="approval",
+        status="ok",
+        input_data=artifact_plan.get("actions", []),
+        output_data=approval,
+        artifacts=[approval_log_path],
+        details={"danger_actions": len(approval["danger_actions"])},
+        terminal_details={
+            "policy_mode": "sample-mvp",
+            "danger_actions": len(approval["danger_actions"]),
+        },
+    )
+    _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
+    _write_json(
+        dirs.package / "workflow_state.json",
+        {
+            "status": "awaiting_plan_review",
+            "current_step": "plan_review",
+            "can_continue": True,
+            "request": request_payload,
+            "capture_browser": capture_browser,
+            "environment": environment,
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="pipeline",
+        status="awaiting_plan_review",
+        details={"package_dir": str(dirs.package), "action_count": len(artifact_plan.get("actions") or [])},
+        artifacts=[action_plan_path, approval_log_path, dirs.package / "rehearsal_log.json"],
+    )
+    return PipelineDraftResult(
+        job_id=job_id,
+        status="awaiting_plan_review",
+        current_step="plan_review",
+        can_continue=True,
+        package_dir=dirs.package,
+        plan=artifact_plan,
+        rehearsal=artifact_rehearsal,
+        approval=approval,
+    )
+
+
+def continue_pipeline_draft(
+    job_id: str,
+    *,
+    base_dir: Path | None = None,
+    capture_browser: bool | None = None,
+) -> PipelineResult:
+    apply_runtime_environment()
+    settings = load_settings()
+    output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
+    package_dir = (output_root / "jobs" / job_id).resolve()
+    try:
+        package_dir.relative_to((output_root / "jobs").resolve())
+    except ValueError as exc:
+        raise FileNotFoundError(f"invalid job id: {job_id}") from exc
+    state_path = package_dir / "workflow_state.json"
+    if not state_path.exists():
+        raise FileNotFoundError(f"workflow draft not found: {job_id}")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if state.get("status") == "completed":
+        manifest_path = package_dir / "package_manifest.json"
+        if manifest_path.exists():
+            return _pipeline_result_from_manifest(manifest_path)
+        raise RuntimeError(f"workflow already completed but manifest is missing: {job_id}")
+    if not state.get("can_continue"):
+        raise RuntimeError(f"workflow cannot continue: {job_id}")
+
+    dirs = _dirs_from_package(package_dir)
+    effective_request = PipelineInput(**state["request"])
+    plan = json.loads((package_dir / "action_plan.json").read_text(encoding="utf-8"))
+    rehearsal = json.loads((package_dir / "rehearsal_log.json").read_text(encoding="utf-8"))
+    audit = AuditLog(run_id=job_id, path=package_dir / "audit_log.jsonl", reset=False)
+    terminal = TerminalRunLogger(enabled=settings.enable_terminal_logs)
+    terminal.record(run_id=job_id, actor="pipeline", status="continue-started", details={"package_dir": str(package_dir)})
+    _write_json(
+        state_path,
+        {
+            **state,
+            "status": "running",
+            "current_step": "capture",
+            "can_continue": False,
+        },
+    )
+    return _complete_pipeline_execution(
+        job_id=job_id,
+        effective_request=effective_request,
+        plan=plan,
+        artifact_plan=plan,
+        artifact_rehearsal=rehearsal,
+        settings=settings,
+        dirs=dirs,
+        audit=audit,
+        terminal=terminal,
+        environment=state.get("environment") or runtime_fingerprint(),
+        capture_browser=bool(state.get("capture_browser", True)) if capture_browser is None else capture_browser,
+        action_plan_path=package_dir / "action_plan.json",
+        approval_log_path=package_dir / "approval_log.json",
+    )
+
+
+def _complete_pipeline_execution(
+    *,
+    job_id: str,
+    effective_request: PipelineInput,
+    plan: dict[str, Any],
+    artifact_plan: dict[str, Any],
+    artifact_rehearsal: dict[str, Any],
+    settings: Any,
+    dirs: PipelineDirs,
+    audit: AuditLog,
+    terminal: TerminalRunLogger,
+    environment: dict[str, str],
+    capture_browser: bool,
+    action_plan_path: Path,
+    approval_log_path: Path,
+) -> PipelineResult:
     terminal.record(
         run_id=job_id,
         actor="capture",
@@ -457,7 +731,7 @@ def run_pipeline(
         terminal,
         actor="capture",
         status=capture_status,
-        input_data={"capture_browser": capture_browser, "target_url": request.target_url},
+        input_data={"capture_browser": capture_browser, "target_url": effective_request.target_url},
         output_data={
             "captures": capture_result["masked_names"],
             "video": str(capture_result["video"]),
@@ -628,6 +902,16 @@ def run_pipeline(
         },
         artifacts=[manifest_path, video_render.video_path],
     )
+    _write_json(
+        dirs.package / "workflow_state.json",
+        {
+            "status": "completed",
+            "current_step": "completed",
+            "can_continue": False,
+            "request": redact_sensitive(effective_request.model_dump()),
+            "capture_browser": capture_browser,
+        },
+    )
     return result
 
 
@@ -672,6 +956,44 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
     }
 
 
+def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
+    rel_base = f"/artifacts/jobs/{result.job_id}"
+    return {
+        "job_id": result.job_id,
+        "status": result.status,
+        "current_step": result.current_step,
+        "can_continue": result.can_continue,
+        "package_dir": str(result.package_dir),
+        "plan": result.plan,
+        "rehearsal": result.rehearsal,
+        "approval": result.approval,
+        "artifacts": {
+            "action_plan_url": f"{rel_base}/action_plan.json",
+            "approval_log_url": f"{rel_base}/approval_log.json",
+            "rehearsal_log_url": f"{rel_base}/rehearsal_log.json",
+            "planner_trace_url": f"{rel_base}/planner_trace.json",
+            "mcp_calls_url": f"{rel_base}/playwright_mcp_calls.json",
+            "input_extraction_url": f"{rel_base}/input_extraction.json",
+            "workflow_state_url": f"{rel_base}/workflow_state.json",
+            "html_preview_url": None,
+            "video_url": None,
+            "markdown_manual_url": None,
+            "pdf_manual_url": None,
+            "capture_action_log_url": None,
+        },
+        "supporting_artifacts": {
+            "request": f"{rel_base}/request.json",
+            "input_extraction": f"{rel_base}/input_extraction.json",
+            "planner_trace": f"{rel_base}/planner_trace.json",
+            "rehearsal_log": f"{rel_base}/rehearsal_log.json",
+            "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
+            "approval_log": f"{rel_base}/approval_log.json",
+            "audit_log": f"{rel_base}/audit_log.jsonl",
+            "workflow_state": f"{rel_base}/workflow_state.json",
+        },
+    }
+
+
 def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str, str | None]:
     mcp_execution = result.package_dir / "playwright_mcp_execution.json"
     return {
@@ -701,6 +1023,42 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
     for path in (package_dir, captures, masked, tts, raw_video):
         path.mkdir(parents=True, exist_ok=True)
     return PipelineDirs(package=package_dir, captures=captures, masked=masked, tts=tts, raw_video=raw_video)
+
+
+def _dirs_from_package(package_dir: Path) -> PipelineDirs:
+    return _make_dirs(package_dir)
+
+
+def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_dir = Path(manifest["package_dir"])
+    artifacts = manifest["artifacts"]
+    return PipelineResult(
+        job_id=str(manifest["job_id"]),
+        status=str(manifest["status"]),
+        package_dir=package_dir,
+        plan=json.loads(Path(artifacts["action_plan"]).read_text(encoding="utf-8")),
+        rehearsal=json.loads((package_dir / "rehearsal_log.json").read_text(encoding="utf-8")),
+        artifacts=ArtifactPaths(
+            html_preview=Path(artifacts["html_preview"]),
+            markdown_manual=Path(artifacts["markdown_manual"]),
+            pdf_manual=Path(artifacts["pdf_manual"]),
+            video=Path(artifacts["video"]),
+            action_plan=Path(artifacts["action_plan"]),
+            approval_log=Path(artifacts["approval_log"]),
+            masking_log=Path(artifacts["masking_log"]),
+            package_manifest=Path(artifacts["package_manifest"]),
+            audit_log=Path(artifacts["audit_log"]),
+            input_extraction=Path(artifacts["input_extraction"]),
+            final_frame=Path(artifacts["final_frame"]) if artifacts.get("final_frame") else None,
+            capture_action_log=Path(artifacts["capture_action_log"]) if artifacts.get("capture_action_log") else None,
+            tts_audio=[Path(path) for path in artifacts.get("tts_audio", [])],
+            tts_metadata=Path(artifacts["tts_metadata"]) if artifacts.get("tts_metadata") else None,
+            video_render_metadata=Path(artifacts["video_render"]) if artifacts.get("video_render") else None,
+            skills_metadata=Path(artifacts["skills_metadata"]) if artifacts.get("skills_metadata") else None,
+            opencode_metadata=Path(artifacts["opencode_metadata"]) if artifacts.get("opencode_metadata") else None,
+        ),
+    )
 
 
 def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, settings: Any) -> dict[str, Any]:

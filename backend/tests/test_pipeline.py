@@ -195,6 +195,67 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     assert client.get(body["artifacts"]["input_extraction_url"]).status_code == 200
 
 
+def test_pipeline_draft_api_stops_at_plan_review_without_capture_outputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/pipeline/draft?capture_browser=false",
+        json={
+            "request_text": "MES에서 LOT 조회 방법 영상 만들기",
+            "target_url": "http://127.0.0.1:8000/sample",
+            "role": "작업자",
+            "completion_condition": "상세 화면이 보이면 완료",
+            "input_values": {"LOT": "LOT-001"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "awaiting_plan_review"
+    assert body["current_step"] == "plan_review"
+    assert body["can_continue"] is True
+    assert body["artifacts"]["action_plan_url"].endswith("/action_plan.json")
+    assert body["artifacts"]["rehearsal_log_url"].endswith("/rehearsal_log.json")
+    assert body["artifacts"]["video_url"] is None
+    assert body["artifacts"]["html_preview_url"] is None
+
+    package_dir = Path(body["package_dir"])
+    assert (package_dir / "workflow_state.json").exists()
+    assert not (package_dir / "capture_action_log.json").exists()
+    assert not (package_dir / "manual_video_agent_usage.webm").exists()
+
+
+def test_pipeline_continue_api_runs_after_draft_plan_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    draft = client.post(
+        "/api/pipeline/draft?capture_browser=false",
+        json={
+            "request_text": "MES에서 LOT 조회 방법 영상 만들기",
+            "target_url": "http://127.0.0.1:8000/sample",
+            "role": "작업자",
+            "completion_condition": "상세 화면이 보이면 완료",
+            "input_values": {"LOT": "LOT-001"},
+        },
+    ).json()
+
+    response = client.post(f"/api/pipeline/continue/{draft['job_id']}?capture_browser=false")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["job_id"] == draft["job_id"]
+    assert body["artifacts"]["video_url"].endswith("/manual_video_agent_usage.webm")
+    assert body["artifacts"]["html_preview_url"].endswith("/preview.html")
+    assert client.get(body["artifacts"]["capture_action_log_url"]).json()["status"] == "skipped"
+    workflow_state = json.loads((Path(body["package_dir"]) / "workflow_state.json").read_text(encoding="utf-8"))
+    assert workflow_state["status"] == "completed"
+    assert workflow_state["current_step"] == "completed"
+    assert workflow_state["can_continue"] is False
+
+
 def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
     client = TestClient(app)

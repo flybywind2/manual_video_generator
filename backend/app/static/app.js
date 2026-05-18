@@ -1,6 +1,7 @@
 const form = document.querySelector("#job-form");
 const sampleButton = document.querySelector("#load-sample");
 const panelState = document.querySelector(".panel-state");
+const workflowSteps = Array.from(document.querySelectorAll(".step-list .step"));
 const pipelineNodes = Array.from(document.querySelectorAll(".pipeline-node"));
 const artifactStatus = document.querySelector("#artifact-status");
 const artifactLinks = document.querySelector("#artifact-links");
@@ -12,6 +13,7 @@ const sampleInputValues = [
   { key: "LOT", value: "LOT-001" },
   { key: "라인", value: "A3" },
 ];
+let currentDraft = null;
 
 loadConfigStatus();
 
@@ -24,6 +26,9 @@ sampleButton?.addEventListener("click", () => {
   form.elements.done.value = "상세 화면이 보이면 완료";
   renderInputValues(sampleInputValues);
   panelState.textContent = "Sample loaded";
+  currentDraft = null;
+  setWorkflowStep(0);
+  setPipelineProgress(0);
 });
 
 inputValues?.addEventListener("click", (event) => {
@@ -39,43 +44,90 @@ inputValues?.addEventListener("click", (event) => {
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setBusy(true);
+  currentDraft = null;
+  setBusy(true, "계획 생성 중...");
+  setWorkflowStep(0);
   setPipelineProgress(0);
   setStatus("Planning");
-  setArtifactMessage("파이프라인을 실행하고 있습니다. 샘플 화면 캡처, 마스킹, 내레이션, 문서/영상 패키지를 생성합니다.");
+  setArtifactMessage("요청을 분석하고 Action Plan, 승인 로그, MCP 리허설 결과를 생성합니다. 아직 캡처나 영상 렌더는 실행하지 않습니다.");
 
   try {
-    const payload = {
-      request_text: form.elements.request.value.trim(),
-      target_url: form.elements.url.value.trim(),
-      role: form.elements.role.value.trim(),
-      completion_condition: form.elements.done.value.trim(),
-      login_mode: form.elements.login_mode.value,
-      login_success_selector: form.elements.login_success_selector.value.trim(),
-      input_values: readInputValues(),
-    };
-
-    const response = await fetch("/api/pipeline/run", {
+    const response = await fetch("/api/pipeline/draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(createPipelinePayload()),
     });
 
     if (!response.ok) {
-      throw new Error(`Pipeline failed: ${response.status}`);
+      throw new Error(`Draft failed: ${response.status}`);
     }
 
-    const result = await response.json();
-    setPipelineProgress(5);
-    setStatus("Completed");
-    renderArtifacts(result);
+    currentDraft = await response.json();
+    setWorkflowStep(1);
+    setPipelineProgress(1);
+    setStatus("Plan review");
+    renderPlanReview(currentDraft);
   } catch (error) {
     setStatus("Failed");
-    setArtifactMessage(error.message || "파이프라인 실행 중 오류가 발생했습니다.");
+    setArtifactMessage(error.message || "계획 생성 중 오류가 발생했습니다.");
   } finally {
     setBusy(false);
   }
 });
+
+artifactLinks?.addEventListener("click", async (event) => {
+  const button = event.target?.closest("[data-action='continue-workflow']");
+  if (!button) return;
+  event.preventDefault();
+  if (!currentDraft?.job_id) {
+    setArtifactMessage("계획 검수 대기 중인 작업을 찾지 못했습니다.");
+    return;
+  }
+  await continueWorkflow(currentDraft.job_id, button);
+});
+
+function createPipelinePayload() {
+  return {
+    request_text: form.elements.request.value.trim(),
+    target_url: form.elements.url.value.trim(),
+    role: form.elements.role.value.trim(),
+    completion_condition: form.elements.done.value.trim(),
+    login_mode: form.elements.login_mode.value,
+    login_success_selector: form.elements.login_success_selector.value.trim(),
+    input_values: readInputValues(),
+  };
+}
+
+async function continueWorkflow(jobId, button) {
+  button.disabled = true;
+  setBusy(true, "실행 중...");
+  setWorkflowStep(2);
+  setPipelineProgress(2);
+  setStatus("Running");
+  setArtifactMessage("승인된 계획으로 브라우저 캡처, 마스킹, TTS, HyperFrames 렌더를 실행합니다.");
+
+  try {
+    const response = await fetch(`/api/pipeline/continue/${encodeURIComponent(jobId)}`, {
+      method: "POST",
+    });
+    if (!response.ok) {
+      throw new Error(`Continue failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    currentDraft = null;
+    setWorkflowStep(5);
+    setPipelineProgress(5);
+    setStatus("Completed");
+    renderArtifacts(result);
+  } catch (error) {
+    button.disabled = false;
+    setStatus("Failed");
+    renderPlanReview(currentDraft, error.message || "승인 후 실행 중 오류가 발생했습니다.");
+  } finally {
+    setBusy(false);
+  }
+}
 
 function readInputValues() {
   return Array.from(document.querySelectorAll(".input-value-row")).reduce((values, row) => {
@@ -122,15 +174,15 @@ function addInputValueRow(key = "", value = "") {
   return row;
 }
 
-function setBusy(isBusy) {
+function setBusy(isBusy, label = "") {
   if (!submitButton) return;
   submitButton.disabled = isBusy;
   submitButton.querySelector(".play-icon").style.display = isBusy ? "none" : "inline-block";
-  submitButton.lastChild.textContent = isBusy ? " 실행 중..." : " 파이프라인 실행";
+  submitButton.lastChild.textContent = isBusy ? ` ${label || "실행 중..."}` : " 파이프라인 실행";
 }
 
 function setStatus(status) {
-  panelState.textContent = status;
+  if (panelState) panelState.textContent = status;
 }
 
 function setPipelineProgress(activeIndex) {
@@ -140,9 +192,51 @@ function setPipelineProgress(activeIndex) {
   });
 }
 
+function setWorkflowStep(activeIndex) {
+  workflowSteps.forEach((step, index) => {
+    step.classList.toggle("is-active", index === activeIndex);
+    step.classList.toggle("is-complete", index < activeIndex);
+  });
+}
+
 function setArtifactMessage(message) {
   artifactStatus.textContent = message;
   artifactLinks.innerHTML = "";
+}
+
+function renderPlanReview(draft, errorMessage = "") {
+  const actions = draft.plan?.actions || [];
+  const steps = draft.plan?.steps || [];
+  const dangerActions = draft.approval?.danger_actions || [];
+  artifactStatus.textContent = `작업 ${draft.job_id} 계획 검수 대기 중입니다. 승인해야 캡처와 영상 렌더가 시작됩니다.`;
+
+  const supporting = draft.supporting_artifacts || {};
+  const artifacts = draft.artifacts || {};
+  const links = [
+    ["Action JSON", artifacts.action_plan_url],
+    ["승인 로그", artifacts.approval_log_url],
+    ["리허설 로그", artifacts.rehearsal_log_url],
+    ["Planner Trace", supporting.planner_trace || artifacts.planner_trace_url],
+    ["MCP Calls", supporting.playwright_mcp_calls || artifacts.mcp_calls_url],
+    ["Workflow State", supporting.workflow_state || artifacts.workflow_state_url],
+  ].filter(([, url]) => Boolean(url));
+
+  artifactLinks.innerHTML = `
+    <div class="plan-review">
+      ${errorMessage ? `<div class="review-error">${escapeHtml(errorMessage)}</div>` : ""}
+      <div class="review-summary">
+        <span><strong>${steps.length}</strong> 단계</span>
+        <span><strong>${actions.length}</strong> 액션</span>
+        <span><strong>${dangerActions.length}</strong> 위험 액션</span>
+      </div>
+      <div class="review-links">
+        ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
+      </div>
+      <div class="review-actions">
+        <button class="button primary" type="button" data-action="continue-workflow">계획 승인 후 실행</button>
+      </div>
+    </div>
+  `;
 }
 
 function renderArtifacts(result) {
@@ -168,8 +262,21 @@ function renderArtifacts(result) {
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
   ].filter(([, url]) => Boolean(url));
   artifactLinks.innerHTML = links
-    .map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`)
+    .map(([label, url]) => artifactAnchor(label, url))
     .join("");
+}
+
+function artifactAnchor(label, url) {
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 async function loadConfigStatus() {

@@ -8,12 +8,17 @@ from typing import Any
 
 
 class AuditLog:
-    def __init__(self, *, run_id: str, path: Path) -> None:
+    def __init__(self, *, run_id: str, path: Path, reset: bool = True) -> None:
         self.run_id = run_id
         self.path = path
         self.events: list[dict[str, Any]] = []
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("", encoding="utf-8")
+        if reset:
+            self.path.write_text("", encoding="utf-8")
+        elif self.path.exists():
+            self.events = _read_existing_events(self.path)
+        else:
+            self.path.write_text("", encoding="utf-8")
 
     def record(
         self,
@@ -61,3 +66,15 @@ def stable_hash(value: Any) -> str:
         return ""
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _read_existing_events(path: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events

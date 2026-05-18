@@ -243,6 +243,15 @@ a {
   box-shadow: 0 0 18px rgba(36, 91, 255, 0.32);
 }
 
+.step.is-complete {
+  color: var(--ink);
+}
+
+.step.is-complete span {
+  background: var(--ai-mint);
+  color: var(--ink-strong);
+}
+
 .content {
   display: grid;
   gap: 20px;
@@ -839,6 +848,45 @@ a {
   background: var(--canvas-tint);
   color: var(--ai-indigo);
   font-size: 12px;
+  font-weight: 800;
+}
+
+.plan-review {
+  display: grid;
+  gap: 12px;
+  min-width: min(560px, 100%);
+}
+
+.review-summary,
+.review-links,
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.review-summary span {
+  padding: 7px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: white;
+  color: var(--body);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.review-summary strong {
+  color: var(--ink-strong);
+}
+
+.review-error {
+  padding: 9px 10px;
+  border: 1px solid rgba(221, 49, 49, 0.24);
+  border-radius: 8px;
+  background: rgba(221, 49, 49, 0.08);
+  color: var(--danger);
+  font-size: 13px;
   font-weight: 800;
 }
 

@@ -5,7 +5,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import load_settings
-from backend.app.pipeline import PipelineInput, artifact_response, run_pipeline
+from backend.app.pipeline import (
+    PipelineInput,
+    artifact_response,
+    continue_pipeline_draft,
+    create_pipeline_draft,
+    draft_response,
+    run_pipeline,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -50,4 +57,21 @@ def artifact_file(artifact_path: str) -> FileResponse:
 @app.post("/api/pipeline/run")
 def run_pipeline_api(payload: PipelineInput, capture_browser: bool = True) -> dict:
     result = run_pipeline(payload, capture_browser=capture_browser)
+    return artifact_response(result)
+
+
+@app.post("/api/pipeline/draft")
+def create_pipeline_draft_api(payload: PipelineInput, capture_browser: bool = True) -> dict:
+    result = create_pipeline_draft(payload, capture_browser=capture_browser)
+    return draft_response(result)
+
+
+@app.post("/api/pipeline/continue/{job_id}")
+def continue_pipeline_api(job_id: str, capture_browser: bool | None = None) -> dict:
+    try:
+        result = continue_pipeline_draft(job_id, capture_browser=capture_browser)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="workflow draft not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return artifact_response(result)
