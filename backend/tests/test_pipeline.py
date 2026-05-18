@@ -725,6 +725,8 @@ def test_install_manual_login_signal_adds_persistent_button_script():
     assert calls[0][0] == "add_init_script"
     assert "manual-login-signal" in calls[0][1]
     assert "로그인 완료" in calls[0][1]
+    assert "MutationObserver" in calls[0][1]
+    assert "setInterval" in calls[0][1]
     assert calls[1][0] == "evaluate"
 
 

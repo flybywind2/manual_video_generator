@@ -912,44 +912,66 @@ def _install_manual_login_signal(page: Any) -> None:
     script = """
     (() => {
       window.__manualLoginCompleted = window.__manualLoginCompleted === true;
+      const selector = '[data-manual-login-signal="true"]';
+      const markCompleted = (button) => {
+        if (!button) return;
+        button.textContent = '완료 신호 전송됨';
+        button.setAttribute('aria-label', '로그인 완료 신호 전송됨');
+        button.disabled = true;
+        button.style.opacity = '0.72';
+      };
       window.__manualLoginSignal = () => {
         window.__manualLoginCompleted = true;
-        const button = document.querySelector('[data-manual-login-signal="true"]');
-        if (button) {
-          button.textContent = '완료 신호 전송됨';
-          button.setAttribute('aria-label', '로그인 완료 신호 전송됨');
-          button.disabled = true;
-          button.style.opacity = '0.72';
-        }
+        markCompleted(document.querySelector(selector));
       };
       const install = () => {
-        if (!document.body || document.querySelector('[data-manual-login-signal="true"]')) return;
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = '로그인 완료';
-        button.setAttribute('data-manual-login-signal', 'true');
-        button.setAttribute('aria-label', '로그인 완료 신호 전송');
-        button.style.cssText = [
-          'position:fixed',
-          'right:24px',
-          'bottom:24px',
-          'z-index:2147483647',
-          'border:0',
-          'border-radius:8px',
-          'padding:14px 18px',
-          'background:#245BFF',
-          'color:#fff',
-          'font:800 15px/1.2 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
-          'box-shadow:0 18px 48px rgba(17,24,39,.24)',
-          'cursor:pointer'
-        ].join(';');
-        button.addEventListener('click', window.__manualLoginSignal);
-        document.body.appendChild(button);
+        if (!document.body) return false;
+        let button = document.querySelector(selector);
+        if (!button) {
+          button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = '로그인 완료';
+          button.setAttribute('data-manual-login-signal', 'true');
+          button.setAttribute('aria-label', '로그인 완료 신호 전송');
+          button.style.cssText = [
+            'position:fixed',
+            'right:24px',
+            'bottom:24px',
+            'z-index:2147483647',
+            'border:0',
+            'border-radius:8px',
+            'padding:14px 18px',
+            'background:#245BFF',
+            'color:#fff',
+            'font:800 15px/1.2 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+            'box-shadow:0 18px 48px rgba(17,24,39,.24)',
+            'cursor:pointer'
+          ].join(';');
+          button.addEventListener('click', window.__manualLoginSignal);
+          document.body.appendChild(button);
+        }
+        if (window.__manualLoginCompleted === true) {
+          markCompleted(button);
+        }
+        return true;
       };
+      const keepInstalled = () => {
+        try { install(); } catch {}
+      };
+      if (!window.__manualLoginSignalObserver && typeof MutationObserver !== 'undefined') {
+        window.__manualLoginSignalObserver = new MutationObserver(keepInstalled);
+        window.__manualLoginSignalObserver.observe(document.documentElement || document, {
+          childList: true,
+          subtree: true
+        });
+      }
+      if (!window.__manualLoginSignalInterval) {
+        window.__manualLoginSignalInterval = window.setInterval(keepInstalled, 1000);
+      }
       if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', install, { once: true });
+        document.addEventListener('DOMContentLoaded', keepInstalled, { once: true });
       } else {
-        install();
+        keepInstalled();
       }
     })();
     """
