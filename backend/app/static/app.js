@@ -19,6 +19,8 @@ sampleButton?.addEventListener("click", () => {
   form.elements.request.value = "MES에서 LOT 조회 방법 영상 만들기";
   form.elements.url.value = `${window.location.origin}/sample`;
   form.elements.role.value = "작업자";
+  form.elements.login_mode.value = "none";
+  form.elements.login_success_selector.value = "";
   form.elements.done.value = "상세 화면이 보이면 완료";
   renderInputValues(sampleInputValues);
   panelState.textContent = "Sample loaded";
@@ -48,6 +50,8 @@ form?.addEventListener("submit", async (event) => {
       target_url: form.elements.url.value.trim(),
       role: form.elements.role.value.trim(),
       completion_condition: form.elements.done.value.trim(),
+      login_mode: form.elements.login_mode.value,
+      login_success_selector: form.elements.login_success_selector.value.trim(),
       input_values: readInputValues(),
     };
 
@@ -182,6 +186,7 @@ async function loadConfigStatus() {
       ["Planner", status.runtime.enable_internal_planner, status.runtime.enable_internal_planner ? "internal LLM" : "local"],
       ["TTS", true, status.runtime.tts_provider],
       ["Renderer", true, status.runtime.video_renderer],
+      ["Login", status.login.mode !== "none", status.login.mode === "credentials" ? (status.login.credentials_configured ? "credentials ready" : "credentials missing") : status.login.mode],
       ["Skills", status.runtime.enable_hyperframes_skills, status.runtime.enable_hyperframes_skills ? "enabled" : "disabled"],
       ["MCP", status.runtime.playwright_mcp_mode !== "off", status.runtime.playwright_mcp_mode],
       ["OpenCode", status.runtime.enable_opencode, status.runtime.enable_opencode ? (status.runtime.opencode_agent || "enabled") : "disabled"],

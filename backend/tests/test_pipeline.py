@@ -7,9 +7,12 @@ from backend.app.main import app
 from backend.app.config import load_settings
 from backend.app.pipeline import (
     PipelineInput,
+    _authenticate_before_recording,
     _execute_capture_actions,
+    _handle_login,
     _playwright_launch_kwargs,
     _prepare_capture_page,
+    _resolve_login_options,
     run_pipeline,
 )
 
@@ -249,6 +252,14 @@ def test_playwright_launch_kwargs_do_not_hardcode_user_chrome_path():
     assert launch_kwargs == {"headless": True}
 
 
+def test_playwright_launch_kwargs_disables_headless_for_manual_login():
+    settings = load_settings(environ={})
+
+    launch_kwargs = _playwright_launch_kwargs(settings, interactive=True, browser_roots=[])
+
+    assert launch_kwargs == {"headless": False}
+
+
 def test_playwright_launch_kwargs_uses_configured_executable_path(tmp_path):
     chrome = tmp_path / "chrome.exe"
     chrome.write_text("", encoding="utf-8")
@@ -373,3 +384,164 @@ def test_execute_capture_actions_records_selector_failures_without_aborting(tmp_
     assert result["action_log"][0]["status"] == "failed"
     assert "TimeoutError" in result["action_log"][0]["error"]
     assert [path.name for path in result["captures"]] == ["step_1.png"]
+
+
+def test_resolve_login_options_prefers_request_mode_and_env_credentials():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LOGIN_MODE": "none",
+            "MANUAL_AGENT_LOGIN_USERNAME_SELECTOR": "#uid",
+            "MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR": "#pwd",
+            "MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR": "button.login",
+            "MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR": ".home",
+            "MANUAL_AGENT_LOGIN_USERNAME": "user01",
+            "MANUAL_AGENT_LOGIN_PASSWORD": "plain-password",
+        }
+    )
+    request = PipelineInput(
+        request_text="로그인 후 메뉴얼",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈 화면",
+        login_mode="credentials",
+        login_success_selector=".dashboard",
+    )
+
+    login = _resolve_login_options(request, settings)
+
+    assert login["mode"] == "credentials"
+    assert login["username"] == "user01"
+    assert login["password"] == "plain-password"
+    assert login["success_selector"] == ".dashboard"
+
+
+def test_handle_login_uses_env_credentials_and_redacts_action_log():
+    calls = []
+
+    class FakePage:
+        def fill(self, selector, value):
+            calls.append(("fill", selector, value))
+
+        def click(self, selector):
+            calls.append(("click", selector))
+
+        def wait_for_selector(self, selector, timeout):
+            calls.append(("wait_for_selector", selector, timeout))
+
+    login = {
+        "mode": "credentials",
+        "username_selector": "#uid",
+        "password_selector": "#pwd",
+        "submit_selector": "button.login",
+        "success_selector": ".home",
+        "username": "user01",
+        "password": "plain-password",
+        "credentials_timeout_ms": 30000,
+        "manual_timeout_ms": 120000,
+    }
+
+    log = _handle_login(FakePage(), login)
+
+    assert ("fill", "#uid", "user01") in calls
+    assert ("fill", "#pwd", "plain-password") in calls
+    assert ("click", "button.login") in calls
+    assert ("wait_for_selector", ".home", 30000) in calls
+    assert log["status"] == "ok"
+    rendered_log = json.dumps(log, ensure_ascii=False)
+    assert "plain-password" not in rendered_log
+    assert "user01" not in rendered_log
+
+
+def test_manual_login_waits_for_success_selector_without_credentials():
+    calls = []
+
+    class FakePage:
+        def wait_for_selector(self, selector, timeout):
+            calls.append(("wait_for_selector", selector, timeout))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+    login = {
+        "mode": "manual",
+        "success_selector": ".dashboard",
+        "manual_timeout_ms": 90000,
+        "credentials_timeout_ms": 30000,
+    }
+
+    log = _handle_login(FakePage(), login)
+
+    assert calls == [("wait_for_selector", ".dashboard", 90000)]
+    assert log == {"type": "login", "mode": "manual", "status": "ok", "success_selector_set": True}
+
+
+def test_authenticate_before_recording_does_not_start_video_capture():
+    context_options = []
+    calls = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            calls.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            calls.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            calls.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            calls.append(("add_style_tag", "manual-caption" in content))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def fill(self, selector, value):
+            calls.append(("fill", selector, value))
+
+        def click(self, selector):
+            calls.append(("click", selector))
+
+        def wait_for_selector(self, selector, timeout):
+            calls.append(("wait_for_selector", selector, timeout))
+
+    class FakeContext:
+        def new_page(self):
+            return FakePage()
+
+        def storage_state(self):
+            return {"cookies": [{"name": "sid", "value": "ok"}], "origins": []}
+
+        def close(self):
+            calls.append(("auth_context_close",))
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            context_options.append(kwargs)
+            return FakeContext()
+
+    request = PipelineInput(
+        request_text="로그인 후 매뉴얼",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈 화면",
+        login_mode="credentials",
+    )
+    login = {
+        "mode": "credentials",
+        "username_selector": "#uid",
+        "password_selector": "#pwd",
+        "submit_selector": "#login",
+        "success_selector": ".home",
+        "username": "user01",
+        "password": "plain-password",
+        "credentials_timeout_ms": 30000,
+        "manual_timeout_ms": 120000,
+    }
+
+    auth = _authenticate_before_recording(FakeBrowser(), request, login)
+
+    assert context_options == [{"viewport": {"width": 1280, "height": 800}}]
+    assert "record_video_dir" not in context_options[0]
+    assert auth["storage_state"]["cookies"][0]["name"] == "sid"
+    assert auth["action_log"][0]["status"] == "ok"
+    assert ("fill", "#pwd", "plain-password") in calls

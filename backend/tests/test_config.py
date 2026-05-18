@@ -31,6 +31,14 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest",
                 "MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH=D:\\browsers\\chrome.exe",
+                "MANUAL_AGENT_LOGIN_MODE=credentials",
+                "MANUAL_AGENT_LOGIN_USERNAME_SELECTOR=#uid",
+                "MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR=#pwd",
+                "MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR=button.login",
+                "MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.home",
+                "MANUAL_AGENT_LOGIN_USERNAME=user01",
+                "MANUAL_AGENT_LOGIN_PASSWORD=plain-password",
+                "MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=90",
                 "MANUAL_AGENT_TTS_PROVIDER=melotts",
                 "MANUAL_AGENT_TTS_DEVICE=cpu",
                 "MANUAL_AGENT_TTS_SPEED=1.1",
@@ -61,6 +69,15 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.playwright_mcp_mode == "manifest"
     assert settings.playwright_mcp_command == "npx @playwright/mcp@latest"
     assert settings.playwright_executable_path == "D:\\browsers\\chrome.exe"
+    assert settings.login.mode == "credentials"
+    assert settings.login.username_selector == "#uid"
+    assert settings.login.password_selector == "#pwd"
+    assert settings.login.submit_selector == "button.login"
+    assert settings.login.success_selector == ".home"
+    assert settings.login.username == "user01"
+    assert settings.login.password == "plain-password"
+    assert settings.login.manual_timeout_seconds == 90
+    assert settings.login.credentials_configured is True
     assert settings.tts_provider == "melotts"
     assert settings.tts_device == "cpu"
     assert settings.tts_speed == 1.1
@@ -94,6 +111,8 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
                 "MANUAL_AGENT_SEND_SYSTEM_NAME=manual-video-agent",
                 "MANUAL_AGENT_USER_ID=USER01",
                 "MANUAL_AGENT_USER_TYPE=AD_ID",
+                "MANUAL_AGENT_LOGIN_USERNAME=user01",
+                "MANUAL_AGENT_LOGIN_PASSWORD=plain-password",
             ]
         ),
         encoding="utf-8",
@@ -104,8 +123,12 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     rendered = repr(status)
     assert "super-secret" not in rendered
     assert "credential:SECRET" not in rendered
+    assert "plain-password" not in rendered
+    assert "user01" not in rendered
     assert status["llm"]["configured"] is True
     assert status["llm"]["base_url_set"] is True
+    assert status["login"]["username_set"] is True
+    assert status["login"]["password_set"] is True
     assert "enable_internal_planner" in status["runtime"]
 
 

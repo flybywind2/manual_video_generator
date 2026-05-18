@@ -28,7 +28,8 @@
 | 샘플 사내 시스템 | 구현 | `/sample`에서 테스트용 MES LOT 조회 화면 제공 |
 | 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
 | Action plan | 구현 | 기본은 deterministic planner, 옵션으로 내부 LLM planner 호출 |
-| 브라우저 캡처 | 구현 | Playwright로 샘플 화면 캡처 및 WebM 녹화 |
+| 브라우저 캡처 | 구현 | Playwright action plan 기반 범용 캡처 및 WebM 녹화 |
+| 로그인 처리 | 구현 | 로그인 없음, 사용자가 직접 로그인, `.env` ID/password 자동 입력 지원 |
 | 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
 | `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
 | 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
@@ -264,11 +265,22 @@ http://127.0.0.1:8000/sample
 ## 사용 방법
 
 1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 입력값을 확인합니다.
-2. 기본 대상 URL은 `/sample`입니다.
-3. `파이프라인 실행`을 누릅니다.
-4. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
-5. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
-6. 최종 영상 파일은 관리자가 별도 보관합니다.
+2. 로그인 창이 나오는 시스템이면 `로그인 방식`을 고릅니다.
+3. 기본 대상 URL은 `/sample`입니다.
+4. `파이프라인 실행`을 누릅니다.
+5. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
+6. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
+7. 최종 영상 파일은 관리자가 별도 보관합니다.
+
+### 로그인 방식
+
+로그인 방식은 작업마다 선택할 수 있습니다.
+
+- `로그인 없음`: 기본값입니다. 로그인 페이지가 없는 샘플 또는 이미 접근 가능한 URL에 사용합니다.
+- `직접 로그인`: Playwright가 headed 브라우저를 띄우고 사용자가 직접 로그인합니다. `로그인 완료 selector`를 지정하면 해당 요소가 보일 때까지 기다립니다. selector가 없으면 `.env`의 `MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS` 시간만큼 기다립니다.
+- `.env ID/password`: `.env`에 저장한 ID/password와 selector를 사용해 로그인 폼을 자동 입력합니다. 비밀번호 원문은 UI, `/api/config/status`, request artifact, audit log, capture action log에 기록하지 않습니다.
+
+직접 로그인은 OTP, SSO, 사내 인증 앱처럼 자동 입력하면 안 되는 흐름에 사용합니다. ID/password 자동 입력은 테스트 계정이나 승인된 자동화 계정에서만 사용합니다.
 
 ## 산출물 구조
 
@@ -283,6 +295,7 @@ output/jobs/<job_id>/
   action_plan.json
   approval_log.json
   audit_log.jsonl
+  capture_action_log.json
   planner_trace.json
   rehearsal_log.json
   playwright_mcp_calls.json
@@ -347,6 +360,15 @@ MANUAL_AGENT_ENABLE_RERANKER
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE
 MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND
 MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH
+MANUAL_AGENT_LOGIN_MODE
+MANUAL_AGENT_LOGIN_USERNAME_SELECTOR
+MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR
+MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR
+MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR
+MANUAL_AGENT_LOGIN_USERNAME
+MANUAL_AGENT_LOGIN_PASSWORD
+MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS
+MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS
 MANUAL_AGENT_OUTPUT_DIR
 MANUAL_AGENT_TTS_PROVIDER
 MANUAL_AGENT_TTS_DEVICE
@@ -381,6 +403,27 @@ MANUAL_AGENT_ENABLE_OPENCODE=true
 VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
 
 설정 변경 후 앱을 재시작합니다.
+
+로그인 자동 입력 예시:
+
+```env
+MANUAL_AGENT_LOGIN_MODE=credentials
+MANUAL_AGENT_LOGIN_USERNAME_SELECTOR=#username
+MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR=#password
+MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR=button[type="submit"]
+MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.main-dashboard
+MANUAL_AGENT_LOGIN_USERNAME=test-user
+MANUAL_AGENT_LOGIN_PASSWORD=replace-with-password
+MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS=30
+```
+
+사용자 직접 로그인 예시:
+
+```env
+MANUAL_AGENT_LOGIN_MODE=manual
+MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.main-dashboard
+MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
+```
 
 설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
 
@@ -602,12 +645,13 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-57 passed
+66 passed
 ```
 
 ## 보안 및 운영 주의사항
 
-- 운영계 비밀번호, OTP, SSO 토큰을 이 앱 입력값으로 받지 않습니다.
+- OTP, SSO 토큰은 이 앱 입력값으로 받지 않습니다.
+- ID/password 자동 입력이 필요한 경우 `.env`에만 저장하고 UI 작업 요청에는 넣지 않습니다.
 - `.env` 원문은 커밋하지 않습니다.
 - API key, dep ticket, RAG key는 UI/API에 노출하지 않습니다.
 - 현재 MVP는 샘플 시스템 검증용입니다.

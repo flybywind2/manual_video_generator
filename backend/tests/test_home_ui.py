@@ -18,6 +18,11 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "MeloTTS" in body
     assert ".env 설정 상태" in body
     assert 'id="input-values"' in body
+    assert 'name="login_mode"' in body
+    assert 'name="login_success_selector"' in body
+    assert "직접 로그인" in body
+    assert ".env ID/password" in body
+    assert 'name="login_password"' not in body
     assert 'data-action="add-input-value"' in body
     assert 'data-action="remove-input-value"' in body
 
@@ -34,6 +39,8 @@ def test_static_app_exposes_review_artifact_links():
     assert "MCP Calls" in body
     assert "HyperFrames Composition" in body
     assert "OpenCode Prompt" in body
+    assert "login_mode" in body
+    assert "login_success_selector" in body
 
 
 def test_static_app_supports_editable_input_value_rows():

@@ -93,6 +93,18 @@
                   <span>계정 역할</span>
                   <input name="role" value="작업자" />
                 </label>
+                <label class="field">
+                  <span>로그인 방식</span>
+                  <select name="login_mode">
+                    <option value="none" selected>로그인 없음</option>
+                    <option value="manual">직접 로그인</option>
+                    <option value="credentials">.env ID/password</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>로그인 완료 selector</span>
+                  <input name="login_success_selector" placeholder=".dashboard, #main 등 선택 사항" />
+                </label>
                 <label class="field field-wide">
                   <span>완료 조건</span>
                   <input name="done" value="상세 화면이 보이면 완료" />

@@ -104,11 +104,43 @@ class RerankerSettings:
 
 
 @dataclass(frozen=True)
+class LoginSettings:
+    mode: str
+    username_selector: str
+    password_selector: str
+    submit_selector: str
+    success_selector: str
+    username: str
+    password: str
+    manual_timeout_seconds: float
+    credentials_timeout_seconds: float
+
+    @property
+    def credentials_configured(self) -> bool:
+        return all([self.username_selector, self.password_selector, self.username, self.password])
+
+    def safe_status(self) -> dict[str, bool | str | float]:
+        return {
+            "mode": self.mode,
+            "username_selector_set": bool(self.username_selector),
+            "password_selector_set": bool(self.password_selector),
+            "submit_selector_set": bool(self.submit_selector),
+            "success_selector_set": bool(self.success_selector),
+            "username_set": bool(self.username),
+            "password_set": bool(self.password),
+            "credentials_configured": self.credentials_configured,
+            "manual_timeout_seconds": self.manual_timeout_seconds,
+            "credentials_timeout_seconds": self.credentials_timeout_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class AppSettings:
     llm: OpenAiCompatibleSettings
     vlm: OpenAiCompatibleSettings
     rag: RagSettings
     reranker: RerankerSettings
+    login: LoginSettings
     output_dir: str
     enable_internal_planner: bool
     enable_rag_context: bool
@@ -138,6 +170,7 @@ class AppSettings:
             "vlm": self.vlm.safe_status(),
             "rag": self.rag.safe_status(),
             "reranker": self.reranker.safe_status(),
+            "login": self.login.safe_status(),
             "runtime": {
                 "output_dir": self.output_dir,
                 "enable_internal_planner": self.enable_internal_planner,
@@ -213,11 +246,23 @@ def load_settings(
         model=_get(env, "RERANKER_MODEL", "bge-reranker-v2-m3-ko"),
         dep_ticket=_get(env, "RERANKER_DEP_TICKET", dep_ticket),
     )
+    login = LoginSettings(
+        mode=_normalize_login_mode(_get(env, "LOGIN_MODE", "none")),
+        username_selector=_get(env, "LOGIN_USERNAME_SELECTOR"),
+        password_selector=_get(env, "LOGIN_PASSWORD_SELECTOR"),
+        submit_selector=_get(env, "LOGIN_SUBMIT_SELECTOR"),
+        success_selector=_get(env, "LOGIN_SUCCESS_SELECTOR"),
+        username=_get(env, "LOGIN_USERNAME"),
+        password=_get(env, "LOGIN_PASSWORD"),
+        manual_timeout_seconds=_get_float(env, "LOGIN_MANUAL_TIMEOUT_SECONDS", 120.0),
+        credentials_timeout_seconds=_get_float(env, "LOGIN_CREDENTIALS_TIMEOUT_SECONDS", 30.0),
+    )
     return AppSettings(
         llm=llm,
         vlm=vlm,
         rag=rag,
         reranker=reranker,
+        login=login,
         output_dir=_get(env, "OUTPUT_DIR", "output"),
         enable_internal_planner=_get_bool(env, "ENABLE_INTERNAL_PLANNER", False),
         enable_rag_context=_get_bool(env, "ENABLE_RAG_CONTEXT", False),
@@ -288,6 +333,13 @@ def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def _normalize_login_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"manual", "credentials", "none"}:
+        return normalized
+    return "none"
 
 
 def _split_csv(value: str) -> list[str]:

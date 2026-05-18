@@ -31,6 +31,8 @@ class PipelineInput(BaseModel):
     role: str
     completion_condition: str
     input_values: dict[str, str] = Field(default_factory=dict)
+    login_mode: str = "none"
+    login_success_selector: str = ""
 
 
 class ArtifactPaths(BaseModel):
@@ -299,19 +301,25 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
 def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, settings: Any) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
-    launch_kwargs = _playwright_launch_kwargs(settings)
+    login = _resolve_login_options(request, settings)
+    launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual")
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            record_video_dir=str(dirs.raw_video),
-            record_video_size={"width": 1280, "height": 800},
-        )
+        auth_result = _authenticate_before_recording(browser, request, login) if login["mode"] in {"manual", "credentials"} else {"storage_state": None, "action_log": []}
+        context_options: dict[str, Any] = {
+            "viewport": {"width": 1280, "height": 800},
+            "record_video_dir": str(dirs.raw_video),
+            "record_video_size": {"width": 1280, "height": 800},
+        }
+        if auth_result.get("storage_state"):
+            context_options["storage_state"] = auth_result["storage_state"]
+        context = browser.new_context(**context_options)
         page = context.new_page()
         actions = plan.get("actions", [])
         if not actions or actions[0].get("type") != "navigate":
             _prepare_capture_page(page, request.target_url)
         capture_result = _execute_capture_actions(page, plan, dirs.captures)
+        capture_result["action_log"] = [*auth_result.get("action_log", []), *capture_result.get("action_log", [])]
         captures = capture_result["captures"]
         if not captures:
             first_step = _first_plan_step(plan)
@@ -338,8 +346,13 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     }
 
 
-def _playwright_launch_kwargs(settings: Any, browser_roots: list[Path] | None = None) -> dict[str, Any]:
-    launch_kwargs: dict[str, Any] = {"headless": True}
+def _playwright_launch_kwargs(
+    settings: Any,
+    browser_roots: list[Path] | None = None,
+    *,
+    interactive: bool = False,
+) -> dict[str, Any]:
+    launch_kwargs: dict[str, Any] = {"headless": not interactive}
     executable_path = str(getattr(settings, "playwright_executable_path", "") or "").strip()
     if executable_path:
         launch_kwargs["executable_path"] = executable_path
@@ -391,7 +404,52 @@ def _prepare_capture_page(page: Any, target_url: str) -> None:
     _inject_recording_helpers(page)
 
 
-def _execute_capture_actions(page: Any, plan: dict[str, Any], capture_dir: Path) -> dict[str, Any]:
+def _resolve_login_options(request: PipelineInput, settings: Any) -> dict[str, Any]:
+    configured = getattr(settings, "login", None)
+    requested_mode = str(request.login_mode or "").strip().lower()
+    mode = requested_mode if requested_mode in {"none", "manual", "credentials"} else getattr(configured, "mode", "none")
+    success_selector = str(request.login_success_selector or getattr(configured, "success_selector", "") or "").strip()
+    return {
+        "mode": mode,
+        "username_selector": str(getattr(configured, "username_selector", "") or ""),
+        "password_selector": str(getattr(configured, "password_selector", "") or ""),
+        "submit_selector": str(getattr(configured, "submit_selector", "") or ""),
+        "success_selector": success_selector,
+        "username": str(getattr(configured, "username", "") or ""),
+        "password": str(getattr(configured, "password", "") or ""),
+        "manual_timeout_ms": int(float(getattr(configured, "manual_timeout_seconds", 120.0) or 120.0) * 1000),
+        "credentials_timeout_ms": int(float(getattr(configured, "credentials_timeout_seconds", 30.0) or 30.0) * 1000),
+    }
+
+
+def _authenticate_before_recording(browser: Any, request: PipelineInput, login: dict[str, Any]) -> dict[str, Any]:
+    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    action_log: list[dict[str, Any]] = []
+    storage_state: dict[str, Any] | None = None
+    try:
+        page = context.new_page()
+        _prepare_capture_page(page, request.target_url)
+        action_log.append(_handle_login(page, login))
+        storage_state = context.storage_state()
+    except Exception as exc:  # noqa: BLE001 - continue to produce an inspectable capture package.
+        action_log.append(
+            {
+                "type": "login",
+                "mode": login.get("mode", "none"),
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+    finally:
+        context.close()
+    return {"storage_state": storage_state, "action_log": action_log}
+
+
+def _execute_capture_actions(
+    page: Any,
+    plan: dict[str, Any],
+    capture_dir: Path,
+) -> dict[str, Any]:
     steps = {str(step.get("id")): step for step in plan.get("steps", []) if isinstance(step, dict)}
     captures: list[Path] = []
     action_log: list[dict[str, Any]] = []
@@ -464,6 +522,71 @@ def _execute_capture_actions(page: Any, plan: dict[str, Any], capture_dir: Path)
         action_log.append(log_entry)
 
     return {"captures": captures, "action_log": action_log}
+
+
+def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+    mode = str(login.get("mode") or "none")
+    if mode == "manual":
+        return _wait_for_manual_login(page, login)
+    if mode == "credentials":
+        return _submit_login_credentials(page, login)
+    return {"type": "login", "mode": mode, "status": "skipped"}
+
+
+def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+    success_selector = str(login.get("success_selector") or "").strip()
+    timeout_ms = int(login.get("manual_timeout_ms") or 120000)
+    log = {"type": "login", "mode": "manual", "status": "ok", "success_selector_set": bool(success_selector)}
+    try:
+        if success_selector:
+            page.wait_for_selector(success_selector, timeout=timeout_ms)
+        else:
+            page.wait_for_timeout(timeout_ms)
+    except Exception as exc:  # noqa: BLE001 - keep the package inspectable when manual login times out.
+        log["status"] = "failed"
+        log["error"] = f"{type(exc).__name__}: {exc}"
+    return log
+
+
+def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+    username_selector = str(login.get("username_selector") or "").strip()
+    password_selector = str(login.get("password_selector") or "").strip()
+    submit_selector = str(login.get("submit_selector") or "").strip()
+    success_selector = str(login.get("success_selector") or "").strip()
+    username = str(login.get("username") or "")
+    password = str(login.get("password") or "")
+    log = {
+        "type": "login",
+        "mode": "credentials",
+        "status": "ok",
+        "username_selector_set": bool(username_selector),
+        "password_selector_set": bool(password_selector),
+        "submit_selector_set": bool(submit_selector),
+        "success_selector_set": bool(success_selector),
+        "username_set": bool(username),
+        "password_set": bool(password),
+    }
+    if not all([username_selector, password_selector, username, password]):
+        log["status"] = "failed"
+        log["reason"] = "missing_credentials_or_selectors"
+        return log
+    try:
+        page.fill(username_selector, username)
+        page.fill(password_selector, password)
+        if submit_selector:
+            page.click(submit_selector)
+        if success_selector:
+            page.wait_for_selector(success_selector, timeout=int(login.get("credentials_timeout_ms") or 30000))
+        else:
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+            page.wait_for_function("() => document.readyState === 'complete'", timeout=10000)
+    except Exception as exc:  # noqa: BLE001 - record credential login failure without exposing credentials.
+        log["status"] = "failed"
+        log["error"] = f"{type(exc).__name__}: {exc}"
+    return log
 
 
 def _first_plan_step(plan: dict[str, Any]) -> dict[str, Any]:
