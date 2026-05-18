@@ -5,6 +5,14 @@ from backend.app.main import app
 from fastapi.testclient import TestClient
 
 
+def test_env_example_includes_llm_browser_agent_toggles():
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+
+    assert "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=" in env_example
+    assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
+    assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
+
+
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text(
