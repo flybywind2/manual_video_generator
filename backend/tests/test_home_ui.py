@@ -50,6 +50,22 @@ def test_static_app_exposes_review_artifact_links():
     assert "login_success_selector" in body
 
 
+def test_static_app_marks_local_disabled_and_none_config_as_neutral_not_missing():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "configStatusRows" in body
+    assert "Login Default" in body
+    assert 'state: "neutral"' in body
+    assert 'state: "disabled"' in body
+    assert '["Planner", status.runtime.enable_internal_planner' not in body
+    assert '["Browser Agent", status.runtime.enable_browser_agent' not in body
+    assert '["Login", status.login.mode !== "none"' not in body
+
+
 def test_static_app_supports_editable_input_value_rows():
     client = TestClient(app)
 

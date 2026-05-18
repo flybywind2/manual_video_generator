@@ -796,8 +796,14 @@ a {
   font-size: 11px;
 }
 
-.config-item.configured span {
+.config-item.configured span,
+.config-item.ready span {
   color: #087f6d;
+}
+
+.config-item.neutral span,
+.config-item.disabled span {
+  color: var(--ink);
 }
 
 .config-item.missing span,
