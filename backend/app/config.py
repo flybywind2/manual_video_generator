@@ -148,6 +148,8 @@ class AppSettings:
     playwright_mcp_mode: str
     playwright_mcp_command: str
     playwright_executable_path: str
+    enable_browser_agent: bool
+    browser_agent_max_steps: int
     tts_provider: str
     tts_device: str
     tts_language: str
@@ -179,6 +181,8 @@ class AppSettings:
                 "playwright_mcp_mode": self.playwright_mcp_mode,
                 "playwright_mcp_command_set": bool(self.playwright_mcp_command),
                 "playwright_executable_path_set": bool(self.playwright_executable_path),
+                "enable_browser_agent": self.enable_browser_agent,
+                "browser_agent_max_steps": self.browser_agent_max_steps,
                 "tts_provider": self.tts_provider,
                 "tts_device": self.tts_device,
                 "tts_language": self.tts_language,
@@ -270,6 +274,8 @@ def load_settings(
         playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),
         playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest --headless"),
         playwright_executable_path=_get(env, "PLAYWRIGHT_EXECUTABLE_PATH"),
+        enable_browser_agent=_get_bool(env, "ENABLE_BROWSER_AGENT", False),
+        browser_agent_max_steps=_get_int(env, "BROWSER_AGENT_MAX_STEPS", 8),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
         tts_device=_get(env, "TTS_DEVICE", "cpu"),
         tts_language=_get(env, "TTS_LANGUAGE", "KR"),
@@ -331,6 +337,16 @@ def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:
         return default
     try:
         return float(value)
+    except ValueError:
+        return default
+
+
+def _get_int(env: Mapping[str, str], suffix: str, default: int) -> int:
+    value = _get(env, suffix)
+    if not value:
+        return default
+    try:
+        return int(value)
     except ValueError:
         return default
 

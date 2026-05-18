@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from backend.app.adapters.browser_agent import decide_browser_agent_action
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.planner import build_plan
 from backend.app.adapters.rehearsal import rehearse_plan
@@ -134,8 +135,8 @@ def run_pipeline(
 
     if capture_browser:
         capture_result = _capture_with_playwright(request, plan, dirs, settings)
-        capture_status = "ok"
-        capture_degrade_reason = ""
+        capture_status = str(capture_result.get("status") or "ok")
+        capture_degrade_reason = str(capture_result.get("degrade_reason") or "")
     else:
         capture_result = _create_placeholder_captures(request, dirs)
         capture_status = "degraded"
@@ -317,9 +318,13 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
         context = browser.new_context(**context_options)
         page = context.new_page()
         actions = plan.get("actions", [])
-        if not actions or actions[0].get("type") != "navigate":
+        if getattr(settings, "enable_browser_agent", False):
             _prepare_capture_page(page, request.target_url)
-        capture_result = _execute_capture_actions(page, plan, dirs.captures)
+            capture_result = _execute_browser_agent_actions(page, request, plan, dirs.captures, settings)
+        else:
+            if not actions or actions[0].get("type") != "navigate":
+                _prepare_capture_page(page, request.target_url)
+            capture_result = _execute_capture_actions(page, plan, dirs.captures)
         capture_result["action_log"] = [*auth_result.get("action_log", []), *capture_result.get("action_log", [])]
         captures = capture_result["captures"]
         if not captures:
@@ -552,6 +557,197 @@ def _execute_capture_actions(
         action_log.append(log_entry)
 
     return {"captures": captures, "action_log": action_log}
+
+
+def _execute_browser_agent_actions(
+    page: Any,
+    request: PipelineInput,
+    plan: dict[str, Any],
+    capture_dir: Path,
+    settings: Any,
+    *,
+    decide_next: Any = decide_browser_agent_action,
+) -> dict[str, Any]:
+    if not getattr(settings, "enable_browser_agent", False):
+        return _execute_capture_actions(page, plan, capture_dir)
+    if not getattr(getattr(settings, "llm", None), "is_configured", False) and decide_next is decide_browser_agent_action:
+        fallback = _execute_capture_actions(page, plan, capture_dir)
+        fallback["action_log"] = [
+            {
+                "type": "browser_agent",
+                "source": "browser-agent",
+                "status": "degraded",
+                "reason": "llm_not_configured",
+            },
+            *fallback.get("action_log", []),
+        ]
+        fallback["status"] = "degraded"
+        fallback["degrade_reason"] = "browser_agent_llm_not_configured"
+        return fallback
+
+    captures: list[Path] = []
+    action_log: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    max_steps = max(int(getattr(settings, "browser_agent_max_steps", 8) or 8), 1)
+
+    for step_index in range(1, max_steps + 1):
+        try:
+            observation = _observe_browser_for_agent(page)
+            action = dict(
+                decide_next(
+                    request,
+                    settings,
+                    observation,
+                    history,
+                    step_index=step_index,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - fallback keeps the package inspectable.
+            fallback = _execute_capture_actions(page, plan, capture_dir)
+            action_log.append(
+                {
+                    "type": "browser_agent",
+                    "source": "browser-agent",
+                    "status": "degraded",
+                    "reason": "decision_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            return {
+                "captures": [*captures, *fallback.get("captures", [])],
+                "action_log": [*action_log, *fallback.get("action_log", [])],
+                "status": "degraded",
+                "degrade_reason": "browser_agent_decision_failed",
+            }
+
+        action.setdefault("id", f"ba{step_index}")
+        action.setdefault("source", "browser-agent-llm")
+        action["step_id"] = f"browser_agent_step_{step_index}"
+        log_entry = _execute_single_browser_agent_action(page, action, capture_dir, used_names)
+        action_log.append(log_entry)
+        history.append(
+            {
+                "step": step_index,
+                "type": log_entry.get("type"),
+                "status": log_entry.get("status"),
+                "reason": log_entry.get("reason") or log_entry.get("error") or action.get("reason", ""),
+            }
+        )
+        if log_entry.get("capture"):
+            captures.append(Path(log_entry["capture"]))
+        if action.get("type") == "finish":
+            break
+
+    if not captures:
+        step = {"id": "browser_agent_step_final", "title": "자동 판단 결과", "caption": "브라우저 자동 판단 결과를 확인합니다."}
+        _apply_step_overlay(page, step)
+        page.wait_for_timeout(500)
+        captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
+
+    return {"captures": captures, "action_log": action_log, "status": "ok", "degrade_reason": ""}
+
+
+def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
+    return page.evaluate(
+        """
+        () => {
+          const visible = (el) => {
+            if (!el) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          };
+          const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+          const labelFor = (el) => {
+            const labels = Array.from(el.labels || []).map((label) => label.innerText.trim()).filter(Boolean);
+            if (labels.length) return labels.join(' ');
+            const id = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+            return (id?.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '').trim();
+          };
+          const fields = Array.from(document.querySelectorAll('input, textarea, select'))
+            .filter(visible)
+            .slice(0, 40)
+            .map((el) => ({
+              label: labelFor(el),
+              name: el.name || '',
+              placeholder: el.getAttribute('placeholder') || '',
+              type: el.getAttribute('type') || el.tagName.toLowerCase(),
+              value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
+            }));
+          const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a'))
+            .filter(visible)
+            .slice(0, 60)
+            .map((el) => ({
+              text: textOf(el).slice(0, 120),
+              role: el.getAttribute('role') || el.tagName.toLowerCase(),
+              href: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') || '' : '',
+            }))
+            .filter((item) => item.text || item.href);
+          const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+            .filter(visible)
+            .slice(0, 20)
+            .map((el) => textOf(el).slice(0, 160))
+            .filter(Boolean);
+          return {
+            url: location.href,
+            title: document.title,
+            headings,
+            fields,
+            clickables,
+            body_text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 4000),
+          };
+        }
+        """
+    )
+
+
+def _execute_single_browser_agent_action(
+    page: Any,
+    action: dict[str, Any],
+    capture_dir: Path,
+    used_names: set[str],
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    step = {
+        "id": str(action.get("step_id") or "browser_agent_step"),
+        "title": "브라우저 자동 판단",
+        "caption": str(action.get("reason") or "브라우저 화면을 보고 다음 동작을 수행합니다."),
+        "narration": str(action.get("reason") or "브라우저 화면을 보고 다음 동작을 수행합니다."),
+    }
+    log_entry = {
+        "action_id": str(action.get("id") or ""),
+        "type": action_type,
+        "source": action.get("source", "browser-agent-llm"),
+        "step_id": step["id"],
+        "status": action.get("status", "ok"),
+        "reason": action.get("reason", ""),
+    }
+    try:
+        if action_type == "fill_by_label":
+            _apply_step_overlay(page, step, action)
+            method = _fill_by_label(page, str(action.get("label") or ""), str(action.get("value") or ""))
+            log_entry["method"] = method
+            page.wait_for_timeout(300)
+        elif action_type == "click_by_text":
+            _apply_step_overlay(page, step, action)
+            method = _click_by_text(page, _action_text_candidates(action))
+            log_entry["method"] = method
+            page.wait_for_timeout(700)
+        elif action_type == "wait":
+            page.wait_for_timeout(_action_timeout(action, default=1000))
+        elif action_type in {"capture_step", "finish"}:
+            _apply_step_overlay(page, step, action)
+            page.wait_for_timeout(500)
+            capture = _screenshot(page, capture_dir, _step_capture_name(step, used_names))
+            log_entry["capture"] = str(capture)
+        else:
+            log_entry["status"] = "skipped"
+            log_entry["reason"] = "unsupported_action_type"
+    except Exception as exc:  # noqa: BLE001 - one dynamic action should not erase prior evidence.
+        log_entry["status"] = "failed"
+        log_entry["error"] = f"{type(exc).__name__}: {exc}"
+    return log_entry
 
 
 def _fill_by_label(page: Any, label: str, value: str) -> str:

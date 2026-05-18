@@ -10,6 +10,7 @@ from backend.app.pipeline import (
     PipelineInput,
     _authenticate_before_recording,
     _execute_capture_actions,
+    _execute_browser_agent_actions,
     _handle_login,
     _install_manual_login_signal,
     _playwright_launch_kwargs,
@@ -437,6 +438,125 @@ def test_execute_capture_actions_records_selector_failures_without_aborting(tmp_
     assert result["action_log"][0]["status"] == "failed"
     assert "TimeoutError" in result["action_log"][0]["error"]
     assert [path.name for path in result["captures"]] == ["step_1.png"]
+
+
+def test_execute_browser_agent_actions_observes_page_and_executes_llm_actions(tmp_path):
+    calls = []
+
+    class FakeLocator:
+        def __init__(self, kind, value):
+            self.kind = kind
+            self.value = value
+
+        def fill(self, value):
+            calls.append(("fill", self.kind, self.value, value))
+
+        def click(self):
+            calls.append(("click", self.kind, self.value))
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            if "__manualSetCaption" in script or "__manualHighlight" in script:
+                calls.append(("evaluate_overlay", args))
+                return None
+            calls.append(("observe",))
+            return {
+                "url": "http://127.0.0.1:8000/sample",
+                "title": "샘플 MES",
+                "fields": [{"label": "LOT", "name": "lot", "value": ""}],
+                "clickables": [{"text": "조회"}],
+                "body_text": "LOT 조회",
+            }
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def get_by_label(self, text, **kwargs):
+            calls.append(("get_by_label", text, kwargs))
+            return FakeLocator("label", text)
+
+        def get_by_role(self, role, **kwargs):
+            calls.append(("get_by_role", role, kwargs))
+            return FakeLocator(role, kwargs.get("name"))
+
+        def screenshot(self, path, full_page):
+            calls.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회 방법 영상 만들기",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="조회 결과가 보이면 완료",
+        input_values={"LOT": "LOT-001"},
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true", "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "3"})
+    decisions = [
+        {"status": "ok", "type": "fill_by_label", "label": "LOT", "value": "LOT-001", "reason": "LOT 값을 입력합니다."},
+        {"status": "ok", "type": "click_by_text", "texts": ["조회"], "reason": "조회 버튼을 클릭합니다."},
+        {"status": "ok", "type": "finish", "reason": "결과 화면을 확인했습니다."},
+    ]
+
+    def fake_decider(*args, **kwargs):
+        return decisions.pop(0)
+
+    result = _execute_browser_agent_actions(
+        FakePage(),
+        request,
+        {"steps": [], "actions": []},
+        tmp_path,
+        settings,
+        decide_next=fake_decider,
+    )
+
+    assert ("observe",) in calls
+    assert ("fill", "label", "LOT", "LOT-001") in calls
+    assert ("click", "button", "조회") in calls
+    assert [path.name for path in result["captures"]] == ["browser_agent_step_3.png"]
+    assert [entry["type"] for entry in result["action_log"] if entry.get("source") == "browser-agent-llm"] == [
+        "fill_by_label",
+        "click_by_text",
+        "finish",
+    ]
+
+
+def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configured(tmp_path):
+    calls = []
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def click(self, selector):
+            calls.append(("click", selector))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="조회",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="조회 결과",
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
+    plan = {
+        "steps": [{"id": "step_1", "title": "조회", "caption": "조회", "narration": "조회"}],
+        "actions": [
+            {"id": "a1", "type": "click", "selector": "button.search", "step_id": "step_1"},
+            {"id": "a2", "type": "capture_step", "step_id": "step_1"},
+        ],
+    }
+
+    result = _execute_browser_agent_actions(FakePage(), request, plan, tmp_path, settings)
+
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "browser_agent_llm_not_configured"
+    assert result["action_log"][0]["reason"] == "llm_not_configured"
+    assert ("click", "button.search") in calls
 
 
 def test_resolve_login_options_prefers_request_mode_and_env_credentials():

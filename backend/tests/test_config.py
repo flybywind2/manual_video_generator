@@ -31,6 +31,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest",
                 "MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH=D:\\browsers\\chrome.exe",
+                "MANUAL_AGENT_ENABLE_BROWSER_AGENT=true",
+                "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=7",
                 "MANUAL_AGENT_LOGIN_MODE=credentials",
                 "MANUAL_AGENT_LOGIN_USERNAME_SELECTOR=#uid",
                 "MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR=#pwd",
@@ -69,6 +71,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.playwright_mcp_mode == "manifest"
     assert settings.playwright_mcp_command == "npx @playwright/mcp@latest"
     assert settings.playwright_executable_path == "D:\\browsers\\chrome.exe"
+    assert settings.enable_browser_agent is True
+    assert settings.browser_agent_max_steps == 7
     assert settings.login.mode == "credentials"
     assert settings.login.username_selector == "#uid"
     assert settings.login.password_selector == "#pwd"
@@ -130,6 +134,7 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert status["login"]["username_set"] is True
     assert status["login"]["password_set"] is True
     assert "enable_internal_planner" in status["runtime"]
+    assert "enable_browser_agent" in status["runtime"]
 
 
 def test_process_environment_overrides_env_file_values(tmp_path: Path):

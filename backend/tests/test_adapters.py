@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from backend.app.adapters.browser_agent import decide_browser_agent_action
 from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
@@ -10,6 +11,111 @@ from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
 from backend.app.pipeline import PipelineInput
+
+
+def test_browser_agent_decides_next_action_from_page_observation():
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회 후 상세 화면 확인 방법 영상 만들기",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면이 보이면 완료",
+        input_values={"LOT": "LOT-001"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout_seconds})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "type": "fill_by_label",
+                                "label": "LOT",
+                                "value_key": "LOT",
+                                "reason": "LOT 입력칸이 보입니다.",
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"url": request.target_url, "fields": [{"label": "LOT"}], "clickables": [{"text": "조회"}]},
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+    )
+
+    assert action["status"] == "ok"
+    assert action["type"] == "fill_by_label"
+    assert action["label"] == "LOT"
+    assert action["value"] == "LOT-001"
+    assert action["source"] == "browser-agent-llm"
+    assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
+    assert calls[0]["payload"]["messages"][1]["content"]
+
+
+def test_browser_agent_blocks_dangerous_click_texts():
+    request = PipelineInput(
+        request_text="계정 조회",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="조회 결과",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"type": "click_by_text", "texts": ["삭제"], "reason": "삭제 버튼 클릭"})
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"clickables": [{"text": "삭제"}]},
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+    )
+
+    assert action["status"] == "blocked"
+    assert action["type"] == "finish"
+    assert action["reason"] == "dangerous_click_text"
 
 
 def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):

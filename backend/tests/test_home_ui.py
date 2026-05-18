@@ -43,6 +43,8 @@ def test_static_app_exposes_review_artifact_links():
     assert "HyperFrames Composition" in body
     assert "OpenCode Prompt" in body
     assert "login_mode" in body
+    assert "Browser Agent" in body
+    assert "browser_agent_max_steps" in body
     assert 'login_mode.value = "";' in body
     assert 'login_mode.value = "none";' not in body
     assert "login_success_selector" in body

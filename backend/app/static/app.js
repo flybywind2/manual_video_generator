@@ -184,6 +184,7 @@ async function loadConfigStatus() {
       ["RAG", status.rag.configured, status.rag.index_name || "index 미설정"],
       ["Reranker", status.reranker.configured, status.reranker.model || "model 미설정"],
       ["Planner", status.runtime.enable_internal_planner, status.runtime.enable_internal_planner ? "internal LLM" : "local"],
+      ["Browser Agent", status.runtime.enable_browser_agent, status.runtime.enable_browser_agent ? `${status.runtime.browser_agent_max_steps || 8} steps` : "disabled"],
       ["TTS", true, status.runtime.tts_provider],
       ["Renderer", true, status.runtime.video_renderer],
       ["Login", status.login.mode !== "none", status.login.mode === "credentials" ? (status.login.credentials_configured ? "credentials ready" : "credentials missing") : status.login.mode],
