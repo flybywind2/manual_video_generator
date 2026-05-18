@@ -887,6 +887,18 @@ a {
   gap: 8px;
 }
 
+.artifact-action-row,
+.artifact-link-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.artifact-action-row {
+  flex-basis: 100%;
+}
+
 .artifact-links a,
 .artifact-link {
   padding: 7px 10px;

@@ -36,6 +36,7 @@ REQUIRED_SUPPORTING_ARTIFACTS = {
     "playwright_mcp_calls",
     "audit_log",
     "subtitles",
+    "media_plan",
     "tts_metadata",
     "video_render",
     "opencode_prompt",

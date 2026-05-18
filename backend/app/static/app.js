@@ -92,6 +92,13 @@ artifactLinks?.addEventListener("click", async (event) => {
     return;
   }
 
+  const rerenderButton = event.target?.closest("[data-action='rerender-package']");
+  if (rerenderButton) {
+    event.preventDefault();
+    await rerenderPackage(rerenderButton.dataset.jobId, rerenderButton);
+    return;
+  }
+
   const button = event.target?.closest("[data-action='continue-workflow']");
   if (!button) return;
   event.preventDefault();
@@ -157,6 +164,33 @@ async function continueWorkflow(jobId, button) {
     button.disabled = false;
     setStatus("Failed");
     renderPlanReview(currentDraft, error.message || "승인 후 실행 중 오류가 발생했습니다.");
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function rerenderPackage(jobId, button) {
+  if (!jobId) return;
+  button.disabled = true;
+  setBusy(true, "재렌더링 중...");
+  setWorkflowStep(5);
+  setPipelineProgress(5);
+  setStatus("Rerendering");
+  artifactStatus.textContent = `작업 ${jobId} 패키지 기반으로 TTS, 미리보기, 영상 렌더를 다시 생성합니다.`;
+  try {
+    const response = await fetch(`/api/pipeline/rerender/${encodeURIComponent(jobId)}`, {
+      method: "POST",
+    });
+    if (!response.ok) {
+      throw new Error(`Rerender failed: ${response.status}`);
+    }
+    const result = await response.json();
+    setStatus("Completed");
+    renderArtifacts(result, "패키지 기반 재렌더링이 완료되었습니다.");
+  } catch (error) {
+    button.disabled = false;
+    setStatus("Failed");
+    artifactStatus.textContent = error.message || "재렌더링 중 오류가 발생했습니다.";
   } finally {
     setBusy(false);
   }
@@ -287,15 +321,17 @@ function renderPlanReview(draft, errorMessage = "") {
   `;
 }
 
-function renderArtifacts(result) {
-  artifactStatus.textContent = `작업 ${result.job_id} 패키지가 생성되었습니다.`;
+function renderArtifacts(result, message = "") {
+  artifactStatus.textContent = message || `작업 ${result.job_id} 패키지가 생성되었습니다.`;
   const supporting = result.supporting_artifacts || {};
   const links = [
     ["HTML 미리보기", result.artifacts.html_preview_url],
     ["영상", result.artifacts.video_url],
     ["Markdown", result.artifacts.markdown_manual_url],
+    ["자막", result.artifacts.subtitles_url],
     ["PDF", result.artifacts.pdf_manual_url],
     ["Action JSON", result.artifacts.action_plan_url],
+    ["Media Plan", supporting.media_plan || result.artifacts.media_plan_url],
     ["Planner Trace", supporting.planner_trace || result.artifacts.planner_trace_url],
     ["리허설 로그", supporting.rehearsal_log || result.artifacts.rehearsal_log_url],
     ["MCP Calls", supporting.playwright_mcp_calls || result.artifacts.mcp_calls_url],
@@ -309,9 +345,14 @@ function renderArtifacts(result) {
     ["OpenCode 메타데이터", result.artifacts.opencode_metadata_url],
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
   ].filter(([, url]) => Boolean(url));
-  artifactLinks.innerHTML = links
-    .map(([label, url]) => artifactAnchor(label, url))
-    .join("");
+  artifactLinks.innerHTML = `
+    <div class="artifact-action-row">
+      <button class="button secondary" type="button" data-action="rerender-package" data-job-id="${escapeHtml(result.job_id)}">패키지 기반 재렌더링</button>
+    </div>
+    <div class="artifact-link-grid">
+      ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
+    </div>
+  `;
 }
 
 function artifactAnchor(label, url) {

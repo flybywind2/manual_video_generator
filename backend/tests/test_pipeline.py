@@ -25,6 +25,7 @@ from backend.app.pipeline import (
     _render_subtitles,
     _raise_if_login_failed,
     _resolve_login_options,
+    rerender_pipeline_package,
     run_pipeline,
 )
 
@@ -121,6 +122,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
         "audit_log",
         "capture_action_log",
         "subtitles",
+        "media_plan",
         "hyperframes_composition",
         "hyperframes_manifest",
     }
@@ -393,6 +395,79 @@ def test_text_artifact_api_rejects_non_text_and_path_traversal(tmp_path, monkeyp
 
     assert client.get(f"/api/artifacts/text/{video_path}").status_code == 415
     assert client.get("/api/artifacts/text/%2e%2e/README.md").status_code == 404
+
+
+def test_rerender_pipeline_package_uses_edited_subtitles_without_recapture(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 챗봇 시연",
+            target_url="http://127.0.0.1:8000/sample",
+            role="사용자",
+            completion_condition="답변",
+            input_values={"질문": "원본 질문"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    result.artifacts.markdown_manual.write_text("# 사용자가 편집한 매뉴얼\n\n보존되어야 합니다.", encoding="utf-8")
+    result.artifacts.subtitles.write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\n편집된 자막 제목\n편집된 자막 캡션\n",
+        encoding="utf-8",
+    )
+    before_capture_events = result.artifacts.audit_log.read_text(encoding="utf-8").count('"actor": "capture"')
+
+    rerendered = rerender_pipeline_package(result.job_id, base_dir=tmp_path)
+
+    tts_metadata = json.loads(rerendered.artifacts.tts_metadata.read_text(encoding="utf-8"))
+    preview = rerendered.artifacts.html_preview.read_text(encoding="utf-8")
+    audit_text = rerendered.artifacts.audit_log.read_text(encoding="utf-8")
+
+    assert rerendered.job_id == result.job_id
+    assert "편집된 자막 제목" in tts_metadata["entries"][0]["text"]
+    assert "편집된 자막 캡션" in preview
+    assert result.artifacts.markdown_manual.read_text(encoding="utf-8").startswith("# 사용자가 편집한 매뉴얼")
+    assert audit_text.count('"actor": "capture"') == before_capture_events
+    assert '"actor": "rerender"' in audit_text
+    assert (result.package_dir / "media_plan.json").exists()
+
+
+def test_pipeline_rerender_api_returns_updated_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    result.artifacts.subtitles.write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\n재렌더 제목\n재렌더 캡션\n",
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+
+    response = client.post(f"/api/pipeline/rerender/{result.job_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_id"] == result.job_id
+    assert body["status"] == "completed"
+    assert body["artifacts"]["video_url"]
+    assert client.get(body["artifacts"]["html_preview_url"]).status_code == 200
+    assert "재렌더 제목" in result.artifacts.tts_metadata.read_text(encoding="utf-8")
+
+
+def test_pipeline_rerender_api_rejects_invalid_job_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    response = client.post("/api/pipeline/rerender/%2e%2e/%2e%2e/outside")
+
+    assert response.status_code == 404
 
 
 def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkeypatch):

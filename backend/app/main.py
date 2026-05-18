@@ -12,6 +12,7 @@ from backend.app.pipeline import (
     continue_pipeline_draft,
     create_pipeline_draft,
     draft_response,
+    rerender_pipeline_package,
     run_pipeline,
 )
 
@@ -145,6 +146,17 @@ def continue_pipeline_api(job_id: str, capture_browser: bool | None = None) -> d
         result = continue_pipeline_draft(job_id, capture_browser=capture_browser)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="workflow draft not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return artifact_response(result)
+
+
+@app.post("/api/pipeline/rerender/{job_id}")
+def rerender_pipeline_api(job_id: str) -> dict:
+    try:
+        result = rerender_pipeline_package(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="workflow package not found") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return artifact_response(result)

@@ -68,6 +68,9 @@ def test_static_app_exposes_review_artifact_links():
     assert "saveArtifactEditor" in body
     assert "isTextArtifact" in body
     assert "/api/artifacts/text/" in body
+    assert "rerenderPackage" in body
+    assert "/api/pipeline/rerender/" in body
+    assert "패키지 기반 재렌더링" in body
 
 
 def test_home_screen_includes_text_artifact_editor_modal():

@@ -54,6 +54,7 @@ class ArtifactPaths(BaseModel):
     final_frame: Path | None = None
     capture_action_log: Path | None = None
     subtitles: Path | None = None
+    media_plan: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
     tts_metadata: Path | None = None
     video_render_metadata: Path | None = None
@@ -749,6 +750,163 @@ def continue_pipeline_draft(
         raise
 
 
+def rerender_pipeline_package(
+    job_id: str,
+    *,
+    base_dir: Path | None = None,
+) -> PipelineResult:
+    apply_runtime_environment()
+    settings = load_settings()
+    output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
+    package_dir = (output_root / "jobs" / job_id).resolve()
+    try:
+        package_dir.relative_to((output_root / "jobs").resolve())
+    except ValueError as exc:
+        raise FileNotFoundError(f"invalid job id: {job_id}") from exc
+    manifest_path = package_dir / "package_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"package manifest not found: {job_id}")
+
+    result = _pipeline_result_from_manifest(manifest_path)
+    dirs = _dirs_from_package(package_dir)
+    audit = AuditLog(run_id=job_id, path=result.artifacts.audit_log, reset=False)
+    terminal = TerminalRunLogger(enabled=settings.enable_terminal_logs)
+    terminal.record(run_id=job_id, actor="rerender", status="started", details={"package_dir": str(package_dir)})
+    request = _request_from_package(package_dir)
+    environment = _manifest_environment(manifest_path) or runtime_fingerprint()
+    media_plan, media_plan_source = _load_package_media_plan(result)
+    subtitles_path = result.artifacts.subtitles or (package_dir / "subtitles.vtt")
+    if media_plan_source != "subtitles" or not subtitles_path.exists():
+        subtitles_path = _render_subtitles(media_plan, package_dir)
+    media_plan_path = _write_media_plan(media_plan, package_dir)
+    masked_names = _masked_names_from_package(result)
+    source_video = _source_video_for_rerender(result)
+    if not source_video.exists():
+        raise RuntimeError(f"source video missing for rerender: {source_video}")
+
+    _record_stage(
+        audit,
+        terminal,
+        actor="rerender",
+        status="ok",
+        input_data={"job_id": job_id, "media_plan_source": media_plan_source},
+        output_data={"steps": len(media_plan.get("steps") or [])},
+        artifacts=[media_plan_path, subtitles_path, source_video],
+        terminal_details={
+            "media_plan_source": media_plan_source,
+            "source_video": str(source_video),
+            "masked_count": len(masked_names),
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="tts",
+        status="started",
+        details={
+            "provider": settings.tts_provider,
+            "device": settings.tts_device,
+            "language": settings.tts_language,
+            "rerender": True,
+        },
+    )
+    tts_result = synthesize_tts(media_plan, settings, dirs.tts)
+    tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
+    _record_stage(
+        audit,
+        terminal,
+        actor="tts",
+        status="degraded" if tts_degrade_reason else "ok",
+        input_data=media_plan.get("steps", []),
+        output_data=tts_result.entries,
+        degrade_reason=tts_degrade_reason,
+        artifacts=[tts_result.metadata_path, *tts_result.audio_paths],
+        terminal_details={"audio_count": len(tts_result.audio_paths), "rerender": True},
+    )
+    html_path = _render_preview(
+        request,
+        media_plan,
+        dirs,
+        masked_names,
+        tts_result.audio_paths,
+        source_video=source_video,
+        subtitles_path=subtitles_path,
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="render",
+        status="started",
+        details={
+            "renderer": settings.video_renderer,
+            "hyperframes_command_set": bool(settings.hyperframes_command),
+            "rerender": True,
+        },
+    )
+    video_render = render_final_video(
+        plan=media_plan,
+        package_dir=package_dir,
+        preview_html=html_path,
+        fallback_video=source_video,
+        settings=settings,
+    )
+    render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
+    _record_stage(
+        audit,
+        terminal,
+        actor="render",
+        status="degraded" if render_degrade_reason else "ok",
+        input_data={"renderer": settings.video_renderer, "rerender": True},
+        output_data={"video": str(video_render.video_path)},
+        degrade_reason=render_degrade_reason,
+        artifacts=[video_render.metadata_path, video_render.video_path, video_render.composition_dir / "index.html"],
+        terminal_details={
+            "renderer": settings.video_renderer,
+            "used_fallback": video_render.used_fallback,
+            "video_name": video_render.video_path.name,
+            "rerender": True,
+        },
+    )
+
+    artifacts = ArtifactPaths(
+        html_preview=html_path,
+        markdown_manual=result.artifacts.markdown_manual,
+        pdf_manual=result.artifacts.pdf_manual,
+        video=video_render.video_path,
+        action_plan=result.artifacts.action_plan,
+        approval_log=result.artifacts.approval_log,
+        masking_log=result.artifacts.masking_log,
+        package_manifest=manifest_path,
+        audit_log=result.artifacts.audit_log,
+        input_extraction=result.artifacts.input_extraction,
+        final_frame=result.artifacts.final_frame,
+        capture_action_log=result.artifacts.capture_action_log,
+        subtitles=subtitles_path,
+        media_plan=media_plan_path,
+        tts_audio=tts_result.audio_paths,
+        tts_metadata=tts_result.metadata_path,
+        video_render_metadata=video_render.metadata_path,
+        skills_metadata=video_render.skills_metadata_path,
+        opencode_metadata=result.artifacts.opencode_metadata,
+    )
+    rerendered = PipelineResult(
+        job_id=job_id,
+        status="completed",
+        package_dir=package_dir,
+        plan=result.plan,
+        rehearsal=result.rehearsal,
+        artifacts=artifacts,
+    )
+    _write_json(manifest_path, _manifest(rerendered, degradations=audit.degradations(), environment=environment))
+    _update_workflow_state_after_rerender(package_dir)
+    terminal.record(
+        run_id=job_id,
+        actor="rerender",
+        status="completed",
+        details={"video_name": video_render.video_path.name, "package_dir": str(package_dir)},
+        artifacts=[manifest_path, video_render.video_path],
+    )
+    return rerendered
+
+
 def _complete_pipeline_execution(
     *,
     job_id: str,
@@ -826,6 +984,7 @@ def _complete_pipeline_execution(
         },
     )
     media_plan = _media_plan_for_outputs(effective_request, plan, capture_result.get("action_log", []))
+    media_plan_path = _write_media_plan(media_plan, dirs.package)
     video_path = capture_result["video"]
     if not video_path.exists():
         video_path = _render_placeholder_video(dirs.package)
@@ -944,6 +1103,7 @@ def _complete_pipeline_execution(
         final_frame=capture_result.get("final_frame"),
         capture_action_log=capture_result.get("action_log_path"),
         subtitles=subtitles_path,
+        media_plan=media_plan_path,
         tts_audio=tts_result.audio_paths,
         tts_metadata=tts_result.metadata_path,
         video_render_metadata=video_render.metadata_path,
@@ -1009,6 +1169,9 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
             "subtitles_url": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
+            "media_plan_url": f"{rel_base}/media_plan.json"
+            if result.artifacts.media_plan and result.artifacts.media_plan.exists()
+            else None,
             "request_url": f"{rel_base}/request.json",
             "input_extraction_url": f"{rel_base}/input_extraction.json",
             "planner_trace_url": f"{rel_base}/planner_trace.json",
@@ -1054,6 +1217,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
             "pdf_manual_url": None,
             "capture_action_log_url": None,
             "subtitles_url": None,
+            "media_plan_url": None,
         },
         "supporting_artifacts": {
             "request": f"{rel_base}/request.json",
@@ -1083,6 +1247,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "audit_log": f"{rel_base}/audit_log.jsonl",
         "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
         "subtitles": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
+        "media_plan": f"{rel_base}/media_plan.json" if result.artifacts.media_plan and result.artifacts.media_plan.exists() else None,
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
         "video_render": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
         "skills_metadata": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
@@ -1111,6 +1276,7 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     package_dir = Path(manifest["package_dir"])
     artifacts = manifest["artifacts"]
+    media_plan = Path(artifacts["media_plan"]) if artifacts.get("media_plan") else package_dir / "media_plan.json"
     return PipelineResult(
         job_id=str(manifest["job_id"]),
         status=str(manifest["status"]),
@@ -1131,6 +1297,7 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
             final_frame=Path(artifacts["final_frame"]) if artifacts.get("final_frame") else None,
             capture_action_log=Path(artifacts["capture_action_log"]) if artifacts.get("capture_action_log") else None,
             subtitles=Path(artifacts["subtitles"]) if artifacts.get("subtitles") else None,
+            media_plan=media_plan if media_plan.exists() else None,
             tts_audio=[Path(path) for path in artifacts.get("tts_audio", [])],
             tts_metadata=Path(artifacts["tts_metadata"]) if artifacts.get("tts_metadata") else None,
             video_render_metadata=Path(artifacts["video_render"]) if artifacts.get("video_render") else None,
@@ -2533,6 +2700,223 @@ def _media_plan_for_outputs(
     }
 
 
+def _write_media_plan(media_plan: dict[str, Any], package_dir: Path) -> Path:
+    path = package_dir / "media_plan.json"
+    _write_json(path, media_plan)
+    return path
+
+
+def _load_package_media_plan(result: PipelineResult) -> tuple[dict[str, Any], str]:
+    media_plan_path = result.artifacts.media_plan or (result.package_dir / "media_plan.json")
+    subtitles_path = result.artifacts.subtitles or (result.package_dir / "subtitles.vtt")
+    if subtitles_path.exists() and (not media_plan_path.exists() or subtitles_path.stat().st_mtime > media_plan_path.stat().st_mtime):
+        subtitles_plan = _media_plan_from_subtitles(subtitles_path, result)
+        if subtitles_plan.get("steps"):
+            return subtitles_plan, "subtitles"
+    if media_plan_path.exists():
+        try:
+            loaded = json.loads(media_plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict) and loaded.get("steps"):
+            loaded.setdefault("source", "package-media-plan")
+            return loaded, "media_plan"
+    tts_plan = _media_plan_from_tts_metadata(result)
+    if tts_plan.get("steps"):
+        return tts_plan, "tts_metadata"
+    plan = dict(result.plan)
+    plan.setdefault("source", "action-plan")
+    return plan, "action_plan"
+
+
+def _media_plan_from_subtitles(path: Path, result: PipelineResult) -> dict[str, Any]:
+    cues = _parse_webvtt_cues(path.read_text(encoding="utf-8"))
+    steps = []
+    for index, cue in enumerate(cues, start=1):
+        lines = [line.strip() for line in cue if line.strip()]
+        if not lines:
+            continue
+        title = _compact_text(lines[0], limit=80)
+        caption = _compact_text(" ".join(lines[1:]) if len(lines) > 1 else lines[0], limit=180)
+        narration = caption if caption == title else f"{title}\n{caption}"
+        steps.append(
+            {
+                "id": f"subtitle_{index:02d}",
+                "title": title,
+                "caption": caption,
+                "narration": narration,
+            }
+        )
+    return {
+        "source": "package-subtitles",
+        "request_text": _plan_request_value(result, "request_text"),
+        "target_url": _plan_request_value(result, "target_url"),
+        "role": _plan_request_value(result, "role"),
+        "completion_condition": _plan_request_value(result, "completion_condition"),
+        "steps": steps,
+        "actions": [],
+    }
+
+
+def _parse_webvtt_cues(content: str) -> list[list[str]]:
+    cues: list[list[str]] = []
+    current: list[str] = []
+    in_cue = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip("\ufeff")
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                cues.append(current)
+                current = []
+            in_cue = False
+            continue
+        if stripped == "WEBVTT" or stripped.startswith("NOTE"):
+            continue
+        if "-->" in stripped:
+            in_cue = True
+            current = []
+            continue
+        if in_cue:
+            current.append(stripped)
+    if current:
+        cues.append(current)
+    return cues
+
+
+def _media_plan_from_tts_metadata(result: PipelineResult) -> dict[str, Any]:
+    metadata_path = result.artifacts.tts_metadata or (result.package_dir / "tts" / "tts_metadata.json")
+    if not metadata_path.exists():
+        return {}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    steps = []
+    for index, entry in enumerate(metadata.get("entries") or [], start=1):
+        if not isinstance(entry, dict):
+            continue
+        text = _compact_text(str(entry.get("text") or ""), limit=180)
+        if not text:
+            continue
+        steps.append(
+            {
+                "id": str(entry.get("step_id") or f"tts_{index:02d}"),
+                "title": _compact_text(text, limit=80),
+                "caption": text,
+                "narration": text,
+            }
+        )
+    return {
+        "source": "package-tts-metadata",
+        "request_text": _plan_request_value(result, "request_text"),
+        "target_url": _plan_request_value(result, "target_url"),
+        "role": _plan_request_value(result, "role"),
+        "completion_condition": _plan_request_value(result, "completion_condition"),
+        "steps": steps,
+        "actions": [],
+    }
+
+
+def _plan_request_value(result: PipelineResult, key: str) -> str:
+    value = result.plan.get(key)
+    return str(value or "")
+
+
+def _request_from_package(package_dir: Path) -> PipelineInput:
+    for path in (package_dir / "request.json", package_dir / "workflow_state.json"):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if path.name == "workflow_state.json":
+            payload = payload.get("request") or {}
+        if isinstance(payload, dict):
+            return PipelineInput(
+                request_text=str(payload.get("request_text") or "패키지 재렌더링"),
+                target_url=str(payload.get("target_url") or "about:blank"),
+                role=str(payload.get("role") or "사용자"),
+                completion_condition=str(payload.get("completion_condition") or "패키지 렌더 완료"),
+                input_values=payload.get("input_values") if isinstance(payload.get("input_values"), dict) else {},
+                execution_mode=str(payload.get("execution_mode") or "ai"),
+                login_mode=str(payload.get("login_mode") or ""),
+                login_success_selector=str(payload.get("login_success_selector") or ""),
+            )
+    return PipelineInput(
+        request_text="패키지 재렌더링",
+        target_url="about:blank",
+        role="사용자",
+        completion_condition="패키지 렌더 완료",
+    )
+
+
+def _masked_names_from_package(result: PipelineResult) -> list[str]:
+    if result.artifacts.masking_log.exists():
+        try:
+            masking_log = json.loads(result.artifacts.masking_log.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            masking_log = {}
+        names = []
+        for entry in masking_log.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            masked_output = entry.get("masked_output")
+            if masked_output and Path(str(masked_output)).exists():
+                names.append(Path(str(masked_output)).name)
+        if names:
+            return names
+    masked_dir = result.package_dir / "masked"
+    return [path.name for path in sorted(masked_dir.glob("*.png"))]
+
+
+def _source_video_for_rerender(result: PipelineResult) -> Path:
+    metadata_path = result.artifacts.video_render_metadata or (result.package_dir / "video_render.json")
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            metadata = {}
+        fallback_video = metadata.get("fallback_video")
+        if fallback_video and Path(str(fallback_video)).exists():
+            return Path(str(fallback_video))
+    raw_video = result.package_dir / "manual_video_agent_usage.webm"
+    if raw_video.exists():
+        return raw_video
+    return result.artifacts.video
+
+
+def _manifest_environment(manifest_path: Path) -> dict[str, str]:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    environment = manifest.get("environment") or {}
+    return {str(key): str(value) for key, value in environment.items()} if isinstance(environment, dict) else {}
+
+
+def _update_workflow_state_after_rerender(package_dir: Path) -> None:
+    state_path = package_dir / "workflow_state.json"
+    if not state_path.exists():
+        return
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    state.update(
+        {
+            "status": "completed",
+            "current_step": "completed",
+            "can_continue": False,
+            "last_rerendered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    _write_json(state_path, state)
+
+
 def _demonstration_events_for_media(action_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
     marker_index = -1
     for index, entry in enumerate(action_log):
@@ -3029,6 +3413,7 @@ def _manifest(
         "audit_log": str(result.artifacts.audit_log),
         "capture_action_log": _optional_path(result.artifacts.capture_action_log),
         "subtitles": _optional_path(result.artifacts.subtitles),
+        "media_plan": _optional_path(result.artifacts.media_plan),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
         "video_render": _optional_path(result.artifacts.video_render_metadata),
         "skills_metadata": _optional_path(result.artifacts.skills_metadata),
@@ -3057,6 +3442,7 @@ def _manifest(
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
             "subtitles": str(result.artifacts.subtitles) if result.artifacts.subtitles else None,
+            "media_plan": str(result.artifacts.media_plan) if result.artifacts.media_plan else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
             "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,
