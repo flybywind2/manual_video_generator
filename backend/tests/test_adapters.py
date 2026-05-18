@@ -2,7 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from backend.app.adapters.planner import build_plan
+from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.skills import ensure_hyperframes_skills
@@ -107,6 +107,26 @@ def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_inva
     trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
     assert trace["planner"] == "internal-llm"
     assert trace["error"] == plan["planner_error"]
+
+
+def test_deterministic_planner_does_not_emit_mes_sample_selectors():
+    request = PipelineInput(
+        request_text="사내 포털에서 권한 신청 방법 영상 만들기",
+        target_url="http://internal.example.local/portal",
+        role="신청자",
+        completion_condition="신청 완료 화면이 보이면 완료",
+        input_values={"사용자ID": "U100", "부서": "AI센터"},
+    )
+
+    plan = deterministic_plan(request, config_status={})
+
+    rendered = json.dumps(plan, ensure_ascii=False)
+    assert "[name='lot']" not in rendered
+    assert "[data-action='search']" not in rendered
+    assert "[data-action='detail']" not in rendered
+    assert "LOT" not in rendered
+    assert plan["actions"][0] == {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_intro"}
+    assert any(action["type"] == "capture_step" for action in plan["actions"])
 
 
 def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_path: Path):

@@ -51,28 +51,28 @@ def build_plan(
 
 
 def deterministic_plan(request: Any, config_status: dict[str, object] | None = None) -> dict[str, Any]:
-    lot_value = request.input_values.get("LOT") or request.input_values.get("lot") or "LOT-001"
+    input_summary = _format_input_summary(request.input_values)
     return {
         "source": "local-deterministic-planner",
         "config_status": config_status or {},
         "steps": [
             {
                 "id": "step_intro",
-                "title": "요청 확인",
-                "caption": "입력된 요청과 대상 시스템 정보를 확인합니다.",
-                "narration": "입력된 요청과 대상 시스템 정보를 확인합니다.",
+                "title": "대상 화면 진입",
+                "caption": "입력된 대상 URL로 이동해 화면 상태를 확인합니다.",
+                "narration": "입력된 대상 URL로 이동해 화면 상태를 확인합니다.",
             },
             {
-                "id": "step_search",
-                "title": "LOT 검색",
-                "caption": f"LOT 값 {lot_value}를 입력하고 조회합니다.",
-                "narration": f"LOT 값 {lot_value}를 입력하고 조회합니다.",
+                "id": "step_inputs",
+                "title": "입력 조건 확인",
+                "caption": f"시나리오에 필요한 입력 조건을 확인합니다. {input_summary}",
+                "narration": f"시나리오에 필요한 입력 조건을 확인합니다. {input_summary}",
             },
             {
-                "id": "step_detail",
-                "title": "상세 화면 확인",
-                "caption": "상세 화면에서 완료 조건을 확인합니다.",
-                "narration": "상세 화면에서 완료 조건을 확인합니다.",
+                "id": "step_completion",
+                "title": "완료 조건 확인",
+                "caption": f"완료 조건을 기준으로 화면을 검수합니다. {request.completion_condition}",
+                "narration": f"완료 조건을 기준으로 화면을 검수합니다. {request.completion_condition}",
             },
             {
                 "id": "step_export",
@@ -83,13 +83,11 @@ def deterministic_plan(request: Any, config_status: dict[str, object] | None = N
         ],
         "actions": [
             {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_intro"},
-            {"id": "a2", "type": "fill", "selector": "[name='lot']", "value": lot_value, "step_id": "step_search"},
-            {"id": "a3", "type": "click", "selector": "[data-action='search']", "step_id": "step_search"},
-            {"id": "a4", "type": "capture_step", "step_id": "step_search"},
-            {"id": "a5", "type": "click", "selector": "[data-action='detail']", "step_id": "step_detail"},
-            {"id": "a6", "type": "capture_step", "step_id": "step_detail"},
+            {"id": "a2", "type": "capture_step", "step_id": "step_intro"},
+            {"id": "a3", "type": "capture_step", "step_id": "step_inputs"},
+            {"id": "a4", "type": "capture_step", "step_id": "step_completion"},
             {
-                "id": "a7",
+                "id": "a5",
                 "type": "danger_approval",
                 "label": "렌더링 확정",
                 "requires_approval": True,
@@ -98,6 +96,13 @@ def deterministic_plan(request: Any, config_status: dict[str, object] | None = N
             },
         ],
     }
+
+
+def _format_input_summary(input_values: dict[str, Any]) -> str:
+    if not input_values:
+        return "추가 입력값은 없습니다."
+    rendered = ", ".join(f"{key}={value}" for key, value in input_values.items())
+    return f"입력값: {rendered}"
 
 
 def post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:

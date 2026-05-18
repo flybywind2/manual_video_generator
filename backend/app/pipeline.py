@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ class ArtifactPaths(BaseModel):
     package_manifest: Path
     audit_log: Path
     final_frame: Path | None = None
+    capture_action_log: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
     tts_metadata: Path | None = None
     video_render_metadata: Path | None = None
@@ -129,7 +131,7 @@ def run_pipeline(
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
 
     if capture_browser:
-        capture_result = _capture_with_playwright(request, dirs, settings)
+        capture_result = _capture_with_playwright(request, plan, dirs, settings)
         capture_status = "ok"
         capture_degrade_reason = ""
     else:
@@ -140,9 +142,13 @@ def run_pipeline(
         actor="capture",
         status=capture_status,
         input_data={"capture_browser": capture_browser, "target_url": request.target_url},
-        output_data={"captures": capture_result["masked_names"], "video": str(capture_result["video"])},
+        output_data={
+            "captures": capture_result["masked_names"],
+            "video": str(capture_result["video"]),
+            "action_log": redact_sensitive(capture_result.get("action_log", [])),
+        },
         degrade_reason=capture_degrade_reason,
-        artifacts=[*capture_result["captures"], capture_result["video"]],
+        artifacts=[*capture_result["captures"], capture_result["video"], capture_result.get("action_log_path")],
     )
 
     masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, request.input_values)
@@ -200,6 +206,7 @@ def run_pipeline(
         package_manifest=manifest_path,
         audit_log=audit.path,
         final_frame=capture_result.get("final_frame"),
+        capture_action_log=capture_result.get("action_log_path"),
         tts_audio=tts_result.audio_paths,
         tts_metadata=tts_result.metadata_path,
         video_render_metadata=video_render.metadata_path,
@@ -241,6 +248,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "masking_log_url": f"{rel_base}/masking_log.json",
             "package_manifest_url": f"{rel_base}/package_manifest.json",
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
+            "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
             "request_url": f"{rel_base}/request.json",
             "planner_trace_url": f"{rel_base}/planner_trace.json",
             "rehearsal_log_url": f"{rel_base}/rehearsal_log.json",
@@ -267,6 +275,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
         "playwright_mcp_execution": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
         "audit_log": f"{rel_base}/audit_log.jsonl",
+        "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
         "video_render": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
         "skills_metadata": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
@@ -287,18 +296,10 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
     return PipelineDirs(package=package_dir, captures=captures, masked=masked, tts=tts, raw_video=raw_video)
 
 
-def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs, settings: Any) -> dict[str, Any]:
+def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, settings: Any) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
     launch_kwargs = _playwright_launch_kwargs(settings)
-
-    captions = [
-        ("step_intro", "요청 정보를 확인하고 샘플 사내 시스템으로 이동합니다.", ".sample-hero"),
-        ("step_search", "LOT 번호를 입력한 뒤 조회 결과를 확인합니다.", ".search-panel"),
-        ("step_detail", "상세 화면에서 완료 조건이 충족됐는지 확인합니다.", ".detail-panel"),
-        ("step_export", "캡처와 내레이션을 묶어 영상과 문서 패키지를 생성합니다.", ".detail-panel"),
-    ]
-    captures: list[Path] = []
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
@@ -307,29 +308,16 @@ def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs, setting
             record_video_size={"width": 1280, "height": 800},
         )
         page = context.new_page()
-        _prepare_capture_page(page, request.target_url)
-
-        page.evaluate("window.__manualSetCaption", captions[0][1])
-        page.evaluate("window.__manualHighlight", captions[0][2])
-        page.wait_for_timeout(900)
-        captures.append(_screenshot(page, dirs.captures, "step_intro.png"))
-
-        lot = request.input_values.get("LOT") or request.input_values.get("lot") or "LOT-001"
-        page.fill("[name='lot']", lot)
-        page.click("[data-action='search']")
-        page.evaluate("window.__manualSetCaption", captions[1][1])
-        page.evaluate("window.__manualHighlight", captions[1][2])
-        page.wait_for_timeout(1000)
-        captures.append(_screenshot(page, dirs.captures, "step_search.png"))
-
-        page.click("[data-action='detail']")
-        page.evaluate("window.__manualSetCaption", captions[2][1])
-        page.evaluate("window.__manualHighlight", captions[2][2])
-        page.wait_for_timeout(1200)
-        captures.append(_screenshot(page, dirs.captures, "step_detail.png"))
-
-        page.evaluate("window.__manualSetCaption", captions[3][1])
-        page.wait_for_timeout(1200)
+        actions = plan.get("actions", [])
+        if not actions or actions[0].get("type") != "navigate":
+            _prepare_capture_page(page, request.target_url)
+        capture_result = _execute_capture_actions(page, plan, dirs.captures)
+        captures = capture_result["captures"]
+        if not captures:
+            first_step = _first_plan_step(plan)
+            _apply_step_overlay(page, first_step)
+            page.wait_for_timeout(900)
+            captures.append(_screenshot(page, dirs.captures, _step_capture_name(first_step, set())))
         final_frame = _screenshot(page, dirs.package, "final_frame.png")
         context.close()
         browser.close()
@@ -338,11 +326,15 @@ def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs, setting
     video = dirs.package / "manual_video_agent_usage.webm"
     if videos:
         shutil.copy2(videos[0], video)
+    action_log_path = dirs.package / "capture_action_log.json"
+    _write_json(action_log_path, {"status": "completed", "entries": redact_sensitive(capture_result.get("action_log", []))})
     return {
         "captures": captures,
         "masked_names": [path.name for path in captures],
         "video": video,
         "final_frame": final_frame,
+        "action_log": capture_result.get("action_log", []),
+        "action_log_path": action_log_path,
     }
 
 
@@ -386,18 +378,141 @@ def _prepare_capture_page(page: Any, target_url: str) -> None:
         page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
         # Some internal systems keep long-polling connections open. Continue after
-        # document readiness and expected controls are available.
+        # document readiness and a rendered body are available.
         pass
     page.wait_for_function(
         """
         () => document.readyState === 'complete'
-          && (!document.querySelector("[data-action='search']") || window.__sampleMesReady === true)
+          && document.body
+          && document.body.children.length > 0
         """,
         timeout=10000,
     )
-    page.wait_for_selector("[data-action='search']", timeout=10000)
-    page.wait_for_selector("[data-action='detail']", timeout=10000)
     _inject_recording_helpers(page)
+
+
+def _execute_capture_actions(page: Any, plan: dict[str, Any], capture_dir: Path) -> dict[str, Any]:
+    steps = {str(step.get("id")): step for step in plan.get("steps", []) if isinstance(step, dict)}
+    captures: list[Path] = []
+    action_log: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+
+    for action in plan.get("actions", []):
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or "")
+        action_type = str(action.get("type") or "")
+        step = steps.get(str(action.get("step_id"))) or _first_plan_step(plan)
+        log_entry = {"action_id": action_id, "type": action_type, "step_id": step.get("id"), "status": "ok"}
+        try:
+            if action_type == "navigate":
+                target = str(action.get("target") or "")
+                if not target:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_target"
+                else:
+                    _prepare_capture_page(page, target)
+                    _apply_step_overlay(page, step, action)
+                    page.wait_for_timeout(500)
+            elif action_type == "fill":
+                selector = str(action.get("selector") or "")
+                if not selector:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_selector"
+                else:
+                    _apply_step_overlay(page, step, action)
+                    page.fill(selector, str(action.get("value") or ""))
+                    page.wait_for_timeout(300)
+            elif action_type == "click":
+                selector = str(action.get("selector") or "")
+                if not selector:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_selector"
+                else:
+                    _apply_step_overlay(page, step, action)
+                    page.click(selector)
+                    page.wait_for_timeout(700)
+            elif action_type == "press":
+                selector = str(action.get("selector") or "")
+                key = str(action.get("key") or "Enter")
+                if not selector:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_selector"
+                else:
+                    _apply_step_overlay(page, step, action)
+                    page.press(selector, key)
+                    page.wait_for_timeout(500)
+            elif action_type == "wait_for_selector":
+                selector = str(action.get("selector") or "")
+                if not selector:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_selector"
+                else:
+                    page.wait_for_selector(selector, timeout=_action_timeout(action, default=10000))
+            elif action_type == "wait":
+                page.wait_for_timeout(_action_timeout(action, default=1000))
+            elif action_type == "capture_step":
+                _apply_step_overlay(page, step, action)
+                page.wait_for_timeout(500)
+                captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
+            else:
+                log_entry["status"] = "skipped"
+                log_entry["reason"] = "unsupported_action_type"
+        except Exception as exc:  # noqa: BLE001 - capture should produce an inspectable package when one action fails.
+            log_entry["status"] = "failed"
+            log_entry["error"] = f"{type(exc).__name__}: {exc}"
+        action_log.append(log_entry)
+
+    return {"captures": captures, "action_log": action_log}
+
+
+def _first_plan_step(plan: dict[str, Any]) -> dict[str, Any]:
+    steps = plan.get("steps", [])
+    if steps and isinstance(steps[0], dict):
+        return steps[0]
+    return {
+        "id": "step_intro",
+        "title": "화면 확인",
+        "caption": "대상 화면을 확인합니다.",
+        "narration": "대상 화면을 확인합니다.",
+    }
+
+
+def _apply_step_overlay(page: Any, step: dict[str, Any], action: dict[str, Any] | None = None) -> None:
+    caption = str(step.get("caption") or step.get("title") or "")
+    if caption:
+        page.evaluate("window.__manualSetCaption", caption)
+    selector = ""
+    if action:
+        selector = str(action.get("highlight_selector") or action.get("selector") or "")
+    if selector:
+        try:
+            page.evaluate("window.__manualHighlight", selector)
+        except Exception:
+            # Highlighting is presentational. Do not fail a capture action because
+            # a target system uses a selector Playwright can execute but querySelector cannot.
+            pass
+
+
+def _step_capture_name(step: dict[str, Any], used_names: set[str]) -> str:
+    raw_stem = str(step.get("id") or step.get("title") or "step")
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_stem).strip("._-") or "step"
+    name = f"{stem}.png"
+    index = 2
+    while name in used_names:
+        name = f"{stem}_{index}.png"
+        index += 1
+    used_names.add(name)
+    return name
+
+
+def _action_timeout(action: dict[str, Any], *, default: int) -> int:
+    raw_value = action.get("timeout_ms", action.get("timeout", default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(value, 0)
 
 
 def _create_placeholder_captures(request: PipelineInput, dirs: PipelineDirs) -> dict[str, Any]:
@@ -406,8 +521,8 @@ def _create_placeholder_captures(request: PipelineInput, dirs: PipelineDirs) -> 
     captures: list[Path] = []
     texts = [
         ("step_intro.png", "요청 확인", request.request_text),
-        ("step_search.png", "LOT 검색", json.dumps(request.input_values, ensure_ascii=False)),
-        ("step_detail.png", "상세 화면 확인", request.completion_condition),
+        ("step_inputs.png", "입력 조건 확인", json.dumps(request.input_values, ensure_ascii=False)),
+        ("step_completion.png", "완료 조건 확인", request.completion_condition),
     ]
     for name, title, body in texts:
         image = Image.new("RGB", (1280, 800), "#F7F9FC")
@@ -421,11 +536,15 @@ def _create_placeholder_captures(request: PipelineInput, dirs: PipelineDirs) -> 
     video = _render_placeholder_video(dirs.package)
     final_frame = dirs.package / "final_frame.png"
     shutil.copy2(captures[-1], final_frame)
+    action_log_path = dirs.package / "capture_action_log.json"
+    _write_json(action_log_path, {"status": "skipped", "reason": "browser_capture_disabled", "entries": []})
     return {
         "captures": captures,
         "masked_names": [path.name for path in captures],
         "video": video,
         "final_frame": final_frame,
+        "action_log": [],
+        "action_log_path": action_log_path,
     }
 
 
@@ -621,6 +740,7 @@ def _manifest(
         "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),
         "playwright_mcp_execution": _optional_path(package_dir / "playwright_mcp_execution.json"),
         "audit_log": str(result.artifacts.audit_log),
+        "capture_action_log": _optional_path(result.artifacts.capture_action_log),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
         "video_render": _optional_path(result.artifacts.video_render_metadata),
         "skills_metadata": _optional_path(result.artifacts.skills_metadata),
@@ -646,6 +766,7 @@ def _manifest(
             "package_manifest": str(result.artifacts.package_manifest),
             "audit_log": str(result.artifacts.audit_log),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
+            "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
             "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,
