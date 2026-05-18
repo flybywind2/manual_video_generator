@@ -716,21 +716,36 @@ def continue_pipeline_draft(
             "can_continue": False,
         },
     )
-    return _complete_pipeline_execution(
-        job_id=job_id,
-        effective_request=effective_request,
-        plan=plan,
-        artifact_plan=plan,
-        artifact_rehearsal=rehearsal,
-        settings=settings,
-        dirs=dirs,
-        audit=audit,
-        terminal=terminal,
-        environment=state.get("environment") or runtime_fingerprint(),
-        capture_browser=bool(state.get("capture_browser", True)) if capture_browser is None else capture_browser,
-        action_plan_path=package_dir / "action_plan.json",
-        approval_log_path=package_dir / "approval_log.json",
-    )
+    try:
+        return _complete_pipeline_execution(
+            job_id=job_id,
+            effective_request=effective_request,
+            plan=plan,
+            artifact_plan=plan,
+            artifact_rehearsal=rehearsal,
+            settings=settings,
+            dirs=dirs,
+            audit=audit,
+            terminal=terminal,
+            environment=state.get("environment") or runtime_fingerprint(),
+            capture_browser=bool(state.get("capture_browser", True)) if capture_browser is None else capture_browser,
+            action_plan_path=package_dir / "action_plan.json",
+            approval_log_path=package_dir / "approval_log.json",
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        _write_json(
+            state_path,
+            {
+                **state,
+                "status": "failed",
+                "current_step": "execution_failed",
+                "can_continue": True,
+                "last_error": error,
+            },
+        )
+        terminal.record(run_id=job_id, actor="pipeline", status="failed", details={"error": error})
+        raise
 
 
 def _complete_pipeline_execution(
@@ -1744,7 +1759,31 @@ def _fill_by_label(page: Any, label: str, value: str) -> str:
                 return f"locator:{selector}"
             except Exception as exc:  # noqa: BLE001 - collect evidence then fail after all candidates.
                 errors.append(f"locator:{type(exc).__name__}")
+    if _text_value_visible(page, value):
+        return f"value_visible:{value}"
     raise RuntimeError(f"no editable field found for label {label!r}: {'; '.join(errors)}")
+
+
+def _text_value_visible(page: Any, value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    by_text = getattr(page, "get_by_text", None)
+    if not callable(by_text):
+        return False
+    try:
+        locator = by_text(text, exact=True)
+        target = getattr(locator, "first", locator)
+        if callable(target):
+            target = target()
+        wait_for = getattr(target, "wait_for", None)
+        if callable(wait_for):
+            wait_for(state="visible", timeout=1000)
+            return True
+        count = getattr(locator, "count", None)
+        return callable(count) and count() > 0
+    except Exception:
+        return False
 
 
 def _click_by_text(page: Any, texts: list[str]) -> str:
