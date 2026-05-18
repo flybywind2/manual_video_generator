@@ -14,6 +14,7 @@ REQUIRED_ARTIFACTS = {
     "action_plan",
     "approval_log",
     "masking_log",
+    "subtitles",
     "audit_log",
 }
 
@@ -24,6 +25,7 @@ NON_EMPTY_ARTIFACTS = {
     "action_plan",
     "approval_log",
     "masking_log",
+    "subtitles",
     "audit_log",
 }
 
@@ -33,6 +35,7 @@ REQUIRED_SUPPORTING_ARTIFACTS = {
     "rehearsal_log",
     "playwright_mcp_calls",
     "audit_log",
+    "subtitles",
     "tts_metadata",
     "video_render",
     "opencode_prompt",
@@ -99,6 +102,10 @@ def verify_manifest(manifest_path: Path) -> list[str]:
     manual = _path_from(artifacts, "markdown_manual")
     if manual and manual.exists() and not manual.read_text(encoding="utf-8").strip():
         errors.append("manual.md is empty")
+
+    subtitles = _path_from(artifacts, "subtitles")
+    if subtitles and subtitles.exists() and not subtitles.read_text(encoding="utf-8").startswith("WEBVTT"):
+        errors.append("subtitles.vtt must start with WEBVTT")
 
     audit = _path_from(artifacts, "audit_log")
     if audit and audit.exists():

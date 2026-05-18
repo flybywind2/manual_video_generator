@@ -53,6 +53,7 @@ class ArtifactPaths(BaseModel):
     input_extraction: Path
     final_frame: Path | None = None
     capture_action_log: Path | None = None
+    subtitles: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
     tts_metadata: Path | None = None
     video_render_metadata: Path | None = None
@@ -824,6 +825,11 @@ def _complete_pipeline_execution(
             "input_value_count": len(effective_request.input_values),
         },
     )
+    media_plan = _media_plan_for_outputs(effective_request, plan, capture_result.get("action_log", []))
+    video_path = capture_result["video"]
+    if not video_path.exists():
+        video_path = _render_placeholder_video(dirs.package)
+    subtitles_path = _render_subtitles(media_plan, dirs.package)
     terminal.record(
         run_id=job_id,
         actor="tts",
@@ -834,14 +840,14 @@ def _complete_pipeline_execution(
             "language": settings.tts_language,
         },
     )
-    tts_result = synthesize_tts(plan, settings, dirs.tts)
+    tts_result = synthesize_tts(media_plan, settings, dirs.tts)
     tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
     _record_stage(
         audit,
         terminal,
         actor="tts",
         status="degraded" if tts_degrade_reason else "ok",
-        input_data=plan.get("steps", []),
+        input_data=media_plan.get("steps", []),
         output_data=tts_result.entries,
         degrade_reason=tts_degrade_reason,
         artifacts=[tts_result.metadata_path, *tts_result.audio_paths],
@@ -852,12 +858,17 @@ def _complete_pipeline_execution(
             "audio_count": len(tts_result.audio_paths),
         },
     )
-    html_path = _render_preview(effective_request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
-    markdown_path = _render_markdown(effective_request, plan, dirs, capture_result["masked_names"], settings)
+    html_path = _render_preview(
+        effective_request,
+        media_plan,
+        dirs,
+        capture_result["masked_names"],
+        tts_result.audio_paths,
+        source_video=video_path,
+        subtitles_path=subtitles_path,
+    )
+    markdown_path = _render_markdown(effective_request, media_plan, dirs, capture_result["masked_names"], settings)
     pdf_path = _render_pdf_placeholder(effective_request, dirs)
-    video_path = capture_result["video"]
-    if not video_path.exists():
-        video_path = _render_placeholder_video(dirs.package)
     terminal.record(
         run_id=job_id,
         actor="render",
@@ -869,7 +880,7 @@ def _complete_pipeline_execution(
         },
     )
     video_render = render_final_video(
-        plan=plan,
+        plan=media_plan,
         package_dir=dirs.package,
         preview_html=html_path,
         fallback_video=video_path,
@@ -901,7 +912,7 @@ def _complete_pipeline_execution(
             "model_set": bool(settings.opencode_model),
         },
     )
-    opencode_result = run_opencode_agent(plan=plan, package_dir=dirs.package, settings=settings)
+    opencode_result = run_opencode_agent(plan=media_plan, package_dir=dirs.package, settings=settings)
     _record_stage(
         audit,
         terminal,
@@ -932,6 +943,7 @@ def _complete_pipeline_execution(
         input_extraction=dirs.package / "input_extraction.json",
         final_frame=capture_result.get("final_frame"),
         capture_action_log=capture_result.get("action_log_path"),
+        subtitles=subtitles_path,
         tts_audio=tts_result.audio_paths,
         tts_metadata=tts_result.metadata_path,
         video_render_metadata=video_render.metadata_path,
@@ -996,6 +1008,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "package_manifest_url": f"{rel_base}/package_manifest.json",
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
+            "subtitles_url": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
             "request_url": f"{rel_base}/request.json",
             "input_extraction_url": f"{rel_base}/input_extraction.json",
             "planner_trace_url": f"{rel_base}/planner_trace.json",
@@ -1040,6 +1053,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
             "markdown_manual_url": None,
             "pdf_manual_url": None,
             "capture_action_log_url": None,
+            "subtitles_url": None,
         },
         "supporting_artifacts": {
             "request": f"{rel_base}/request.json",
@@ -1068,6 +1082,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "playwright_mcp_execution": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
         "audit_log": f"{rel_base}/audit_log.jsonl",
         "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
+        "subtitles": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
         "video_render": f"{rel_base}/video_render.json" if result.artifacts.video_render_metadata else None,
         "skills_metadata": f"{rel_base}/hyperframes_skills.json" if result.artifacts.skills_metadata else None,
@@ -1115,6 +1130,7 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
             input_extraction=Path(artifacts["input_extraction"]),
             final_frame=Path(artifacts["final_frame"]) if artifacts.get("final_frame") else None,
             capture_action_log=Path(artifacts["capture_action_log"]) if artifacts.get("capture_action_log") else None,
+            subtitles=Path(artifacts["subtitles"]) if artifacts.get("subtitles") else None,
             tts_audio=[Path(path) for path in artifacts.get("tts_audio", [])],
             tts_metadata=Path(artifacts["tts_metadata"]) if artifacts.get("tts_metadata") else None,
             video_render_metadata=Path(artifacts["video_render"]) if artifacts.get("video_render") else None,
@@ -1870,9 +1886,29 @@ def _install_demonstration_recorder(page: Any) -> None:
         if (sensitive.test(marker)) return '<redacted>';
         return String(el?.value || '').slice(0, 160);
       };
+      const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 96);
+      const captionFor = (event) => {
+        if (!event || !event.type) return '';
+        if (event.type === 'click') {
+          return `클릭: ${compact(event.text || event.label || event.tag || '화면 요소')}`;
+        }
+        if (event.type === 'input') {
+          return `입력: ${compact(event.label || event.field || '입력값')}`;
+        }
+        if (event.type === 'key' && event.key === 'Enter') {
+          return 'Enter 입력';
+        }
+        return '';
+      };
+      const updateCaption = (event) => {
+        const caption = captionFor(event);
+        if (!caption || typeof window.__manualSetCaption !== 'function') return;
+        try { window.__manualSetCaption(caption); } catch {}
+      };
       const push = (event) => {
         if (window.__manualDemonstrationEvents.length >= 500) return;
         window.__manualDemonstrationEvents.push(event);
+        updateCaption(event);
       };
       document.addEventListener('click', (event) => {
         const el = event.target?.closest?.('button,[role="button"],a,input,textarea,select');
@@ -2442,6 +2478,157 @@ def _mask_captures(captures: list[Path], masked_dir: Path, input_values: dict[st
     return log_path
 
 
+def _media_plan_for_outputs(
+    request: PipelineInput,
+    plan: dict[str, Any],
+    action_log: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not _is_demonstration_mode(request):
+        return plan
+
+    events = _demonstration_events_for_media(action_log)
+    if not events:
+        return plan
+
+    steps = [
+        {
+            "id": "demo_start",
+            "title": "직접 시연 시작",
+            "caption": "사용자가 브라우저에서 직접 시연한 절차를 기준으로 영상을 생성합니다.",
+            "narration": "사용자가 브라우저에서 직접 시연한 절차를 기준으로 영상을 생성합니다.",
+        }
+    ]
+    steps.extend(_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1))
+    return {
+        "source": "direct-demonstration-media-plan",
+        "request_text": request.request_text,
+        "target_url": request.target_url,
+        "role": request.role,
+        "completion_condition": request.completion_condition,
+        "steps": steps,
+        "actions": [],
+        "demonstration_event_count": len(events),
+    }
+
+
+def _demonstration_events_for_media(action_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    marker_index = -1
+    for index, entry in enumerate(action_log):
+        if entry.get("type") == "demonstration":
+            marker_index = index
+    candidates = action_log[marker_index + 1 :] if marker_index >= 0 else action_log
+    events: list[dict[str, Any]] = []
+    for raw_event in candidates:
+        if not isinstance(raw_event, dict):
+            continue
+        event_type = str(raw_event.get("type") or "")
+        if event_type not in {"input", "click", "key"}:
+            continue
+        status = str(raw_event.get("status") or "ok")
+        if status in {"failed", "skipped", "blocked"}:
+            continue
+        events.append(redact_sensitive(raw_event))
+        if len(events) >= 40:
+            break
+    return events
+
+
+def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str, str]:
+    event_type = str(event.get("type") or "")
+    step_id = f"demo_{index:02d}_{_safe_step_id_part(event_type)}"
+    if event_type == "input":
+        label = _event_target_label(event, fallback="입력값")
+        value = _compact_text(str(event.get("value") or ""))
+        title = f"입력: {label}"
+        if value and value != "<redacted>":
+            caption = f"{label}에 {value} 값을 입력합니다."
+        else:
+            caption = f"{label} 입력값을 입력합니다."
+    elif event_type == "key":
+        key = _compact_text(str(event.get("key") or "키"))
+        label = _event_target_label(event, fallback="")
+        title = "Enter 입력" if key.lower() == "enter" else f"{key} 입력"
+        caption = f"{label}에서 {title}을 실행합니다." if label else f"{title}을 실행합니다."
+    elif event_type == "click":
+        target = _event_target_label(event, fallback="화면 요소")
+        title = f"클릭: {target}"
+        caption = f"{target}을 클릭합니다."
+    else:
+        title = "시연 동작"
+        caption = "사용자가 직접 수행한 동작을 확인합니다."
+    title = _compact_text(title, limit=80)
+    caption = _compact_text(caption, limit=180)
+    return {"id": step_id, "title": title, "caption": caption, "narration": caption}
+
+
+def _event_target_label(event: dict[str, Any], *, fallback: str) -> str:
+    candidates = [
+        event.get("text"),
+        event.get("label"),
+        event.get("field"),
+        event.get("role"),
+        event.get("tag"),
+        fallback,
+    ]
+    for candidate in candidates:
+        value = _compact_text(str(candidate or ""))
+        if value:
+            return value
+    return fallback
+
+
+def _safe_step_id_part(value: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", value.strip().lower())
+    return safe.strip("_") or "event"
+
+
+def _compact_text(value: str, *, limit: int = 120) -> str:
+    compacted = re.sub(r"\s+", " ", value).strip()
+    return compacted[:limit]
+
+
+def _render_subtitles(plan: dict[str, Any], package_dir: Path) -> Path:
+    package_dir.mkdir(parents=True, exist_ok=True)
+    path = package_dir / "subtitles.vtt"
+    steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+    if not steps:
+        steps = [_first_plan_step(plan)]
+    lines = ["WEBVTT", ""]
+    cue_duration_seconds = 4.0
+    for index, step in enumerate(steps):
+        start = index * cue_duration_seconds
+        end = start + cue_duration_seconds
+        title = str(step.get("title") or f"Step {index + 1}")
+        caption = str(step.get("caption") or step.get("narration") or "")
+        text = title if not caption or caption == title else f"{title}\n{caption}"
+        lines.extend(
+            [
+                f"{_format_vtt_timestamp(start)} --> {_format_vtt_timestamp(end)}",
+                _vtt_escape(text),
+                "",
+            ]
+        )
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _format_vtt_timestamp(seconds: float) -> str:
+    milliseconds = int(round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def _vtt_escape(value: str) -> str:
+    return (
+        value.replace("-->", "->")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def _synthesize_tts(plan: dict[str, Any], tts_dir: Path) -> list[Path]:
     audio_paths: list[Path] = []
     for index, step in enumerate(plan["steps"], start=1):
@@ -2459,11 +2646,38 @@ def _render_preview(
     dirs: PipelineDirs,
     masked_names: list[str],
     tts_audio: list[Path],
-) -> Path:
+    *,
+    source_video: Path | None = None,
+    subtitles_path: Path | None = None,
+    ) -> Path:
+    video_panel = ""
+    if source_video and source_video.exists():
+        video_src = Path(os.path.relpath(source_video, dirs.package)).as_posix()
+        track = ""
+        if subtitles_path and subtitles_path.exists():
+            subtitles_src = Path(os.path.relpath(subtitles_path, dirs.package)).as_posix()
+            track = f'<track kind="subtitles" srclang="ko" label="한국어" src="{_escape(subtitles_src)}" default />'
+        video_panel = f"""
+            <section class="video-panel">
+              <div class="video-copy">
+                <span>Recorded demonstration</span>
+                <h2>시연 녹화 영상</h2>
+                <p>브라우저에서 직접 수행한 절차를 원본 영상으로 확인합니다.</p>
+              </div>
+              <video class="source-video" controls src="{_escape(video_src)}">
+                {track}
+              </video>
+            </section>
+            """
     step_cards = []
-    for index, step in enumerate(plan["steps"][: len(masked_names)], start=0):
-        image_name = masked_names[index]
+    for index, step in enumerate(plan["steps"], start=0):
+        image_name = masked_names[index] if index < len(masked_names) else (masked_names[-1] if masked_names else "")
         audio = tts_audio[index].relative_to(dirs.package).as_posix() if index < len(tts_audio) else ""
+        image_html = (
+            f'<img src="masked/{_escape(image_name)}" alt="{_escape(step["title"])}" />'
+            if image_name
+            else '<div class="no-capture">캡처 이미지 없음</div>'
+        )
         step_cards.append(
             f"""
             <section class="slide">
@@ -2473,7 +2687,7 @@ def _render_preview(
                 <p>{_escape(step['caption'])}</p>
                 <audio controls src="{audio}"></audio>
               </div>
-              <img src="masked/{_escape(image_name)}" alt="{_escape(step['title'])}" />
+              {image_html}
             </section>
             """
         )
@@ -2489,18 +2703,33 @@ def _render_preview(
     .dot {{ display:inline-block; width:12px; height:12px; border-radius:50%; background:#21d4fd; box-shadow:0 0 24px rgba(33,212,253,.72); margin-right:10px; }}
     h1 {{ margin: 0; font-size: 40px; line-height: 1.2; }}
     header p {{ margin: 12px 0 0; color: #465161; font-size: 17px; }}
+    .video-panel {{ display:grid; grid-template-columns: 320px 1fr; gap:24px; padding:32px 44px; border-bottom:1px solid #d8e0ec; align-items:center; background:#fff; }}
+    .video-copy {{ border-left:5px solid #245bff; padding-left:20px; }}
+    .video-copy span {{ color:#245bff; font-weight:800; font-size:13px; text-transform:uppercase; }}
+    .video-copy h2 {{ margin:10px 0; font-size:28px; }}
+    .video-copy p {{ color:#465161; line-height:1.6; }}
+    .source-video {{ width:100%; max-height:680px; border:1px solid #d8e0ec; border-radius:8px; background:#050816; box-shadow:0 18px 48px rgba(17,24,39,.08); }}
     .slide {{ display:grid; grid-template-columns: 360px 1fr; gap:24px; padding:32px 44px; border-bottom:1px solid #d8e0ec; align-items:center; }}
     .copy {{ background:#fff; border:1px solid #d8e0ec; border-radius:8px; padding:24px; }}
     .copy span {{ color:#245bff; font-weight:800; font-size:13px; text-transform:uppercase; }}
     .copy h2 {{ margin:10px 0; font-size:26px; }}
     .copy p {{ color:#465161; line-height:1.6; }}
     img {{ width:100%; border:1px solid #d8e0ec; border-radius:8px; box-shadow:0 18px 48px rgba(17,24,39,.08); }}
+    .no-capture {{ min-height:260px; display:grid; place-items:center; border:1px dashed #b7c3d8; border-radius:8px; color:#465161; background:#fff; }}
     audio {{ width:100%; margin-top:14px; }}
   </style>
 </head>
 <body>
   <header><h1><span class="dot"></span>{_escape(request.request_text)}</h1><p>{_escape(request.role)} · {_escape(request.completion_condition)}</p></header>
+  {video_panel}
   {''.join(step_cards)}
+  <script>
+    document.querySelectorAll('video').forEach((video) => {{
+      const showTracks = () => Array.from(video.textTracks || []).forEach((track) => {{ track.mode = 'showing'; }});
+      video.addEventListener('loadedmetadata', showTracks);
+      showTracks();
+    }});
+  </script>
 </body>
 </html>"""
     path = dirs.package / "preview.html"
@@ -2529,19 +2758,20 @@ def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: Pipelin
                 "- Use scope: internal training/manual purposes only.",
                 "",
             ]
-        )
+    )
     lines.extend(["## 단계", ""])
-    for index, step in enumerate(plan["steps"][: len(masked_names)], start=1):
+    for index, step in enumerate(plan["steps"], start=1):
+        image_name = masked_names[index - 1] if index - 1 < len(masked_names) else (masked_names[-1] if masked_names else "")
         lines.extend(
             [
                 f"### {index}. {step['title']}",
                 "",
                 step["caption"],
                 "",
-                f"![{step['title']}](masked/{masked_names[index - 1]})",
-                "",
             ]
         )
+        if image_name:
+            lines.extend([f"![{step['title']}](masked/{image_name})", ""])
     lines.extend(["## 위험 액션", "", "- 렌더링 확정 단계는 사용자 승인 후 진행합니다.", ""])
     path = dirs.package / "manual.md"
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -2776,6 +3006,7 @@ def _manifest(
         "playwright_mcp_execution": _optional_path(package_dir / "playwright_mcp_execution.json"),
         "audit_log": str(result.artifacts.audit_log),
         "capture_action_log": _optional_path(result.artifacts.capture_action_log),
+        "subtitles": _optional_path(result.artifacts.subtitles),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
         "video_render": _optional_path(result.artifacts.video_render_metadata),
         "skills_metadata": _optional_path(result.artifacts.skills_metadata),
@@ -2803,6 +3034,7 @@ def _manifest(
             "input_extraction": str(result.artifacts.input_extraction),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
+            "subtitles": str(result.artifacts.subtitles) if result.artifacts.subtitles else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],
             "tts_metadata": str(result.artifacts.tts_metadata) if result.artifacts.tts_metadata else None,
             "video_render": str(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else None,

@@ -14,12 +14,15 @@ from backend.app.pipeline import (
     _capture_with_playwright,
     _execute_capture_actions,
     _execute_browser_agent_actions,
+    _media_plan_for_outputs,
     _handle_login,
     _install_manual_login_signal,
+    _install_demonstration_recorder,
     _inject_recording_helpers,
     _make_dirs,
     _playwright_launch_kwargs,
     _prepare_capture_page,
+    _render_subtitles,
     _raise_if_login_failed,
     _resolve_login_options,
     run_pipeline,
@@ -117,6 +120,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
         "opencode_metadata",
         "audit_log",
         "capture_action_log",
+        "subtitles",
         "hyperframes_composition",
         "hyperframes_manifest",
     }
@@ -213,6 +217,7 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     assert body["artifacts"]["audit_log_url"].endswith("/audit_log.jsonl")
     assert body["artifacts"]["input_extraction_url"].endswith("/input_extraction.json")
     assert body["artifacts"]["capture_action_log_url"].endswith("/capture_action_log.json")
+    assert body["artifacts"]["subtitles_url"].endswith("/subtitles.vtt")
     audit_response = client.get(body["supporting_artifacts"]["audit_log"])
     assert audit_response.status_code == 200
     assert "planner" in audit_response.text
@@ -220,6 +225,7 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     assert capture_action_log.status_code == 200
     assert capture_action_log.json()["status"] == "skipped"
     assert client.get(body["artifacts"]["input_extraction_url"]).status_code == 200
+    assert client.get(body["artifacts"]["subtitles_url"]).status_code == 200
 
 
 def test_pipeline_draft_api_stops_at_plan_review_without_capture_outputs(tmp_path, monkeypatch):
@@ -1681,6 +1687,119 @@ def test_demonstration_capture_waits_for_user_signal_instead_of_browser_agent(tm
     assert result["action_log"][0]["event_count"] == 1
     assert any(entry.get("type") == "click" and entry.get("label") == "전송" for entry in result["action_log"])
     assert result["video"].exists()
+
+
+def test_demonstration_recorder_updates_visible_caption_for_recorded_events():
+    calls = []
+
+    class FakePage:
+        def add_init_script(self, script):
+            calls.append(("add_init_script", script))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", script, args))
+
+    _install_demonstration_recorder(FakePage())
+
+    script = "\n".join(call[1] for call in calls if call[0] in {"add_init_script", "evaluate"})
+    assert "captionFor" in script
+    assert "__manualSetCaption" in script
+    assert "클릭:" in script
+    assert "입력:" in script
+    assert "Enter 입력" in script
+
+
+def test_demonstration_events_drive_media_plan_and_subtitles(tmp_path):
+    request = PipelineInput(
+        request_text="사내 챗봇 시연",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변",
+        execution_mode="demonstration",
+    )
+    base_plan = {
+        "steps": [{"id": "step_chat", "title": "원래 계획", "caption": "원래 계획", "narration": "원래 계획"}],
+        "actions": [],
+    }
+    action_log = [
+        {"type": "demonstration", "status": "ok", "event_count": 3},
+        {"type": "input", "label": "질문", "value": "st.form과 st.input 차이"},
+        {"type": "key", "key": "Enter", "label": "질문"},
+        {"type": "click", "text": "답변 복사"},
+    ]
+
+    media_plan = _media_plan_for_outputs(request, base_plan, action_log)
+    subtitles = _render_subtitles(media_plan, tmp_path)
+
+    titles = [step["title"] for step in media_plan["steps"]]
+    captions = [step["caption"] for step in media_plan["steps"]]
+    subtitle_text = subtitles.read_text(encoding="utf-8")
+
+    assert media_plan["source"] == "direct-demonstration-media-plan"
+    assert "원래 계획" not in json.dumps(media_plan, ensure_ascii=False)
+    assert titles == ["직접 시연 시작", "입력: 질문", "Enter 입력", "클릭: 답변 복사"]
+    assert "st.form과 st.input 차이" in captions[1]
+    assert "WEBVTT" in subtitle_text
+    assert "입력: 질문" in subtitle_text
+    assert "클릭: 답변 복사" in subtitle_text
+
+
+def test_demonstration_pipeline_uses_recorded_events_for_outputs(tmp_path, monkeypatch):
+    def fake_capture(request, plan, dirs, settings):
+        import base64
+
+        capture = dirs.captures / "direct_demo.png"
+        capture.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+            )
+        )
+        video = dirs.package / "manual_video_agent_usage.webm"
+        video.write_bytes(b"webm")
+        action_log = [
+            {"type": "demonstration", "status": "ok", "event_count": 3},
+            {"type": "input", "label": "질문", "value": "st.form과 st.input 차이"},
+            {"type": "key", "key": "Enter", "label": "질문"},
+            {"type": "click", "text": "답변 복사"},
+        ]
+        action_log_path = dirs.package / "capture_action_log.json"
+        action_log_path.write_text(json.dumps({"status": "completed", "entries": action_log}, ensure_ascii=False), encoding="utf-8")
+        return {
+            "captures": [capture],
+            "masked_names": [capture.name],
+            "video": video,
+            "final_frame": capture,
+            "action_log": action_log,
+            "action_log_path": action_log_path,
+            "status": "ok",
+            "degrade_reason": "",
+        }
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", fake_capture)
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 챗봇 시연",
+            target_url="http://internal.example.local/chat",
+            role="사용자",
+            completion_condition="답변",
+            execution_mode="demonstration",
+        ),
+        base_dir=tmp_path,
+        capture_browser=True,
+    )
+
+    manual = result.artifacts.markdown_manual.read_text(encoding="utf-8")
+    subtitles = result.artifacts.subtitles.read_text(encoding="utf-8")
+    preview = result.artifacts.html_preview.read_text(encoding="utf-8")
+    tts_metadata = json.loads(result.artifacts.tts_metadata.read_text(encoding="utf-8"))
+
+    assert "입력: 질문" in manual
+    assert "클릭: 답변 복사" in manual
+    assert "st.form과 st.input 차이" in subtitles
+    assert "subtitles.vtt" in preview
+    assert "manual_video_agent_usage.webm" in preview
+    assert [entry["step_id"] for entry in tts_metadata["entries"]][:2] == ["demo_start", "demo_01_input"]
 
 
 def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):
