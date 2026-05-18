@@ -26,6 +26,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_RERANKER_URL=http://api.net/reranker/v2/rerank",
                 "MANUAL_AGENT_RERANKER_MODEL=bge-reranker-v2-m3-ko",
                 "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true",
+                "MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR=false",
                 "MANUAL_AGENT_ENABLE_RAG_CONTEXT=true",
                 "MANUAL_AGENT_ENABLE_RERANKER=true",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
@@ -67,6 +68,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.rag.permission_groups == ["rag-public", "manual-private"]
     assert settings.reranker.model == "bge-reranker-v2-m3-ko"
     assert settings.enable_internal_planner is True
+    assert settings.enable_input_extractor is False
     assert settings.enable_rag_context is True
     assert settings.enable_reranker is True
     assert settings.playwright_mcp_mode == "manifest"
@@ -136,6 +138,7 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert status["login"]["username_set"] is True
     assert status["login"]["password_set"] is True
     assert "enable_internal_planner" in status["runtime"]
+    assert "enable_input_extractor" in status["runtime"]
     assert "enable_browser_agent" in status["runtime"]
     assert status["runtime"]["enable_terminal_logs"] is False
 

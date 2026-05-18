@@ -23,6 +23,10 @@ def redact_sensitive(value: Any) -> Any:
     return _redact(value, sensitive_context=False)
 
 
+def is_sensitive_key(value: str) -> bool:
+    return _is_sensitive_text(value)
+
+
 def _redact(value: Any, *, sensitive_context: bool) -> Any:
     if sensitive_context:
         return "<redacted>"

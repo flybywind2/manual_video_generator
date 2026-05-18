@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
+from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.planner import build_plan
 from backend.app.adapters.rehearsal import rehearse_plan
@@ -48,6 +49,7 @@ class ArtifactPaths(BaseModel):
     masking_log: Path
     package_manifest: Path
     audit_log: Path
+    input_extraction: Path
     final_frame: Path | None = None
     capture_action_log: Path | None = None
     tts_audio: list[Path] = Field(default_factory=list)
@@ -135,6 +137,7 @@ def _record_runtime_tool_inventory(
             "model": settings.llm.model,
             "base_url_set": bool(settings.llm.base_url),
             "api_key_set": bool(settings.llm.api_key),
+            "input_extractor_enabled": settings.enable_input_extractor,
             "internal_planner_enabled": settings.enable_internal_planner,
             "browser_agent_enabled": settings.enable_browser_agent,
         },
@@ -256,6 +259,7 @@ def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: b
         "output_dir": str(output_root),
         "capture_browser": capture_browser,
         "planner": "internal" if settings.enable_internal_planner else "local-deterministic",
+        "input_extractor_enabled": settings.enable_input_extractor,
         "rag_context_enabled": settings.enable_rag_context,
         "reranker_enabled": settings.enable_reranker,
         "browser_agent_enabled": settings.enable_browser_agent,
@@ -318,7 +322,37 @@ def run_pipeline(
         terminal_details=_environment_terminal_details(environment),
     )
     _record_runtime_tool_inventory(audit, terminal, settings=settings, environment=environment, capture_browser=capture_browser)
-    request_payload = redact_sensitive(request.model_dump())
+    original_request_payload = redact_sensitive(request.model_dump())
+
+    terminal.record(
+        run_id=job_id,
+        actor="input_extractor",
+        status="started",
+        details={
+            "enabled": settings.enable_input_extractor,
+            "llm_configured": settings.llm.is_configured,
+            "explicit_input_count": len(request.input_values),
+        },
+    )
+    input_extraction = extract_input_values(request, settings, package_dir=dirs.package)
+    effective_request = request.model_copy(update={"input_values": input_extraction["effective_input_values"]})
+    request_payload = redact_sensitive(effective_request.model_dump())
+    _record_stage(
+        audit,
+        terminal,
+        actor="input_extractor",
+        status="degraded" if input_extraction.get("status") == "degraded" else str(input_extraction.get("status") or "ok"),
+        input_data=original_request_payload,
+        output_data=redact_sensitive(input_extraction),
+        degrade_reason="input_extractor_fallback" if input_extraction.get("status") == "degraded" else "",
+        artifacts=[dirs.package / "input_extraction.json"],
+        terminal_details={
+            "enabled": settings.enable_input_extractor,
+            "source": input_extraction.get("source", ""),
+            "extracted_count": input_extraction.get("extracted_count", 0),
+            "effective_count": input_extraction.get("effective_count", 0),
+        },
+    )
 
     terminal.record(
         run_id=job_id,
@@ -330,7 +364,7 @@ def run_pipeline(
             "reranker_enabled": settings.enable_reranker,
         },
     )
-    plan = build_plan(request, settings, package_dir=dirs.package)
+    plan = build_plan(effective_request, settings, package_dir=dirs.package)
     artifact_plan = redact_sensitive(plan)
     _record_stage(
         audit,
@@ -408,11 +442,11 @@ def run_pipeline(
         },
     )
     if capture_browser:
-        capture_result = _capture_with_playwright(request, plan, dirs, settings)
+        capture_result = _capture_with_playwright(effective_request, plan, dirs, settings)
         capture_status = str(capture_result.get("status") or "ok")
         capture_degrade_reason = str(capture_result.get("degrade_reason") or "")
     else:
-        capture_result = _create_placeholder_captures(request, dirs)
+        capture_result = _create_placeholder_captures(effective_request, dirs)
         capture_status = "degraded"
         capture_degrade_reason = "browser_capture_disabled"
     _record_stage(
@@ -442,7 +476,7 @@ def run_pipeline(
         status="started",
         details={"capture_count": len(capture_result["captures"])},
     )
-    masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, request.input_values)
+    masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, effective_request.input_values)
     _record_stage(
         audit,
         terminal,
@@ -452,7 +486,7 @@ def run_pipeline(
         artifacts=[masking_log_path],
         terminal_details={
             "capture_count": len(capture_result.get("captures") or []),
-            "input_value_count": len(request.input_values),
+            "input_value_count": len(effective_request.input_values),
         },
     )
     terminal.record(
@@ -483,9 +517,9 @@ def run_pipeline(
             "audio_count": len(tts_result.audio_paths),
         },
     )
-    html_path = _render_preview(request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
-    markdown_path = _render_markdown(request, plan, dirs, capture_result["masked_names"])
-    pdf_path = _render_pdf_placeholder(request, dirs)
+    html_path = _render_preview(effective_request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
+    markdown_path = _render_markdown(effective_request, plan, dirs, capture_result["masked_names"])
+    pdf_path = _render_pdf_placeholder(effective_request, dirs)
     video_path = capture_result["video"]
     if not video_path.exists():
         video_path = _render_placeholder_video(dirs.package)
@@ -559,6 +593,7 @@ def run_pipeline(
         masking_log=masking_log_path,
         package_manifest=manifest_path,
         audit_log=audit.path,
+        input_extraction=dirs.package / "input_extraction.json",
         final_frame=capture_result.get("final_frame"),
         capture_action_log=capture_result.get("action_log_path"),
         tts_audio=tts_result.audio_paths,
@@ -616,6 +651,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
             "request_url": f"{rel_base}/request.json",
+            "input_extraction_url": f"{rel_base}/input_extraction.json",
             "planner_trace_url": f"{rel_base}/planner_trace.json",
             "rehearsal_log_url": f"{rel_base}/rehearsal_log.json",
             "mcp_calls_url": f"{rel_base}/playwright_mcp_calls.json",
@@ -636,6 +672,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
     mcp_execution = result.package_dir / "playwright_mcp_execution.json"
     return {
         "request": f"{rel_base}/request.json",
+        "input_extraction": f"{rel_base}/input_extraction.json",
         "planner_trace": f"{rel_base}/planner_trace.json",
         "rehearsal_log": f"{rel_base}/rehearsal_log.json",
         "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
@@ -1746,6 +1783,7 @@ def _manifest(
     package_dir = result.package_dir
     supporting_artifacts = {
         "request": str(package_dir / "request.json"),
+        "input_extraction": str(result.artifacts.input_extraction),
         "planner_trace": str(package_dir / "planner_trace.json"),
         "rehearsal_log": str(package_dir / "rehearsal_log.json"),
         "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),
@@ -1776,6 +1814,7 @@ def _manifest(
             "masking_log": str(result.artifacts.masking_log),
             "package_manifest": str(result.artifacts.package_manifest),
             "audit_log": str(result.artifacts.audit_log),
+            "input_extraction": str(result.artifacts.input_extraction),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],

@@ -78,6 +78,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
 
     expected = {
         "request",
+        "input_extraction",
         "planner_trace",
         "rehearsal_log",
         "playwright_mcp_calls",
@@ -95,6 +96,30 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
     for key in expected:
         assert supporting[key], key
         assert Path(supporting[key]).exists(), key
+
+
+def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT-001을 조회하고 라인 A3 조건으로 상세 화면 확인",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    request_payload = json.loads((result.package_dir / "request.json").read_text(encoding="utf-8"))
+    extraction = json.loads((result.package_dir / "input_extraction.json").read_text(encoding="utf-8"))
+    action_plan = json.loads(result.artifacts.action_plan.read_text(encoding="utf-8"))
+
+    assert request_payload["input_values"]["LOT"] == "LOT-001"
+    assert request_payload["input_values"]["라인"] == "A3"
+    assert extraction["effective_input_values"] == {"LOT": "LOT-001", "라인": "A3"}
+    assert any(action["type"] == "fill_by_label" and action["label"] == "LOT" for action in action_plan["actions"])
+    assert any(action["type"] == "fill_by_label" and action["label"] == "라인" for action in action_plan["actions"])
+    assert result.artifacts.input_extraction.exists()
 
 
 def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
@@ -130,6 +155,7 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     assert planner_trace.status_code == 200
     assert planner_trace.json()["planner"] == "local-deterministic"
     assert body["artifacts"]["audit_log_url"].endswith("/audit_log.jsonl")
+    assert body["artifacts"]["input_extraction_url"].endswith("/input_extraction.json")
     assert body["artifacts"]["capture_action_log_url"].endswith("/capture_action_log.json")
     audit_response = client.get(body["supporting_artifacts"]["audit_log"])
     assert audit_response.status_code == 200
@@ -137,6 +163,7 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     capture_action_log = client.get(body["supporting_artifacts"]["capture_action_log"])
     assert capture_action_log.status_code == 200
     assert capture_action_log.json()["status"] == "skipped"
+    assert client.get(body["artifacts"]["input_extraction_url"]).status_code == 200
 
 
 def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
@@ -167,7 +194,7 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
 
     assert {event["actor"] for event in events}.issuperset(
-        {"planner", "rehearsal", "approval", "capture", "masking", "tts", "render", "opencode", "manifest"}
+        {"input_extractor", "planner", "rehearsal", "approval", "capture", "masking", "tts", "render", "opencode", "manifest"}
     )
     assert all(event["run_id"] == result.job_id for event in events)
     assert all("status" in event for event in events)
@@ -260,6 +287,7 @@ def test_pipeline_terminal_logs_all_stages_when_enabled_and_redacts_secrets(tmp_
     expected_actors = {
         "pipeline",
         "environment",
+        "input_extractor",
         "planner",
         "rehearsal",
         "approval",

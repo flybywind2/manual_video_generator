@@ -264,7 +264,7 @@ http://127.0.0.1:8000/sample
 
 ## 사용 방법
 
-1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 입력값을 확인합니다.
+1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 입력값을 확인합니다. 입력값을 비워도 요청문에서 업무 입력값을 자동 추출합니다.
 2. 로그인 창이 나오는 시스템이면 `로그인 방식`을 고릅니다.
 3. 기본 대상 URL은 `/sample`입니다.
 4. `파이프라인 실행`을 누릅니다.
@@ -272,7 +272,9 @@ http://127.0.0.1:8000/sample
 6. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
 7. 최종 영상 파일은 관리자가 별도 보관합니다.
 
-기본 planner는 selector를 모르는 상태에서도 입력값 이름을 화면 label/placeholder/name과 맞춰 채우고, 요청문에 `조회`, `검색`, `상세` 같은 안전한 읽기 동작이 있으면 같은 텍스트의 버튼을 찾아 클릭합니다. 예를 들어 입력값 `LOT=LOT-001`과 요청문 `LOT 조회 후 상세 화면 확인`은 `LOT` 입력칸 채우기, `조회` 버튼 클릭, `상세 보기` 버튼 클릭으로 실행됩니다. 저장, 제출, 삭제 같은 쓰기 동작은 기본 semantic planner의 자동 클릭 대상이 아니며, 운영 전에는 LLM action plan 검수나 Action JSON 편집 UI로 확정해야 합니다.
+Input Extractor는 먼저 요청문에서 `LOT-001`, `라인 A3`, `사용자ID U100` 같은 업무 입력값을 뽑아 `input_values`를 보강합니다. LLM이 설정되어 있으면 LLM JSON extractor를 사용하고, 없으면 로컬 규칙으로 fallback합니다. 사용자가 직접 입력한 `input_values`는 추출값보다 우선합니다. 비밀번호, OTP, token, API key, ticket류는 추출하지 않습니다.
+
+기본 planner는 selector를 모르는 상태에서도 입력값 이름을 화면 label/placeholder/name과 맞춰 채우고, 요청문에 `조회`, `검색`, `상세` 같은 안전한 읽기 동작이 있으면 같은 텍스트의 버튼을 찾아 클릭합니다. 예를 들어 요청문 `LOT-001 조회 후 상세 화면 확인`은 Input Extractor가 `LOT=LOT-001`을 만들고, planner가 `LOT` 입력칸 채우기, `조회` 버튼 클릭, `상세 보기` 버튼 클릭으로 실행합니다. 저장, 제출, 삭제 같은 쓰기 동작은 기본 semantic planner의 자동 클릭 대상이 아니며, 운영 전에는 LLM action plan 검수나 Action JSON 편집 UI로 확정해야 합니다.
 
 ### 로그인 방식
 
@@ -297,6 +299,7 @@ output/jobs/<job_id>/
   manual.md
   manual.pdf
   action_plan.json
+  input_extraction.json
   approval_log.json
   audit_log.jsonl
   capture_action_log.json
@@ -348,6 +351,7 @@ MANUAL_AGENT_USER_TYPE
 MANUAL_AGENT_LLM_BASE_URL
 MANUAL_AGENT_LLM_MODEL
 MANUAL_AGENT_ENABLE_INTERNAL_PLANNER
+MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR
 MANUAL_AGENT_REQUEST_TIMEOUT_SECONDS
 MANUAL_AGENT_VLM_BASE_URL
 MANUAL_AGENT_VLM_MODEL
@@ -397,6 +401,7 @@ MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS
 
 ```env
 MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
+MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR=true
 MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
 MANUAL_AGENT_ENABLE_RERANKER=true
 MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
@@ -575,6 +580,7 @@ POST /api/pipeline/run?capture_browser=false
 ```
 
 응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `audit_log`, `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
+`input_extraction_url`에서는 요청문에서 추출된 입력값과 최종 적용된 입력값을 확인할 수 있습니다.
 
 ## 프로젝트 구조
 
@@ -664,7 +670,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-85 passed
+89 passed
 ```
 
 ## 보안 및 운영 주의사항

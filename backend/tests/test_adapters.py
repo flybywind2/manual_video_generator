@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
+from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
@@ -11,6 +12,89 @@ from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
 from backend.app.pipeline import PipelineInput
+
+
+def test_input_extractor_derives_values_from_request_text_without_llm(tmp_path: Path):
+    request = PipelineInput(
+        request_text="MES에서 LOT-001을 조회하고 라인 A3 조건으로 상세 화면 확인",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면",
+    )
+    settings = load_settings(environ={})
+
+    result = extract_input_values(request, settings, package_dir=tmp_path)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "local-deterministic"
+    assert result["extracted_input_values"]["LOT"] == "LOT-001"
+    assert result["extracted_input_values"]["라인"] == "A3"
+    assert result["effective_input_values"]["LOT"] == "LOT-001"
+    assert (tmp_path / "input_extraction.json").exists()
+
+
+def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사용자 U100 권한 조회하고 OTP 123456은 쓰지 마",
+        target_url="http://internal.example.local",
+        role="관리자",
+        completion_condition="권한 화면",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout_seconds})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"input_values": {"사용자ID": "U100", "otp_code": "123456", "password": "plain"}},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = extract_input_values(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert result["status"] == "ok"
+    assert result["source"] == "internal-llm"
+    assert result["effective_input_values"] == {"사용자ID": "U100"}
+    assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
+    rendered = (tmp_path / "input_extraction.json").read_text(encoding="utf-8")
+    assert "123456" not in rendered
+    assert "plain" not in rendered
+
+
+def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path: Path):
+    request = PipelineInput(
+        request_text="LOT-001 조회",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면",
+        input_values={"LOT": "MANUAL-999"},
+    )
+    settings = load_settings(environ={})
+
+    result = extract_input_values(request, settings, package_dir=tmp_path)
+
+    assert result["extracted_input_values"]["LOT"] == "LOT-001"
+    assert result["effective_input_values"]["LOT"] == "MANUAL-999"
+    assert result["explicit_input_keys"] == ["LOT"]
 
 
 def test_browser_agent_decides_next_action_from_page_observation():

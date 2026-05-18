@@ -190,6 +190,7 @@ function configStatusRows(status) {
     requiredConfigRow("VLM", status.vlm.configured, status.vlm.model || "QWEN3-VL"),
     optionalServiceRow("RAG", status.rag.configured, status.rag.index_name || "index 미설정", status.runtime.enable_rag_context),
     optionalServiceRow("Reranker", status.reranker.configured, status.reranker.model || "model 미설정", status.runtime.enable_reranker),
+    inputExtractorStatusRow(status),
     plannerStatusRow(status),
     browserAgentStatusRow(status),
     { label: "TTS", state: "ready", text: "Ready", detail: status.runtime.tts_provider },
@@ -214,6 +215,15 @@ function optionalServiceRow(label, configured, detail, enabled) {
   return configured
     ? { label, state: "ready", text: "Ready", detail }
     : { label, state: "missing", text: "Missing", detail };
+}
+
+function inputExtractorStatusRow(status) {
+  if (!status.runtime.enable_input_extractor) {
+    return { label: "Input Extractor", state: "disabled", text: "Disabled", detail: "manual input only" };
+  }
+  return status.llm.configured
+    ? { label: "Input Extractor", state: "ready", text: "Ready", detail: "LLM + local fallback" }
+    : { label: "Input Extractor", state: "neutral", text: "Local", detail: "request text heuristic" };
 }
 
 function plannerStatusRow(status) {
