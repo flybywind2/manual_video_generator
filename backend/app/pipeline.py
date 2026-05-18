@@ -442,7 +442,10 @@ def run_pipeline(
         },
     )
     if capture_browser:
-        capture_result = _capture_with_playwright(effective_request, plan, dirs, settings)
+        try:
+            capture_result = _capture_with_playwright(effective_request, plan, dirs, settings)
+        except Exception as exc:  # noqa: BLE001 - keep the package inspectable when browser startup/login fails.
+            capture_result = _create_capture_failure_fallback(effective_request, dirs, exc)
         capture_status = str(capture_result.get("status") or "ok")
         capture_degrade_reason = str(capture_result.get("degrade_reason") or "")
     else:
@@ -571,9 +574,10 @@ def run_pipeline(
         audit,
         terminal,
         actor="opencode",
-        status=opencode_result.status,
+        status=_opencode_audit_status(opencode_result),
         input_data={"enabled": settings.enable_opencode},
         output_data={"metadata_path": str(opencode_result.metadata_path)},
+        degrade_reason=_opencode_degrade_reason(opencode_result),
         artifacts=[opencode_result.prompt_path, opencode_result.metadata_path],
         terminal_details={
             "enabled": settings.enable_opencode,
@@ -748,8 +752,26 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     video = dirs.package / "manual_video_agent_usage.webm"
     if videos:
         shutil.copy2(videos[0], video)
+    else:
+        video = _render_placeholder_video(dirs.package)
+        capture_result.setdefault("action_log", []).append(
+            {
+                "type": "record_video",
+                "status": "degraded",
+                "reason": "browser_recording_missing",
+            }
+        )
+        capture_result["status"] = "degraded"
+        capture_result["degrade_reason"] = capture_result.get("degrade_reason") or "browser_recording_missing"
     action_log_path = dirs.package / "capture_action_log.json"
-    _write_json(action_log_path, {"status": "completed", "entries": redact_sensitive(capture_result.get("action_log", []))})
+    capture_log_status = "completed" if capture_result.get("status", "ok") == "ok" else str(capture_result.get("status"))
+    capture_log_payload: dict[str, Any] = {
+        "status": capture_log_status,
+        "entries": redact_sensitive(capture_result.get("action_log", [])),
+    }
+    if capture_result.get("degrade_reason"):
+        capture_log_payload["reason"] = str(capture_result.get("degrade_reason"))
+    _write_json(action_log_path, capture_log_payload)
     return {
         "captures": captures,
         "masked_names": [path.name for path in captures],
@@ -757,6 +779,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
         "final_frame": final_frame,
         "action_log": capture_result.get("action_log", []),
         "action_log_path": action_log_path,
+        "status": capture_result.get("status", "ok"),
+        "degrade_reason": capture_result.get("degrade_reason", ""),
     }
 
 
@@ -987,7 +1011,8 @@ def _execute_capture_actions(
             log_entry["error"] = f"{type(exc).__name__}: {exc}"
         action_log.append(log_entry)
 
-    return {"captures": captures, "action_log": action_log}
+    status, degrade_reason = _capture_action_log_status(action_log, failed_reason="capture_action_failed")
+    return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
 
 
 def _execute_browser_agent_actions(
@@ -1076,7 +1101,26 @@ def _execute_browser_agent_actions(
         page.wait_for_timeout(500)
         captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
 
-    return {"captures": captures, "action_log": action_log, "status": "ok", "degrade_reason": ""}
+    status, degrade_reason = _capture_action_log_status(action_log, failed_reason="browser_agent_action_failed")
+    return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
+
+
+def _capture_action_log_status(action_log: list[dict[str, Any]], *, failed_reason: str) -> tuple[str, str]:
+    ignored_skips = {"manual_login_current_page"}
+    ignored_types = {"danger_approval"}
+    for entry in action_log:
+        status = str(entry.get("status") or "")
+        action_type = str(entry.get("type") or "")
+        reason = str(entry.get("reason") or "")
+        if action_type in ignored_types:
+            continue
+        if status == "failed":
+            return "degraded", failed_reason
+        if status in {"blocked", "degraded"}:
+            return "degraded", failed_reason
+        if status == "skipped" and reason not in ignored_skips:
+            return "degraded", failed_reason
+    return "ok", ""
 
 
 def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
@@ -1596,6 +1640,31 @@ def _create_placeholder_captures(request: PipelineInput, dirs: PipelineDirs) -> 
     }
 
 
+def _create_capture_failure_fallback(request: PipelineInput, dirs: PipelineDirs, exc: Exception) -> dict[str, Any]:
+    result = _create_placeholder_captures(request, dirs)
+    error = f"{type(exc).__name__}: {exc}"
+    action_log = [
+        {
+            "type": "capture",
+            "status": "failed",
+            "reason": "playwright_capture_failed",
+            "error": error,
+        }
+    ]
+    result["status"] = "degraded"
+    result["degrade_reason"] = "playwright_capture_failed"
+    result["action_log"] = action_log
+    _write_json(
+        result["action_log_path"],
+        {
+            "status": "failed",
+            "reason": "playwright_capture_failed",
+            "entries": redact_sensitive(action_log),
+        },
+    )
+    return result
+
+
 def _mask_captures(captures: list[Path], masked_dir: Path, input_values: dict[str, str]) -> Path:
     from PIL import Image, ImageDraw
 
@@ -1860,6 +1929,18 @@ def _tts_degrade_reason(entries: list[dict[str, Any]]) -> str:
 def _render_degrade_reason(used_fallback: bool, renderer: str) -> str:
     if used_fallback and renderer.lower() == "hyperframes":
         return "hyperframes_fallback_video"
+    return ""
+
+
+def _opencode_audit_status(opencode_result: Any) -> str:
+    if getattr(opencode_result, "status", "") == "failed":
+        return "degraded"
+    return str(getattr(opencode_result, "status", ""))
+
+
+def _opencode_degrade_reason(opencode_result: Any) -> str:
+    if getattr(opencode_result, "status", "") == "failed":
+        return "opencode_failed"
     return ""
 
 

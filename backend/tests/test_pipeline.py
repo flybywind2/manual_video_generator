@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
+import backend.app.pipeline as pipeline_module
 from backend.app.config import load_settings
 from backend.app.pipeline import (
     PipelineInput,
@@ -122,6 +123,34 @@ def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
     assert result.artifacts.input_extraction.exists()
 
 
+def test_run_pipeline_falls_back_to_placeholder_when_browser_capture_raises(tmp_path, monkeypatch):
+    def fail_capture(*_args, **_kwargs):
+        raise RuntimeError("browser launch failed")
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", fail_capture)
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 포털 권한 신청 방법 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="신청자",
+            completion_condition="신청 화면 확인",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=True,
+    )
+
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    capture_log = json.loads(result.artifacts.capture_action_log.read_text(encoding="utf-8"))
+
+    assert result.status == "completed"
+    assert result.artifacts.video.exists()
+    assert capture_log["status"] == "failed"
+    assert capture_log["reason"] == "playwright_capture_failed"
+    assert any(item["actor"] == "capture" and item["reason"] == "playwright_capture_failed" for item in manifest["degradations"])
+
+
 def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
     client = TestClient(app)
@@ -202,6 +231,29 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
     assert manifest["environment"]["python_version"]
     assert "playwright_browsers_path" in manifest["environment"]
+
+
+def test_package_manifest_records_opencode_failure_as_degradation(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_ENABLE_OPENCODE", "true")
+    monkeypatch.setenv("MANUAL_AGENT_OPENCODE_COMMAND", "definitely-missing-opencode-command")
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="포털 조회 방법 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="사용자",
+            completion_condition="조회 결과",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    opencode_metadata = json.loads(result.artifacts.opencode_metadata.read_text(encoding="utf-8"))
+
+    assert opencode_metadata["status"] == "failed"
+    assert any(item["actor"] == "opencode" and item["reason"] == "opencode_failed" for item in manifest["degradations"])
 
 
 def test_audit_log_records_runtime_tool_usage_events(tmp_path):
@@ -576,6 +628,63 @@ def test_execute_capture_actions_records_selector_failures_without_aborting(tmp_
     assert result["action_log"][0]["status"] == "failed"
     assert "TimeoutError" in result["action_log"][0]["error"]
     assert [path.name for path in result["captures"]] == ["step_1.png"]
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "capture_action_failed"
+
+
+def test_execute_browser_agent_actions_marks_failed_dynamic_action_as_degraded(tmp_path):
+    class FailingLocator:
+        def click(self):
+            raise TimeoutError("button not visible")
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            if "__manualSetCaption" in script or "__manualHighlight" in script:
+                return None
+            return {"url": "http://internal.example.local", "fields": [], "clickables": [{"text": "조회"}], "body_text": "조회"}
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+        def get_by_role(self, *args, **kwargs):
+            return FailingLocator()
+
+        def get_by_text(self, *args, **kwargs):
+            return FailingLocator()
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="조회 버튼을 눌러 결과 확인",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="조회 결과",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+            "MANUAL_AGENT_OPENAI_API_KEY": "key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://llm.local",
+            "MANUAL_AGENT_LLM_MODEL": "model",
+            "MANUAL_AGENT_DEP_TICKET": "ticket",
+            "MANUAL_AGENT_USER_ID": "user",
+        }
+    )
+    decisions = [
+        {"status": "ok", "type": "click_by_text", "texts": ["조회"], "reason": "조회합니다."},
+        {"status": "ok", "type": "finish", "reason": "마칩니다."},
+    ]
+
+    def fake_decider(*_args, **_kwargs):
+        return decisions.pop(0)
+
+    result = _execute_browser_agent_actions(FakePage(), request, {"steps": [], "actions": []}, tmp_path, settings, decide_next=fake_decider)
+
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "browser_agent_action_failed"
+    assert result["action_log"][0]["status"] == "failed"
 
 
 def test_execute_browser_agent_actions_observes_page_and_executes_llm_actions(tmp_path):
@@ -1198,6 +1307,99 @@ def test_manual_capture_reuses_logged_in_recording_context(tmp_path, monkeypatch
     assert ("storage_state",) not in events
     assert events.count(("new_page",)) == 1
     assert result["video"].exists()
+
+
+def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    class FakeContext:
+        def new_page(self):
+            return FakePage()
+
+        def close(self):
+            events.append(("context_close_without_video",))
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            events.append(("new_context", bool(kwargs.get("record_video_dir"))))
+            return FakeContext()
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs.get("headless")))
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        enable_browser_agent = False
+
+        class login:
+            mode = "none"
+            username_selector = ""
+            password_selector = ""
+            submit_selector = ""
+            success_selector = ""
+            username = ""
+            password = ""
+            manual_timeout_seconds = 120.0
+            credentials_timeout_seconds = 30.0
+
+    plan = {
+        "steps": [{"id": "step_intro", "title": "홈", "caption": "홈", "narration": "홈"}],
+        "actions": [{"id": "a1", "type": "capture_step", "step_id": "step_intro"}],
+    }
+    dirs = _make_dirs(tmp_path / "package")
+    request = PipelineInput(
+        request_text="화면 확인",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈",
+    )
+
+    result = _capture_with_playwright(request, plan, dirs, Settings())
+
+    assert result["video"].exists()
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "browser_recording_missing"
 
 
 def test_raise_if_login_failed_aborts_capture_on_failed_login():
