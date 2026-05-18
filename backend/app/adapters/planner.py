@@ -256,7 +256,7 @@ def _call_llm_planner(
         "temperature": 0.2,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
-    response = post(url, headers, payload, settings.request_timeout_seconds)
+    response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
     return _normalize_plan(_parse_json_content(content), request)
 

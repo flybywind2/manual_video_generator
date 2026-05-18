@@ -145,6 +145,7 @@ class AppSettings:
     output_dir: str
     enable_internal_planner: bool
     enable_input_extractor: bool
+    llm_timeout_seconds: float
     enable_rag_context: bool
     enable_reranker: bool
     playwright_mcp_mode: str
@@ -180,6 +181,7 @@ class AppSettings:
                 "output_dir": self.output_dir,
                 "enable_internal_planner": self.enable_internal_planner,
                 "enable_input_extractor": self.enable_input_extractor,
+                "llm_timeout_seconds": self.llm_timeout_seconds,
                 "enable_rag_context": self.enable_rag_context,
                 "enable_reranker": self.enable_reranker,
                 "playwright_mcp_mode": self.playwright_mcp_mode,
@@ -275,6 +277,7 @@ def load_settings(
         output_dir=_get(env, "OUTPUT_DIR", "output"),
         enable_internal_planner=_get_bool(env, "ENABLE_INTERNAL_PLANNER", False),
         enable_input_extractor=_get_bool(env, "ENABLE_INPUT_EXTRACTOR", True),
+        llm_timeout_seconds=_get_float(env, "LLM_TIMEOUT_SECONDS", 180.0),
         enable_rag_context=_get_bool(env, "ENABLE_RAG_CONTEXT", False),
         enable_reranker=_get_bool(env, "ENABLE_RERANKER", False),
         playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),

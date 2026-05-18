@@ -159,6 +159,7 @@ def _record_runtime_tool_inventory(
             "input_extractor_enabled": settings.enable_input_extractor,
             "internal_planner_enabled": settings.enable_internal_planner,
             "browser_agent_enabled": settings.enable_browser_agent,
+            "llm_timeout_seconds": settings.llm_timeout_seconds,
         },
     )
     _record_tool(
@@ -283,6 +284,7 @@ def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: b
         "reranker_enabled": settings.enable_reranker,
         "browser_agent_enabled": settings.enable_browser_agent,
         "browser_agent_max_steps": settings.browser_agent_max_steps,
+        "llm_timeout_seconds": settings.llm_timeout_seconds,
         "playwright_mcp_mode": settings.playwright_mcp_mode,
         "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
         "playwright_executable_path_set": bool(settings.playwright_executable_path),

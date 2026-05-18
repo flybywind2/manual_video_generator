@@ -35,6 +35,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_RERANKER_MODEL=bge-reranker-v2-m3-ko",
                 "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true",
                 "MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR=false",
+                "MANUAL_AGENT_LLM_TIMEOUT_SECONDS=180",
                 "MANUAL_AGENT_ENABLE_RAG_CONTEXT=true",
                 "MANUAL_AGENT_ENABLE_RERANKER=true",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
@@ -77,6 +78,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.reranker.model == "bge-reranker-v2-m3-ko"
     assert settings.enable_internal_planner is True
     assert settings.enable_input_extractor is False
+    assert settings.llm_timeout_seconds == 180
     assert settings.enable_rag_context is True
     assert settings.enable_reranker is True
     assert settings.playwright_mcp_mode == "manifest"

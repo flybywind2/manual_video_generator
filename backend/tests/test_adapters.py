@@ -50,6 +50,7 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
             "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
+            "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "180",
         }
     )
     calls = []
@@ -76,6 +77,7 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
     assert result["effective_input_values"] == {"사용자ID": "U100"}
     assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
     assert calls[0]["headers"]["Accept"] == "application/json"
+    assert calls[0]["timeout"] == 180
     rendered = (tmp_path / "input_extraction.json").read_text(encoding="utf-8")
     assert "123456" not in rendered
     assert "plain" not in rendered
@@ -116,6 +118,7 @@ def test_browser_agent_decides_next_action_from_page_observation():
             "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
+            "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "180",
         }
     )
     calls = []
@@ -156,6 +159,7 @@ def test_browser_agent_decides_next_action_from_page_observation():
     assert action["source"] == "browser-agent-llm"
     assert calls[0]["url"] == "http://api.net:8000/v1/chat/completions"
     assert calls[0]["headers"]["Accept"] == "application/json"
+    assert calls[0]["timeout"] == 180
     assert calls[0]["payload"]["messages"][1]["content"]
 
 
@@ -176,6 +180,7 @@ def test_browser_agent_blocks_dangerous_click_texts():
             "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
+            "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "180",
         }
     )
 
@@ -267,6 +272,7 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     assert calls[0]["payload"]["model"] == "QWEN3"
     assert "Authorization" in calls[0]["headers"]
     assert calls[0]["headers"]["Accept"] == "application/json"
+    assert calls[0]["timeout"] == 180
     trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
     assert trace["rag"] == {"status": "skipped"}
     assert trace["reranker"] == {"status": "skipped", "reason": "rag_context_skipped"}
