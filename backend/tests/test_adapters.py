@@ -267,6 +267,9 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     assert calls[0]["payload"]["model"] == "QWEN3"
     assert "Authorization" in calls[0]["headers"]
     assert calls[0]["headers"]["Accept"] == "application/json"
+    trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
+    assert trace["rag"] == {"status": "skipped"}
+    assert trace["reranker"] == {"status": "skipped", "reason": "rag_context_skipped"}
 
 
 def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_invalid(tmp_path: Path):

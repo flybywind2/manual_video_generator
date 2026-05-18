@@ -176,6 +176,7 @@ def _retrieve_context(
 ) -> list[str]:
     if not settings.enable_rag_context or not settings.rag.is_configured:
         trace["rag"] = {"status": "skipped"}
+        trace["reranker"] = {"status": "skipped", "reason": "rag_context_skipped"}
         return []
 
     payload = {
