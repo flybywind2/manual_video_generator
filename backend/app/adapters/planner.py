@@ -6,6 +6,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.app.action_safety import click_text_candidates, is_disallowed_click_texts
 from backend.app.config import AppSettings
 
 
@@ -235,7 +236,8 @@ def _call_llm_planner(
                 "content": (
                     "너는 사내 시스템 사용 매뉴얼 영상 제작용 action plan을 생성한다. "
                     "반드시 JSON만 반환한다. JSON schema: "
-                    "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,selector?,target?,value?,requires_approval?}]}"
+                    "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,selector?,target?,value?,requires_approval?}]}. "
+                    "웹 검색, web search, 모델 선택, 도구 선택, 기능 토글 같은 선택형 UI는 클릭하지 않는다."
                 ),
             },
             {
@@ -287,6 +289,13 @@ def _normalize_plan(data: dict[str, Any], request: Any) -> dict[str, Any]:
         item["id"] = str(item.get("id") or f"a{index}")
         item["type"] = str(item.get("type") or "capture_step")
         item["step_id"] = str(item.get("step_id") or normalized_steps[min(index - 1, len(normalized_steps) - 1)]["id"])
+        if item["type"] == "click_by_text" and is_disallowed_click_texts(click_text_candidates(item)):
+            item = {
+                "id": item["id"],
+                "type": "capture_step",
+                "step_id": item["step_id"],
+                "reason": "blocked_disallowed_click_text",
+            }
         normalized_actions.append(item)
 
     if not any(action["type"] == "navigate" for action in normalized_actions):

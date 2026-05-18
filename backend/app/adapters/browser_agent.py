@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from backend.app.action_safety import is_disallowed_click_texts
 from backend.app.config import AppSettings
 from backend.app.adapters.planner import post_json
 
@@ -60,6 +61,7 @@ def decide_browser_agent_action(
                     "Inspect the current Playwright page observation and choose exactly one next safe read-only action. "
                     "Return JSON only. Allowed types: fill_by_label, click_by_text, wait, capture_step, finish. "
                     "Use fill_by_label only with provided input_values. Use click_by_text only for navigation/search/detail/read actions. "
+                    "Never click optional feature toggles, tool switches, model/provider selectors, or web search/browsing controls. "
                     "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
                 ),
             },
@@ -120,6 +122,8 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
             return {"status": "failed", "type": "finish", "reason": "missing_click_text"}
         if _has_dangerous_text(texts):
             return {"status": "blocked", "type": "finish", "reason": "dangerous_click_text", "texts": texts}
+        if is_disallowed_click_texts(texts):
+            return {"status": "blocked", "type": "finish", "reason": "disallowed_click_text", "texts": texts}
         action["texts"] = texts
     elif action_type == "wait":
         action["timeout_ms"] = _positive_int(data.get("timeout_ms", data.get("timeout", 1000)), default=1000)

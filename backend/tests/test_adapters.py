@@ -209,6 +209,55 @@ def test_browser_agent_blocks_dangerous_click_texts():
     assert action["reason"] == "dangerous_click_text"
 
 
+def test_browser_agent_blocks_web_search_toggle_clicks():
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 프롬프트를 입력하고 응답 결과를 확인",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변이 보이면 완료",
+        input_values={"프롬프트": "사내 휴가 규정을 요약해줘"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "click_by_text", "texts": ["Web Search"], "reason": "웹 검색 토글을 켭니다."}
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"clickables": [{"text": "Web Search"}, {"text": "전송"}]},
+        history=[],
+        step_index=2,
+        http_post=fake_post,
+    )
+
+    assert action["status"] == "blocked"
+    assert action["type"] == "finish"
+    assert action["reason"] == "disallowed_click_text"
+    assert action["texts"] == ["Web Search"]
+
+
 def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     request = PipelineInput(
         request_text="MES에서 LOT 조회 방법 영상 만들기",
@@ -276,6 +325,63 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
     assert trace["rag"] == {"status": "skipped"}
     assert trace["reranker"] == {"status": "skipped", "reason": "rag_context_skipped"}
+
+
+def test_internal_planner_replaces_web_search_toggle_click_with_capture_step(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 프롬프트를 입력하고 응답 결과를 확인",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변이 보이면 완료",
+        input_values={"프롬프트": "사내 휴가 규정을 요약해줘"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "steps": [{"id": "step_chat", "title": "챗봇 실행", "caption": "챗봇", "narration": "챗봇"}],
+                                "actions": [
+                                    {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_chat"},
+                                    {"id": "a2", "type": "click_by_text", "texts": ["Web Search"], "step_id": "step_chat"},
+                                    {
+                                        "id": "a3",
+                                        "type": "fill_by_label",
+                                        "label": "프롬프트",
+                                        "value": "사내 휴가 규정을 요약해줘",
+                                        "step_id": "step_chat",
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert not any(action.get("type") == "click_by_text" and action.get("texts") == ["Web Search"] for action in plan["actions"])
+    assert any(
+        action.get("type") == "capture_step" and action.get("reason") == "blocked_disallowed_click_text"
+        for action in plan["actions"]
+    )
 
 
 def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_invalid(tmp_path: Path):
