@@ -52,6 +52,7 @@ def build_plan(
 
 def deterministic_plan(request: Any, config_status: dict[str, object] | None = None) -> dict[str, Any]:
     input_summary = _format_input_summary(request.input_values)
+    actions = _deterministic_actions(request)
     return {
         "source": "local-deterministic-planner",
         "config_status": config_status or {},
@@ -81,21 +82,72 @@ def deterministic_plan(request: Any, config_status: dict[str, object] | None = N
                 "narration": "캡처, 마스킹, 내레이션, 문서와 영상을 패키징합니다.",
             },
         ],
-        "actions": [
-            {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_intro"},
-            {"id": "a2", "type": "capture_step", "step_id": "step_intro"},
-            {"id": "a3", "type": "capture_step", "step_id": "step_inputs"},
-            {"id": "a4", "type": "capture_step", "step_id": "step_completion"},
-            {
-                "id": "a5",
-                "type": "danger_approval",
-                "label": "렌더링 확정",
-                "requires_approval": True,
-                "step_id": "step_export",
-                "danger": {"is_danger": True, "reasons": ["keyword:확정"]},
-            },
-        ],
+        "actions": actions,
     }
+
+
+def _deterministic_actions(request: Any) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = [
+        {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_intro"},
+        {"id": "a2", "type": "capture_step", "step_id": "step_intro"},
+    ]
+    next_id = 3
+    for key, value in request.input_values.items():
+        actions.append(
+            {
+                "id": f"a{next_id}",
+                "type": "fill_by_label",
+                "label": str(key),
+                "value": str(value),
+                "step_id": "step_inputs",
+            }
+        )
+        next_id += 1
+    actions.append({"id": f"a{next_id}", "type": "capture_step", "step_id": "step_inputs"})
+    next_id += 1
+
+    for index, texts in enumerate(_infer_safe_click_text_groups(request), start=1):
+        step_id = "step_completion" if any("상세" in text for text in texts) else "step_inputs"
+        actions.append(
+            {
+                "id": f"a{next_id}",
+                "type": "click_by_text",
+                "label": texts[0],
+                "texts": texts,
+                "step_id": step_id,
+            }
+        )
+        next_id += 1
+        actions.append({"id": f"a{next_id}", "type": "capture_step", "step_id": step_id})
+        next_id += 1
+
+    if not any(action["type"] == "capture_step" and action["step_id"] == "step_completion" for action in actions):
+        actions.append({"id": f"a{next_id}", "type": "capture_step", "step_id": "step_completion"})
+        next_id += 1
+
+    actions.append(
+        {
+            "id": f"a{next_id}",
+            "type": "danger_approval",
+            "label": "렌더링 확정",
+            "requires_approval": True,
+            "step_id": "step_export",
+            "danger": {"is_danger": True, "reasons": ["keyword:확정"]},
+        }
+    )
+    return actions
+
+
+def _infer_safe_click_text_groups(request: Any) -> list[list[str]]:
+    text = f"{request.request_text} {request.completion_condition}"
+    groups: list[list[str]] = []
+    if "조회" in text:
+        groups.append(["조회", "검색"])
+    elif "검색" in text:
+        groups.append(["검색", "조회"])
+    if "상세" in text:
+        groups.append(["상세 보기", "상세", "Detail", "Details"])
+    return groups
 
 
 def _format_input_summary(input_values: dict[str, Any]) -> str:

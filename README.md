@@ -27,7 +27,7 @@
 | 홈 화면 UI | 구현 | `D:\Python\appendix\AI Center DESIGN.md`의 AI Center inspired 디자인 적용 |
 | 샘플 사내 시스템 | 구현 | `/sample`에서 테스트용 MES LOT 조회 화면 제공 |
 | 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
-| Action plan | 구현 | 기본은 deterministic planner, 옵션으로 내부 LLM planner 호출 |
+| Action plan | 구현 | 기본은 입력값 라벨/버튼 텍스트 기반 semantic action planner, 옵션으로 내부 LLM planner 호출 |
 | 브라우저 캡처 | 구현 | Playwright action plan 기반 범용 캡처 및 WebM 녹화 |
 | 로그인 처리 | 구현 | 로그인 없음, 사용자가 직접 로그인, `.env` ID/password 자동 입력 지원 |
 | 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
@@ -271,6 +271,8 @@ http://127.0.0.1:8000/sample
 5. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
 6. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
 7. 최종 영상 파일은 관리자가 별도 보관합니다.
+
+기본 planner는 selector를 모르는 상태에서도 입력값 이름을 화면 label/placeholder/name과 맞춰 채우고, 요청문에 `조회`, `검색`, `상세` 같은 안전한 읽기 동작이 있으면 같은 텍스트의 버튼을 찾아 클릭합니다. 예를 들어 입력값 `LOT=LOT-001`과 요청문 `LOT 조회 후 상세 화면 확인`은 `LOT` 입력칸 채우기, `조회` 버튼 클릭, `상세 보기` 버튼 클릭으로 실행됩니다. 저장, 제출, 삭제 같은 쓰기 동작은 기본 semantic planner의 자동 클릭 대상이 아니며, 운영 전에는 LLM action plan 검수나 Action JSON 편집 UI로 확정해야 합니다.
 
 ### 로그인 방식
 
@@ -649,7 +651,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-68 passed
+70 passed
 ```
 
 ## 보안 및 운영 주의사항

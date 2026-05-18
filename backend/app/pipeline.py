@@ -481,6 +481,16 @@ def _execute_capture_actions(
                     _apply_step_overlay(page, step, action)
                     page.fill(selector, str(action.get("value") or ""))
                     page.wait_for_timeout(300)
+            elif action_type == "fill_by_label":
+                label = str(action.get("label") or action.get("name") or "")
+                if not label:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_label"
+                else:
+                    _apply_step_overlay(page, step, action)
+                    method = _fill_by_label(page, label, str(action.get("value") or ""))
+                    log_entry["method"] = method
+                    page.wait_for_timeout(300)
             elif action_type == "click":
                 selector = str(action.get("selector") or "")
                 if not selector:
@@ -489,6 +499,16 @@ def _execute_capture_actions(
                 else:
                     _apply_step_overlay(page, step, action)
                     page.click(selector)
+                    page.wait_for_timeout(700)
+            elif action_type == "click_by_text":
+                texts = _action_text_candidates(action)
+                if not texts:
+                    log_entry["status"] = "skipped"
+                    log_entry["reason"] = "missing_text"
+                else:
+                    _apply_step_overlay(page, step, action)
+                    method = _click_by_text(page, texts)
+                    log_entry["method"] = method
                     page.wait_for_timeout(700)
             elif action_type == "press":
                 selector = str(action.get("selector") or "")
@@ -522,6 +542,92 @@ def _execute_capture_actions(
         action_log.append(log_entry)
 
     return {"captures": captures, "action_log": action_log}
+
+
+def _fill_by_label(page: Any, label: str, value: str) -> str:
+    candidates = _semantic_label_candidates(label)
+    errors: list[str] = []
+    for candidate in candidates:
+        for method_name in ("get_by_label", "get_by_placeholder"):
+            method = getattr(page, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method(candidate, exact=False).fill(value)
+                return f"{method_name}:{candidate}"
+            except TypeError:
+                try:
+                    method(candidate).fill(value)
+                    return f"{method_name}:{candidate}"
+                except Exception as exc:  # noqa: BLE001 - try the next semantic locator.
+                    errors.append(f"{method_name}:{type(exc).__name__}")
+            except Exception as exc:  # noqa: BLE001 - try the next semantic locator.
+                errors.append(f"{method_name}:{type(exc).__name__}")
+    locator = getattr(page, "locator", None)
+    if callable(locator):
+        for candidate in candidates:
+            selector = _input_selector_for_name(candidate)
+            try:
+                locator(selector).fill(value)
+                return f"locator:{selector}"
+            except Exception as exc:  # noqa: BLE001 - collect evidence then fail after all candidates.
+                errors.append(f"locator:{type(exc).__name__}")
+    raise RuntimeError(f"no editable field found for label {label!r}: {'; '.join(errors)}")
+
+
+def _click_by_text(page: Any, texts: list[str]) -> str:
+    errors: list[str] = []
+    for text in texts:
+        role = getattr(page, "get_by_role", None)
+        if callable(role):
+            try:
+                role("button", name=text, exact=False).click()
+                return f"get_by_role:button:{text}"
+            except TypeError:
+                try:
+                    role("button", name=text).click()
+                    return f"get_by_role:button:{text}"
+                except Exception as exc:  # noqa: BLE001 - try text locator next.
+                    errors.append(f"get_by_role:{type(exc).__name__}")
+            except Exception as exc:  # noqa: BLE001 - try text locator next.
+                errors.append(f"get_by_role:{type(exc).__name__}")
+        by_text = getattr(page, "get_by_text", None)
+        if callable(by_text):
+            try:
+                by_text(text, exact=False).click()
+                return f"get_by_text:{text}"
+            except TypeError:
+                try:
+                    by_text(text).click()
+                    return f"get_by_text:{text}"
+                except Exception as exc:  # noqa: BLE001 - try the next label.
+                    errors.append(f"get_by_text:{type(exc).__name__}")
+            except Exception as exc:  # noqa: BLE001 - try the next label.
+                errors.append(f"get_by_text:{type(exc).__name__}")
+    raise RuntimeError(f"no clickable element found for texts {texts!r}: {'; '.join(errors)}")
+
+
+def _semantic_label_candidates(label: str) -> list[str]:
+    candidates = [label.strip()]
+    compact = label.replace(" ", "").strip()
+    lowered = label.lower().strip()
+    for candidate in (compact, lowered, compact.lower()):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return [candidate for candidate in candidates if candidate]
+
+
+def _input_selector_for_name(name: str) -> str:
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"]'
+
+
+def _action_text_candidates(action: dict[str, Any]) -> list[str]:
+    raw = action.get("texts", action.get("text", action.get("label", "")))
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    value = str(raw).strip()
+    return [value] if value else []
 
 
 def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:

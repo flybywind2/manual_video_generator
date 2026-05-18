@@ -358,6 +358,56 @@ def test_execute_capture_actions_uses_plan_selectors_without_mes_defaults(tmp_pa
     assert "[data-action='detail']" not in rendered_calls
 
 
+def test_execute_capture_actions_runs_semantic_fill_and_text_clicks(tmp_path):
+    calls = []
+
+    class FakeLocator:
+        def __init__(self, kind, value):
+            self.kind = kind
+            self.value = value
+
+        def fill(self, value):
+            calls.append(("fill", self.kind, self.value, value))
+
+        def click(self):
+            calls.append(("click", self.kind, self.value))
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def get_by_label(self, text, **kwargs):
+            calls.append(("get_by_label", text, kwargs))
+            return FakeLocator("label", text)
+
+        def get_by_role(self, role, **kwargs):
+            calls.append(("get_by_role", role, kwargs))
+            return FakeLocator(role, kwargs.get("name"))
+
+        def screenshot(self, path, full_page):
+            calls.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    plan = {
+        "steps": [{"id": "step_search", "title": "조회", "caption": "조회합니다.", "narration": "조회합니다."}],
+        "actions": [
+            {"id": "a1", "type": "fill_by_label", "label": "LOT", "value": "LOT-001", "step_id": "step_search"},
+            {"id": "a2", "type": "click_by_text", "texts": ["조회", "검색"], "step_id": "step_search"},
+            {"id": "a3", "type": "capture_step", "step_id": "step_search"},
+        ],
+    }
+
+    result = _execute_capture_actions(FakePage(), plan, tmp_path)
+
+    assert ("fill", "label", "LOT", "LOT-001") in calls
+    assert ("click", "button", "조회") in calls
+    assert [entry["status"] for entry in result["action_log"][:2]] == ["ok", "ok"]
+    assert [path.name for path in result["captures"]] == ["step_search.png"]
+
+
 def test_execute_capture_actions_records_selector_failures_without_aborting(tmp_path):
     class FakePage:
         def evaluate(self, script, *args):

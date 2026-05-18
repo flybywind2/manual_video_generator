@@ -129,6 +129,33 @@ def test_deterministic_planner_does_not_emit_mes_sample_selectors():
     assert any(action["type"] == "capture_step" for action in plan["actions"])
 
 
+def test_deterministic_planner_emits_semantic_actions_from_request_and_inputs():
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회 후 상세 화면 확인 방법 영상 만들기",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면이 보이면 완료",
+        input_values={"LOT": "LOT-001"},
+    )
+
+    plan = deterministic_plan(request, config_status={})
+
+    actions = plan["actions"]
+    rendered = json.dumps(actions, ensure_ascii=False)
+    assert "[name='lot']" not in rendered
+    assert "[data-action='search']" not in rendered
+    assert any(
+        action["type"] == "fill_by_label"
+        and action["label"] == "LOT"
+        and action["value"] == "LOT-001"
+        and action["step_id"] == "step_inputs"
+        for action in actions
+    )
+    assert any(action["type"] == "click_by_text" and "조회" in action["texts"] for action in actions)
+    assert any(action["type"] == "click_by_text" and "상세 보기" in action["texts"] for action in actions)
+    assert sum(1 for action in actions if action["type"] == "capture_step") >= 3
+
+
 def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "melotts"})
     plan = {
