@@ -133,18 +133,39 @@ def test_debug_history_demonstration_signal_survives_navigation_and_uses_binding
         def evaluate(self, script, *args):
             evaluations.append((script, args))
 
-    pipeline_module._install_demonstration_signal(FakePage())
+    token = pipeline_module._install_demonstration_signal(FakePage(), signal_token="demo-token")
 
     script = scripts[0]
+    assert token == "demo-token"
     assert "__manualDemonstrationSignalFromPage" in exposed
     assert "__manualDemonstrationSignalFromPage" in script
     assert "시연 완료" in script
     assert "readStoredCompletion" in script
-    assert "sessionStorage.getItem('__manualDemonstrationCompleted')" in script
-    assert "sessionStorage.setItem('__manualDemonstrationCompleted', 'true')" in script
+    assert "__manualDemonstrationCompletedRunId" in script
+    assert "demo-token" in script
+    assert "window.__manualDemonstrationCompleted = window.__manualDemonstrationCompleted === true || readStoredCompletion()" not in script
     assert "MutationObserver" in script
     assert "setInterval(keepInstalled, 1000)" in script
     assert "__manualDemonstrationCleanup" in script
     assert "clearInterval" in script
     assert "disconnect()" in script
     assert evaluations and evaluations[0][0] == script
+
+
+def test_debug_history_demonstration_wait_requires_current_run_token():
+    calls = []
+    signal_state = pipeline_module._ManualLoginSignalState()
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+            return {"completed": False}
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+            signal_state.mark_completed()
+
+    result = pipeline_module._wait_for_demonstration_completion(FakePage(), 1000, signal_state, "demo-token")
+
+    assert result == "button"
+    assert calls[0] == ("evaluate", ("demo-token",))

@@ -1489,9 +1489,9 @@ def _execute_demonstration_capture(
     action_log: list[dict[str, Any]] = []
     try:
         _install_demonstration_recorder(page)
-        _install_demonstration_signal(page, signal_state=signal_state)
+        signal_token = _install_demonstration_signal(page, signal_state=signal_state)
         _apply_step_overlay(page, step)
-        completion_signal = _wait_for_demonstration_completion(page, timeout_ms, signal_state)
+        completion_signal = _wait_for_demonstration_completion(page, timeout_ms, signal_state, signal_token)
         events = _read_demonstration_events(page)
         _remove_demonstration_signal(page)
         captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
@@ -1952,18 +1952,34 @@ def _install_demonstration_recorder(page: Any) -> None:
     page.evaluate(script)
 
 
-def _install_demonstration_signal(page: Any, signal_state: _ManualLoginSignalState | None = None) -> None:
+def _install_demonstration_signal(
+    page: Any,
+    signal_state: _ManualLoginSignalState | None = None,
+    signal_token: str | None = None,
+) -> str:
     signal_state = signal_state or _ManualLoginSignalState()
+    signal_token = signal_token or f"demo_{uuid.uuid4().hex}"
     try:
         page.expose_function("__manualDemonstrationSignalFromPage", signal_state.mark_completed)
     except Exception:
         pass
+    token_json = json.dumps(signal_token)
     script = """
     (() => {
+      const runId = __MANUAL_DEMONSTRATION_RUN_ID__;
+      const completedRunKey = '__manualDemonstrationCompletedRunId';
+      const legacyCompletedKey = '__manualDemonstrationCompleted';
       const readStoredCompletion = () => {
-        try { return window.sessionStorage.getItem('__manualDemonstrationCompleted') === 'true'; } catch { return false; }
+        try { return window.sessionStorage.getItem(completedRunKey) === runId; } catch { return false; }
       };
-      window.__manualDemonstrationCompleted = window.__manualDemonstrationCompleted === true || readStoredCompletion();
+      try {
+        if (window.sessionStorage.getItem(legacyCompletedKey) === 'true'
+          && window.sessionStorage.getItem(completedRunKey) !== runId) {
+          window.sessionStorage.removeItem(legacyCompletedKey);
+        }
+      } catch {}
+      window.__manualDemonstrationRunId = runId;
+      window.__manualDemonstrationCompleted = readStoredCompletion();
       const selector = '[data-manual-demonstration-signal="true"]';
       window.__manualDemonstrationCleanup = () => {
         const button = document.querySelector(selector);
@@ -1978,8 +1994,9 @@ def _install_demonstration_signal(page: Any, signal_state: _ManualLoginSignalSta
         }
       };
       window.__manualDemonstrationSignal = () => {
+        window.__manualDemonstrationRunId = runId;
         window.__manualDemonstrationCompleted = true;
-        try { window.sessionStorage.setItem('__manualDemonstrationCompleted', 'true'); } catch {}
+        try { window.sessionStorage.setItem(completedRunKey, runId); } catch {}
         try {
           if (typeof window.__manualDemonstrationSignalFromPage === 'function') {
             window.__manualDemonstrationSignalFromPage();
@@ -2035,15 +2052,17 @@ def _install_demonstration_signal(page: Any, signal_state: _ManualLoginSignalSta
         keepInstalled();
       }
     })();
-    """
+    """.replace("__MANUAL_DEMONSTRATION_RUN_ID__", token_json)
     page.add_init_script(script)
     page.evaluate(script)
+    return signal_token
 
 
 def _wait_for_demonstration_completion(
     page: Any,
     timeout_ms: int,
     signal_state: _ManualLoginSignalState,
+    signal_token: str,
 ) -> str:
     deadline = time.monotonic() + (max(timeout_ms, 1) / 1000)
     last_error = ""
@@ -2053,14 +2072,17 @@ def _wait_for_demonstration_completion(
         try:
             state = page.evaluate(
                 """
-                () => {
+                (runId) => {
                   const storedCompleted = (() => {
-                    try { return window.sessionStorage.getItem('__manualDemonstrationCompleted') === 'true'; } catch { return false; }
+                    try { return window.sessionStorage.getItem('__manualDemonstrationCompletedRunId') === runId; } catch { return false; }
                   })();
-                  const completed = window.__manualDemonstrationCompleted === true || storedCompleted;
+                  const windowCompleted = window.__manualDemonstrationRunId === runId
+                    && window.__manualDemonstrationCompleted === true;
+                  const completed = windowCompleted || storedCompleted;
                   return { completed };
                 }
-                """
+                """,
+                signal_token,
             )
             if isinstance(state, dict) and state.get("completed"):
                 return "button"
