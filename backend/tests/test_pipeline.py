@@ -730,7 +730,8 @@ def test_manual_login_waits_for_success_selector_without_credentials():
     log = _handle_login(FakePage(), login)
 
     assert calls[0] == ("add_init_script", True)
-    assert calls[2] == ("wait_for_function", True, ".dashboard", 90000)
+    assert any(call[0] == "evaluate" and call[2] == (".dashboard",) for call in calls)
+    assert not any(call[0] == "wait_for_function" for call in calls)
     assert log == {
         "type": "login",
         "mode": "manual",
@@ -766,7 +767,8 @@ def test_manual_login_installs_completion_button_and_waits_for_signal():
 
     assert calls[0] == ("add_init_script", True)
     assert calls[1][0] == "evaluate"
-    assert calls[2] == ("wait_for_function", True, "", 90000)
+    assert any(call[0] == "evaluate" and call[2] == ("",) for call in calls)
+    assert not any(call[0] == "wait_for_function" for call in calls)
     assert log == {
         "type": "login",
         "mode": "manual",
@@ -775,6 +777,45 @@ def test_manual_login_installs_completion_button_and_waits_for_signal():
         "signal_button_enabled": True,
         "completion_signal": "button",
     }
+
+
+def test_manual_login_accepts_python_binding_signal_when_page_window_flag_is_lost():
+    calls = []
+    exposed = {}
+
+    class FakePage:
+        def expose_function(self, name, callback):
+            calls.append(("expose_function", name))
+            exposed[name] = callback
+
+        def add_init_script(self, script):
+            calls.append(("add_init_script", "__manualLoginSignalFromPage" in script))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", "manualLoginCompleted" in script, args))
+            return {"completed": False, "successSelectorMatched": False}
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+            if "__manualLoginSignalFromPage" in exposed:
+                exposed["__manualLoginSignalFromPage"]()
+                exposed.clear()
+
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            raise TimeoutError("window flag never reached playwright")
+
+    login = {
+        "mode": "manual",
+        "success_selector": "",
+        "manual_timeout_ms": 1000,
+        "credentials_timeout_ms": 30000,
+    }
+
+    log = _handle_login(FakePage(), login)
+
+    assert ("expose_function", "__manualLoginSignalFromPage") in calls
+    assert log["status"] == "ok"
+    assert log["completion_signal"] == "button"
 
 
 def test_manual_login_removes_signal_button_after_completion():

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -1084,6 +1085,7 @@ def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
 def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
     success_selector = str(login.get("success_selector") or "").strip()
     timeout_ms = int(login.get("manual_timeout_ms") or 120000)
+    signal_state = _ManualLoginSignalState()
     log = {
         "type": "login",
         "mode": "manual",
@@ -1092,52 +1094,8 @@ def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
         "signal_button_enabled": True,
     }
     try:
-        _install_manual_login_signal(page)
-        page.wait_for_function(
-            """
-            (selector) => {
-              if (window.__manualLoginCompleted === true) return true;
-              if (!selector) return false;
-              try {
-                const el = document.querySelector(selector);
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                return style && style.visibility !== 'hidden' && style.display !== 'none';
-              } catch {
-                return false;
-              }
-            }
-            """,
-            arg=success_selector,
-            timeout=timeout_ms,
-        )
-        state = page.evaluate(
-            """
-            (selector) => {
-              const completed = window.__manualLoginCompleted === true;
-              let successSelectorMatched = false;
-              if (selector) {
-                try {
-                  const el = document.querySelector(selector);
-                  if (el) {
-                    const style = window.getComputedStyle(el);
-                    successSelectorMatched = style && style.visibility !== 'hidden' && style.display !== 'none';
-                  }
-                } catch {
-                  successSelectorMatched = false;
-                }
-              }
-              return { completed, successSelectorMatched };
-            }
-            """,
-            success_selector,
-        )
-        if isinstance(state, dict) and state.get("completed"):
-            log["completion_signal"] = "button"
-        elif isinstance(state, dict) and state.get("successSelectorMatched"):
-            log["completion_signal"] = "selector"
-        else:
-            log["completion_signal"] = "unknown"
+        _install_manual_login_signal(page, signal_state=signal_state)
+        log["completion_signal"] = _wait_for_manual_login_completion(page, success_selector, timeout_ms, signal_state)
         _remove_manual_login_signal(page)
     except Exception as exc:  # noqa: BLE001 - keep the package inspectable when manual login times out.
         log["status"] = "failed"
@@ -1145,10 +1103,27 @@ def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
     return log
 
 
-def _install_manual_login_signal(page: Any) -> None:
+class _ManualLoginSignalState:
+    def __init__(self) -> None:
+        self.completed = False
+
+    def mark_completed(self, *_args: Any) -> bool:
+        self.completed = True
+        return True
+
+
+def _install_manual_login_signal(page: Any, signal_state: _ManualLoginSignalState | None = None) -> None:
+    signal_state = signal_state or _ManualLoginSignalState()
+    try:
+        page.expose_function("__manualLoginSignalFromPage", signal_state.mark_completed)
+    except Exception:
+        pass
     script = """
     (() => {
-      window.__manualLoginCompleted = window.__manualLoginCompleted === true;
+      const readStoredCompletion = () => {
+        try { return window.sessionStorage.getItem('__manualLoginCompleted') === 'true'; } catch { return false; }
+      };
+      window.__manualLoginCompleted = window.__manualLoginCompleted === true || readStoredCompletion();
       const selector = '[data-manual-login-signal="true"]';
       window.__manualLoginCleanup = () => {
         const button = document.querySelector(selector);
@@ -1171,6 +1146,12 @@ def _install_manual_login_signal(page: Any) -> None:
       };
       window.__manualLoginSignal = () => {
         window.__manualLoginCompleted = true;
+        try { window.sessionStorage.setItem('__manualLoginCompleted', 'true'); } catch {}
+        try {
+          if (typeof window.__manualLoginSignalFromPage === 'function') {
+            window.__manualLoginSignalFromPage();
+          }
+        } catch {}
         markCompleted(document.querySelector(selector));
         window.setTimeout(window.__manualLoginCleanup, 120);
       };
@@ -1227,6 +1208,60 @@ def _install_manual_login_signal(page: Any) -> None:
     """
     page.add_init_script(script)
     page.evaluate(script)
+
+
+def _wait_for_manual_login_completion(
+    page: Any,
+    success_selector: str,
+    timeout_ms: int,
+    signal_state: _ManualLoginSignalState,
+) -> str:
+    deadline = time.monotonic() + (max(timeout_ms, 1) / 1000)
+    last_error = ""
+    while time.monotonic() < deadline:
+        if signal_state.completed:
+            return "button"
+        try:
+            state = page.evaluate(
+                """
+                (selector) => {
+                  const storedCompleted = (() => {
+                    try { return window.sessionStorage.getItem('__manualLoginCompleted') === 'true'; } catch { return false; }
+                  })();
+                  const completed = window.__manualLoginCompleted === true || storedCompleted;
+                  let successSelectorMatched = false;
+                  if (selector) {
+                    try {
+                      const el = document.querySelector(selector);
+                      if (el) {
+                        const style = window.getComputedStyle(el);
+                        successSelectorMatched = style && style.visibility !== 'hidden' && style.display !== 'none';
+                      }
+                    } catch {
+                      successSelectorMatched = false;
+                    }
+                  }
+                  return { completed, successSelectorMatched };
+                }
+                """,
+                success_selector,
+            )
+            if isinstance(state, dict) and state.get("completed"):
+                return "button"
+            if isinstance(state, dict) and state.get("successSelectorMatched"):
+                return "selector"
+        except Exception as exc:  # noqa: BLE001 - navigation can temporarily destroy the execution context.
+            last_error = f"{type(exc).__name__}: {exc}"
+        _manual_login_wait_tick(page)
+    suffix = f" Last page check: {last_error}" if last_error else ""
+    raise TimeoutError(f"manual login was not confirmed.{suffix}")
+
+
+def _manual_login_wait_tick(page: Any) -> None:
+    try:
+        page.wait_for_timeout(250)
+    except Exception:
+        time.sleep(0.25)
 
 
 def _remove_manual_login_signal(page: Any) -> None:
