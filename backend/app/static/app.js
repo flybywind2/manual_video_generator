@@ -6,6 +6,12 @@ const artifactStatus = document.querySelector("#artifact-status");
 const artifactLinks = document.querySelector("#artifact-links");
 const submitButton = form?.querySelector("button[type='submit']");
 const configGrid = document.querySelector("#config-grid");
+const inputValues = document.querySelector("#input-values");
+const inputValueList = inputValues?.querySelector("[data-input-value-list]");
+const sampleInputValues = [
+  { key: "LOT", value: "LOT-001" },
+  { key: "라인", value: "A3" },
+];
 
 loadConfigStatus();
 
@@ -14,7 +20,19 @@ sampleButton?.addEventListener("click", () => {
   form.elements.url.value = `${window.location.origin}/sample`;
   form.elements.role.value = "작업자";
   form.elements.done.value = "상세 화면이 보이면 완료";
+  renderInputValues(sampleInputValues);
   panelState.textContent = "Sample loaded";
+});
+
+inputValues?.addEventListener("click", (event) => {
+  const action = event.target?.dataset?.action;
+  if (action === "add-input-value") {
+    const row = addInputValueRow("", "");
+    row.querySelector(".input-value-key")?.focus();
+  }
+  if (action === "remove-input-value") {
+    event.target.closest(".input-value-row")?.remove();
+  }
 });
 
 form?.addEventListener("submit", async (event) => {
@@ -56,13 +74,48 @@ form?.addEventListener("submit", async (event) => {
 });
 
 function readInputValues() {
-  return Array.from(document.querySelectorAll(".value-chip:not(.add-chip)")).reduce((values, chip) => {
-    const [key, ...rest] = chip.textContent.split("=");
-    if (key && rest.length) {
-      values[key.trim()] = rest.join("=").trim();
+  return Array.from(document.querySelectorAll(".input-value-row")).reduce((values, row) => {
+    const key = row.querySelector(".input-value-key")?.value.trim();
+    const value = row.querySelector(".input-value-value")?.value.trim();
+    if (key) {
+      values[key] = value || "";
     }
     return values;
   }, {});
+}
+
+function renderInputValues(entries) {
+  if (!inputValueList) return;
+  inputValueList.innerHTML = "";
+  entries.forEach(({ key, value }) => addInputValueRow(key, value));
+}
+
+function addInputValueRow(key = "", value = "") {
+  const row = document.createElement("div");
+  row.className = "input-value-row";
+
+  const keyInput = document.createElement("input");
+  keyInput.className = "input-value-key";
+  keyInput.type = "text";
+  keyInput.setAttribute("aria-label", "입력값 이름");
+  keyInput.value = key;
+
+  const valueInput = document.createElement("input");
+  valueInput.className = "input-value-value";
+  valueInput.type = "text";
+  valueInput.setAttribute("aria-label", "입력값 값");
+  valueInput.value = value;
+
+  const removeButton = document.createElement("button");
+  removeButton.className = "icon-button danger";
+  removeButton.type = "button";
+  removeButton.dataset.action = "remove-input-value";
+  removeButton.setAttribute("aria-label", "입력값 삭제");
+  removeButton.textContent = "×";
+
+  row.append(keyInput, valueInput, removeButton);
+  inputValueList?.append(row);
+  return row;
 }
 
 function setBusy(isBusy) {

@@ -115,6 +115,7 @@ class AppSettings:
     enable_reranker: bool
     playwright_mcp_mode: str
     playwright_mcp_command: str
+    playwright_executable_path: str
     tts_provider: str
     tts_device: str
     tts_language: str
@@ -144,6 +145,7 @@ class AppSettings:
                 "enable_reranker": self.enable_reranker,
                 "playwright_mcp_mode": self.playwright_mcp_mode,
                 "playwright_mcp_command_set": bool(self.playwright_mcp_command),
+                "playwright_executable_path_set": bool(self.playwright_executable_path),
                 "tts_provider": self.tts_provider,
                 "tts_device": self.tts_device,
                 "tts_language": self.tts_language,
@@ -222,6 +224,7 @@ def load_settings(
         enable_reranker=_get_bool(env, "ENABLE_RERANKER", False),
         playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),
         playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest --headless"),
+        playwright_executable_path=_get(env, "PLAYWRIGHT_EXECUTABLE_PATH"),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
         tts_device=_get(env, "TTS_DEVICE", "cpu"),
         tts_language=_get(env, "TTS_LANGUAGE", "KR"),

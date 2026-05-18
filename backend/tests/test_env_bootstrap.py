@@ -10,6 +10,7 @@ def test_bundle_root_prefers_explicit_environment(tmp_path: Path):
 
 
 def test_build_runtime_environment_points_caches_inside_bundle(tmp_path: Path):
+    (tmp_path / "runtime" / "browsers").mkdir(parents=True)
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "corp-root-ca.pem").write_text("cert", encoding="utf-8")
 
@@ -23,6 +24,13 @@ def test_build_runtime_environment_points_caches_inside_bundle(tmp_path: Path):
     assert env["REQUESTS_CA_BUNDLE"] == str(tmp_path / "config" / "corp-root-ca.pem")
     assert env["NODE_EXTRA_CA_CERTS"] == str(tmp_path / "config" / "corp-root-ca.pem")
     assert env["PATH"].endswith("C:\\Windows\\System32")
+
+
+def test_build_runtime_environment_does_not_force_missing_playwright_browser_path(tmp_path: Path):
+    env = build_runtime_environment(root=tmp_path, environ={"PATH": "C:\\Windows\\System32"})
+
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in env
+    assert env["HF_HOME"] == str(tmp_path / "runtime" / "hf-cache")
 
 
 def test_build_runtime_environment_does_not_override_existing_cache_values(tmp_path: Path):

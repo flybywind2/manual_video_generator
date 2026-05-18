@@ -129,7 +129,7 @@ def run_pipeline(
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
 
     if capture_browser:
-        capture_result = _capture_with_playwright(request, dirs)
+        capture_result = _capture_with_playwright(request, dirs, settings)
         capture_status = "ok"
         capture_degrade_reason = ""
     else:
@@ -287,13 +287,10 @@ def _make_dirs(package_dir: Path) -> PipelineDirs:
     return PipelineDirs(package=package_dir, captures=captures, masked=masked, tts=tts, raw_video=raw_video)
 
 
-def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs) -> dict[str, Any]:
+def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs, settings: Any) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
-    chrome = Path(r"C:\Users\xiro1\AppData\Local\ms-playwright\chromium-1187\chrome-win\chrome.exe")
-    launch_kwargs: dict[str, Any] = {"headless": True}
-    if chrome.exists():
-        launch_kwargs["executable_path"] = str(chrome)
+    launch_kwargs = _playwright_launch_kwargs(settings)
 
     captions = [
         ("step_intro", "요청 정보를 확인하고 샘플 사내 시스템으로 이동합니다.", ".sample-hero"),
@@ -310,8 +307,7 @@ def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs) -> dict
             record_video_size={"width": 1280, "height": 800},
         )
         page = context.new_page()
-        page.goto(request.target_url, wait_until="domcontentloaded")
-        _inject_recording_helpers(page)
+        _prepare_capture_page(page, request.target_url)
 
         page.evaluate("window.__manualSetCaption", captions[0][1])
         page.evaluate("window.__manualHighlight", captions[0][2])
@@ -348,6 +344,60 @@ def _capture_with_playwright(request: PipelineInput, dirs: PipelineDirs) -> dict
         "video": video,
         "final_frame": final_frame,
     }
+
+
+def _playwright_launch_kwargs(settings: Any, browser_roots: list[Path] | None = None) -> dict[str, Any]:
+    launch_kwargs: dict[str, Any] = {"headless": True}
+    executable_path = str(getattr(settings, "playwright_executable_path", "") or "").strip()
+    if executable_path:
+        launch_kwargs["executable_path"] = executable_path
+        return launch_kwargs
+    discovered = _discover_playwright_chromium(browser_roots=browser_roots)
+    if discovered:
+        launch_kwargs["executable_path"] = str(discovered)
+    return launch_kwargs
+
+
+def _discover_playwright_chromium(browser_roots: list[Path] | None = None) -> Path | None:
+    roots = browser_roots if browser_roots is not None else _default_playwright_browser_roots()
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        candidates.extend(path for path in root.glob("chromium-*/chrome-win/chrome.exe") if path.is_file())
+        candidates.extend(path for path in root.glob("chromium-*/chrome-win64/chrome.exe") if path.is_file())
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+
+
+def _default_playwright_browser_roots() -> list[Path]:
+    roots: list[Path] = []
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if configured:
+        roots.append(Path(configured))
+    roots.append(Path.home() / "AppData" / "Local" / "ms-playwright")
+    return roots
+
+
+def _prepare_capture_page(page: Any, target_url: str) -> None:
+    page.goto(target_url, wait_until="load")
+    try:
+        page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        # Some internal systems keep long-polling connections open. Continue after
+        # document readiness and expected controls are available.
+        pass
+    page.wait_for_function(
+        """
+        () => document.readyState === 'complete'
+          && (!document.querySelector("[data-action='search']") || window.__sampleMesReady === true)
+        """,
+        timeout=10000,
+    )
+    page.wait_for_selector("[data-action='search']", timeout=10000)
+    page.wait_for_selector("[data-action='detail']", timeout=10000)
+    _inject_recording_helpers(page)
 
 
 def _create_placeholder_captures(request: PipelineInput, dirs: PipelineDirs) -> dict[str, Any]:

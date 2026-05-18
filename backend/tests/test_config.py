@@ -30,6 +30,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_ENABLE_RERANKER=true",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest",
                 "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest",
+                "MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH=D:\\browsers\\chrome.exe",
                 "MANUAL_AGENT_TTS_PROVIDER=melotts",
                 "MANUAL_AGENT_TTS_DEVICE=cpu",
                 "MANUAL_AGENT_TTS_SPEED=1.1",
@@ -59,6 +60,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.enable_reranker is True
     assert settings.playwright_mcp_mode == "manifest"
     assert settings.playwright_mcp_command == "npx @playwright/mcp@latest"
+    assert settings.playwright_executable_path == "D:\\browsers\\chrome.exe"
     assert settings.tts_provider == "melotts"
     assert settings.tts_device == "cpu"
     assert settings.tts_speed == 1.1

@@ -17,6 +17,9 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "AI Center Pipeline" in body
     assert "MeloTTS" in body
     assert ".env 설정 상태" in body
+    assert 'id="input-values"' in body
+    assert 'data-action="add-input-value"' in body
+    assert 'data-action="remove-input-value"' in body
 
 
 def test_static_app_exposes_review_artifact_links():
@@ -31,3 +34,17 @@ def test_static_app_exposes_review_artifact_links():
     assert "MCP Calls" in body
     assert "HyperFrames Composition" in body
     assert "OpenCode Prompt" in body
+
+
+def test_static_app_supports_editable_input_value_rows():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "renderInputValues" in body
+    assert "addInputValueRow" in body
+    assert "remove-input-value" in body
+    assert "input-value-key" in body
+    assert "input-value-value" in body

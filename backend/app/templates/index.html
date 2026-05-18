@@ -99,10 +99,20 @@
                 </label>
                 <div class="field field-wide">
                   <span>입력값</span>
-                  <div class="chip-row" aria-label="Scenario input values">
-                    <button class="value-chip" type="button">LOT=LOT-001</button>
-                    <button class="value-chip" type="button">라인=A3</button>
-                    <button class="value-chip add-chip" type="button">+ 값 추가</button>
+                  <div class="input-values" id="input-values" aria-label="Scenario input values">
+                    <div class="input-value-list" data-input-value-list>
+                      <div class="input-value-row">
+                        <input class="input-value-key" type="text" aria-label="입력값 이름" value="LOT" />
+                        <input class="input-value-value" type="text" aria-label="입력값 값" value="LOT-001" />
+                        <button class="icon-button danger" type="button" data-action="remove-input-value" aria-label="입력값 삭제">×</button>
+                      </div>
+                      <div class="input-value-row">
+                        <input class="input-value-key" type="text" aria-label="입력값 이름" value="라인" />
+                        <input class="input-value-value" type="text" aria-label="입력값 값" value="A3" />
+                        <button class="icon-button danger" type="button" data-action="remove-input-value" aria-label="입력값 삭제">×</button>
+                      </div>
+                    </div>
+                    <button class="input-add-button" type="button" data-action="add-input-value">+ 값 추가</button>
                   </div>
                 </div>
                 <div class="actions">

@@ -498,6 +498,61 @@ a {
   color: var(--body);
 }
 
+.input-values {
+  display: grid;
+  gap: 10px;
+}
+
+.input-value-list {
+  display: grid;
+  gap: 8px;
+}
+
+.input-value-row {
+  display: grid;
+  grid-template-columns: minmax(108px, 0.65fr) minmax(140px, 1fr) 40px;
+  gap: 8px;
+  align-items: center;
+}
+
+.input-value-row input {
+  min-height: 40px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: white;
+  color: var(--body);
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button.danger {
+  color: #b42318;
+  border-color: rgba(180, 35, 24, 0.24);
+}
+
+.input-add-button {
+  justify-self: start;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid rgba(36, 91, 255, 0.24);
+  border-radius: 6px;
+  background: var(--canvas-tint);
+  color: var(--ai-indigo);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
 .actions {
   grid-column: 1 / -1;
   display: flex;

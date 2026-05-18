@@ -28,10 +28,14 @@ def build_runtime_environment(
     runtime = base / "runtime"
     updates: dict[str, str] = {
         "MANUAL_AGENT_BUNDLE_ROOT": str(base),
-        "PLAYWRIGHT_BROWSERS_PATH": env.get("PLAYWRIGHT_BROWSERS_PATH") or str(runtime / "browsers"),
         "HF_HOME": env.get("HF_HOME") or str(runtime / "hf-cache"),
         "NPM_CONFIG_CACHE": env.get("NPM_CONFIG_CACHE") or str(runtime / "npm-cache"),
     }
+    playwright_browsers = env.get("PLAYWRIGHT_BROWSERS_PATH") or ""
+    if not playwright_browsers and (runtime / "browsers").exists():
+        playwright_browsers = str(runtime / "browsers")
+    if playwright_browsers:
+        updates["PLAYWRIGHT_BROWSERS_PATH"] = playwright_browsers
     if not env.get("MANUAL_AGENT_OUTPUT_DIR"):
         updates["MANUAL_AGENT_OUTPUT_DIR"] = str(base / "output")
 
