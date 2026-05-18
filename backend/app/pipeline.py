@@ -2570,9 +2570,7 @@ def _render_placeholder_video(package_dir: Path) -> Path:
     return path
 
 
-def _inject_recording_helpers(page: Any) -> None:
-    page.add_style_tag(
-        content="""
+_RECORDING_HELPER_STYLE = """
         .manual-caption{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:99999;width:min(860px,calc(100vw - 72px));padding:16px 20px;border:1px solid rgba(36,91,255,.28);border-radius:8px;background:rgba(255,255,255,.96);box-shadow:0 22px 56px rgba(17,24,39,.18);font:800 22px/1.45 SamsungOne,Pretendard,Inter,system-ui,sans-serif;text-align:center;color:#050816}
         .manual-highlight,.manual-input-focus{position:relative!important;z-index:9999!important;box-shadow:0 0 0 5px rgba(33,212,253,.38),0 0 0 10px rgba(36,91,255,.13),0 22px 42px rgba(36,91,255,.22)!important;border-color:#245BFF!important;outline:3px solid rgba(33,212,253,.82)!important;outline-offset:3px!important}
         .manual-cursor{position:fixed;left:28px;top:28px;width:24px;height:24px;z-index:2147483646;pointer-events:none;transform:translate(-4px,-3px);transition:left .16s ease,top .16s ease;filter:drop-shadow(0 8px 14px rgba(17,24,39,.28))}
@@ -2581,10 +2579,25 @@ def _inject_recording_helpers(page: Any) -> None:
         .manual-click-ripple{position:fixed;width:42px;height:42px;margin-left:-21px;margin-top:-21px;border:3px solid rgba(36,91,255,.86);border-radius:999px;z-index:2147483645;pointer-events:none;animation:manual-click-ripple .55s ease-out forwards;background:rgba(33,212,253,.16)}
         @keyframes manual-click-ripple{0%{opacity:1;transform:scale(.42)}100%{opacity:0;transform:scale(1.8)}}
         """
-    )
-    page.evaluate(
-        """
+
+
+def _recording_helper_script() -> str:
+    style = json.dumps(_RECORDING_HELPER_STYLE)
+    return """
         (() => {
+        const styleText = __MANUAL_RECORDING_HELPER_STYLE__;
+        window.__manualInstallRecordingHelpers = () => {
+        const styleRoot = document.head || document.documentElement;
+        if (styleRoot && !document.querySelector('#manual-recording-helper-style')) {
+          const style = document.createElement('style');
+          style.id = 'manual-recording-helper-style';
+          style.textContent = styleText;
+          styleRoot.appendChild(style);
+        }
+        if (!document.body) {
+          document.addEventListener('DOMContentLoaded', window.__manualInstallRecordingHelpers, { once: true });
+          return;
+        }
         const cssEscape = (value) => {
           if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
           return String(value).replace(/["\\\\]/g, '\\\\$&');
@@ -2711,10 +2724,33 @@ def _inject_recording_helpers(page: Any) -> None:
             if (target && target.classList) target.classList.remove('manual-input-focus');
           }, true);
         }
-        ensureCursor();
+        const keepOverlayInstalled = () => {
+          try { ensureCursor(); } catch {}
+        };
+        if (!window.__manualRecordingOverlayObserver && typeof MutationObserver !== 'undefined') {
+          window.__manualRecordingOverlayObserver = new MutationObserver(keepOverlayInstalled);
+          window.__manualRecordingOverlayObserver.observe(document.documentElement || document, {
+            childList: true,
+            subtree: true
+          });
+        }
+        if (!window.__manualRecordingOverlayInterval) {
+          window.__manualRecordingOverlayInterval = window.setInterval(keepOverlayInstalled, 1000);
+        }
+        keepOverlayInstalled();
+        };
+        window.__manualInstallRecordingHelpers();
         })();
-        """
-    )
+        """.replace("__MANUAL_RECORDING_HELPER_STYLE__", style)
+
+
+def _inject_recording_helpers(page: Any) -> None:
+    script = _recording_helper_script()
+    add_init_script = getattr(page, "add_init_script", None)
+    if callable(add_init_script):
+        add_init_script(script)
+    page.add_style_tag(content=_RECORDING_HELPER_STYLE)
+    page.evaluate(script)
 
 
 def _screenshot(page: Any, directory: Path, name: str) -> Path:

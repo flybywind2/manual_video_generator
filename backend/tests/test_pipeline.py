@@ -984,9 +984,12 @@ def test_capture_action_status_reports_login_required_separately():
 
 
 def test_recording_helpers_include_cursor_click_and_input_focus_overlays():
-    calls = {"styles": [], "scripts": []}
+    calls = {"styles": [], "scripts": [], "init_scripts": []}
 
     class FakePage:
+        def add_init_script(self, script):
+            calls["init_scripts"].append(script)
+
         def add_style_tag(self, content):
             calls["styles"].append(content)
 
@@ -1004,6 +1007,13 @@ def test_recording_helpers_include_cursor_click_and_input_focus_overlays():
     assert "__manualFocusByLabel" in script
     assert "__manualPulseClick" in script
     assert "focusin" in script
+    assert calls["init_scripts"], "recording helpers must survive login/navigation"
+    init_script = "\n".join(calls["init_scripts"])
+    assert "manual-recording-helper-style" in init_script
+    assert ".manual-cursor" in init_script
+    assert "__manualInstallRecordingHelpers" in init_script
+    assert "MutationObserver" in init_script
+    assert "__manualRecordingOverlayInterval" in init_script
 
 
 def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configured(tmp_path):
