@@ -318,7 +318,7 @@ def load_settings(
         tts_speaker=_get(env, "TTS_SPEAKER", "KR"),
         tts_speed=_get_float(env, "TTS_SPEED", 1.0),
         video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
-        hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx hyperframes render"),
+        hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx --yes hyperframes render"),
         enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
         hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx hyperframes skills --codex"),
         enable_opencode=_get_bool(env, "ENABLE_OPENCODE", False),

@@ -723,13 +723,17 @@ def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_pat
 
     assert result.video_path == fallback_video
     assert result.composition_dir.joinpath("index.html").exists()
+    html = result.composition_dir.joinpath("index.html").read_text(encoding="utf-8")
+    assert "../manual_video_agent_usage.webm" in html
+    assert "manual-source-video" in html
+    assert "manual-video-pointer" in html
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["renderer"] == "hyperframes"
     assert metadata["fallback_video"] == str(fallback_video)
     assert metadata["used_fallback"] is True
 
 
-def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path):
+def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path, monkeypatch):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
@@ -750,8 +754,14 @@ def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path
             }
         ]
     }
+    monkeypatch.setattr(
+        "backend.app.adapters.video.shutil.which",
+        lambda command: r"C:\tools\ffmpeg.exe" if command == "ffmpeg" else None,
+    )
 
     def fake_runner(args, **kwargs):
+        assert args[2] == str(tmp_path / "hyperframes")
+        assert not args[2].endswith("index.html")
         output_path = Path(args[args.index("--output") + 1])
         output_path.write_bytes(b"mp4")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="rendered", stderr="")
@@ -770,6 +780,90 @@ def test_hyperframes_render_uses_mp4_when_command_produces_output(tmp_path: Path
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "completed"
     assert metadata["video"] == str(result.video_path)
+
+
+def test_hyperframes_render_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "hyperframes render",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    plan = {"steps": [{"id": "step_intro", "title": "요청 확인", "caption": "요청을 확인합니다."}]}
+    monkeypatch.setattr(
+        "backend.app.adapters.video.shutil.which",
+        lambda command: None if command == "ffmpeg" else f"C:\\tools\\{command}.exe",
+    )
+
+    def fail_runner(*args, **kwargs):
+        raise AssertionError("HyperFrames CLI should not run when ffmpeg is missing")
+
+    result = render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        command_runner=fail_runner,
+    )
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert result.used_fallback is True
+    assert metadata["status"] == "failed"
+    assert metadata["reason"] == "ffmpeg not found"
+    assert metadata["ffmpeg_path"] == ""
+
+
+def test_hyperframes_render_uses_shell_for_windows_cmd_launchers(monkeypatch, tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "npx --yes hyperframes render",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    plan = {"steps": [{"id": "step_intro", "title": "요청 확인", "caption": "요청을 확인합니다."}]}
+    monkeypatch.setattr(
+        "backend.app.adapters.video.shutil.which",
+        lambda command: (
+            r"C:\Program Files\nodejs\npx.CMD"
+            if command == "npx"
+            else r"C:\tools\ffmpeg.exe"
+            if command == "ffmpeg"
+            else None
+        ),
+    )
+
+    def fake_runner(args, **kwargs):
+        assert kwargs["shell"] is True
+        assert isinstance(args, str)
+        assert "npx.CMD" in args
+        assert "--yes hyperframes render" in args
+        assert str(tmp_path / "hyperframes") in args
+        (tmp_path / "manual_video_agent_usage.mp4").write_bytes(b"mp4")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="rendered", stderr="")
+
+    result = render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        command_runner=fake_runner,
+    )
+
+    assert result.used_fallback is False
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["command"][0] == r"C:\Program Files\nodejs\npx.CMD"
+    assert metadata["shell"] is True
+    assert "npx.CMD" in metadata["shell_command"]
 
 
 def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_path: Path):

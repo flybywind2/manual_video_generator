@@ -160,7 +160,7 @@ ffmpeg -version
 npx hyperframes init manual-video-renderer
 cd manual-video-renderer
 npx hyperframes preview
-npx hyperframes render
+npx --yes hyperframes render
 ```
 
 에이전트가 HyperFrames composition을 더 정확히 작성하게 하려면 HyperFrames skills를 설치합니다.
@@ -174,6 +174,7 @@ npx skills add heygen-com/hyperframes
 ```env
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
 MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex
+MANUAL_AGENT_HYPERFRAMES_COMMAND=npx --yes hyperframes render
 ```
 
 이 명령은 렌더링 전에 실행되고 결과는 `hyperframes_skills.json`에 저장됩니다. 사내망에서 npm 접근이 막혀 실패해도 composition 생성과 fallback 영상 생성은 계속됩니다.

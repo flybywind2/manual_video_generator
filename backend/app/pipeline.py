@@ -2278,6 +2278,17 @@ def _apply_step_overlay(page: Any, step: dict[str, Any], action: dict[str, Any] 
             # Highlighting is presentational. Do not fail a capture action because
             # a target system uses a selector Playwright can execute but querySelector cannot.
             pass
+    if action:
+        action_type = str(action.get("type") or "")
+        try:
+            if action_type == "fill_by_label":
+                page.evaluate("window.__manualFocusByLabel", str(action.get("label") or action.get("name") or ""))
+            elif action_type == "click_by_text":
+                page.evaluate("window.__manualFocusByText", _action_text_candidates(action))
+        except Exception:
+            # Pointer/focus overlays are recording aids only. A missing helper on
+            # an unusual page must not turn a real capture step into a failure.
+            pass
 
 
 def _step_capture_name(step: dict[str, Any], used_names: set[str]) -> str:
@@ -2505,11 +2516,78 @@ def _inject_recording_helpers(page: Any) -> None:
     page.add_style_tag(
         content="""
         .manual-caption{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:99999;width:min(860px,calc(100vw - 72px));padding:16px 20px;border:1px solid rgba(36,91,255,.28);border-radius:8px;background:rgba(255,255,255,.96);box-shadow:0 22px 56px rgba(17,24,39,.18);font:800 22px/1.45 SamsungOne,Pretendard,Inter,system-ui,sans-serif;text-align:center;color:#050816}
-        .manual-highlight{position:relative!important;z-index:9999!important;box-shadow:0 0 0 5px rgba(33,212,253,.38),0 0 0 10px rgba(36,91,255,.13),0 22px 42px rgba(36,91,255,.22)!important;border-color:#245BFF!important}
+        .manual-highlight,.manual-input-focus{position:relative!important;z-index:9999!important;box-shadow:0 0 0 5px rgba(33,212,253,.38),0 0 0 10px rgba(36,91,255,.13),0 22px 42px rgba(36,91,255,.22)!important;border-color:#245BFF!important;outline:3px solid rgba(33,212,253,.82)!important;outline-offset:3px!important}
+        .manual-cursor{position:fixed;left:28px;top:28px;width:24px;height:24px;z-index:2147483646;pointer-events:none;transform:translate(-4px,-3px);transition:left .16s ease,top .16s ease;filter:drop-shadow(0 8px 14px rgba(17,24,39,.28))}
+        .manual-cursor::before{content:"";position:absolute;left:0;top:0;width:0;height:0;border-left:18px solid #111827;border-top:11px solid transparent;border-bottom:11px solid transparent;transform:rotate(-34deg);transform-origin:0 50%}
+        .manual-cursor::after{content:"";position:absolute;left:11px;top:12px;width:8px;height:8px;border-radius:999px;background:#21D4FD;border:2px solid #fff;box-shadow:0 0 0 5px rgba(33,212,253,.22)}
+        .manual-click-ripple{position:fixed;width:42px;height:42px;margin-left:-21px;margin-top:-21px;border:3px solid rgba(36,91,255,.86);border-radius:999px;z-index:2147483645;pointer-events:none;animation:manual-click-ripple .55s ease-out forwards;background:rgba(33,212,253,.16)}
+        @keyframes manual-click-ripple{0%{opacity:1;transform:scale(.42)}100%{opacity:0;transform:scale(1.8)}}
         """
     )
     page.evaluate(
         """
+        (() => {
+        const cssEscape = (value) => {
+          if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+          return String(value).replace(/["\\\\]/g, '\\\\$&');
+        };
+        const visible = (el) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+        };
+        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const ensureCursor = () => {
+          let cursor = document.querySelector('.manual-cursor');
+          if (!cursor) {
+            cursor = document.createElement('div');
+            cursor.className = 'manual-cursor';
+            document.body.appendChild(cursor);
+          }
+          return cursor;
+        };
+        const moveCursor = (x, y) => {
+          const cursor = ensureCursor();
+          cursor.style.left = `${Math.max(0, Math.round(x))}px`;
+          cursor.style.top = `${Math.max(0, Math.round(y))}px`;
+        };
+        const centerOf = (el) => {
+          const rect = el.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        };
+        const labelFor = (el) => {
+          const labels = Array.from(el.labels || []).map((label) => label.innerText || label.textContent || '').filter(Boolean);
+          if (labels.length) return labels.join(' ');
+          const idLabel = el.id ? document.querySelector(`label[for="${cssEscape(el.id)}"]`) : null;
+          return [
+            idLabel?.innerText,
+            el.getAttribute('aria-label'),
+            el.getAttribute('placeholder'),
+            el.getAttribute('name'),
+            el.id,
+          ].filter(Boolean).join(' ');
+        };
+        const clearHighlights = () => {
+          document.querySelectorAll('.manual-highlight').forEach((el) => el.classList.remove('manual-highlight'));
+        };
+        const highlightElement = (el) => {
+          if (!el) return false;
+          clearHighlights();
+          el.classList.add('manual-highlight');
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          const center = centerOf(el);
+          moveCursor(center.x, center.y);
+          return true;
+        };
+        const pulseClick = (x, y) => {
+          const ripple = document.createElement('div');
+          ripple.className = 'manual-click-ripple';
+          ripple.style.left = `${Math.max(0, Math.round(x))}px`;
+          ripple.style.top = `${Math.max(0, Math.round(y))}px`;
+          document.body.appendChild(ripple);
+          window.setTimeout(() => ripple.remove(), 700);
+        };
         window.__manualSetCaption = (text) => {
           let caption = document.querySelector('.manual-caption');
           if (!caption) {
@@ -2519,14 +2597,64 @@ def _inject_recording_helpers(page: Any) -> None:
           }
           caption.textContent = text;
         };
+        window.__manualMoveCursorToElement = (el) => {
+          if (!el || !visible(el)) return false;
+          const center = centerOf(el);
+          moveCursor(center.x, center.y);
+          return true;
+        };
+        window.__manualPulseClick = pulseClick;
+        window.__manualFocusByLabel = (label) => {
+          const wanted = normalize(label);
+          if (!wanted) return false;
+          const fields = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable="true"]')).filter(visible);
+          const found = fields.find((el) => normalize(labelFor(el)).includes(wanted) || wanted.includes(normalize(labelFor(el))));
+          if (!found) return false;
+          found.classList.add('manual-input-focus');
+          return highlightElement(found);
+        };
+        window.__manualFocusByText = (texts) => {
+          const wanted = (Array.isArray(texts) ? texts : [texts]).map(normalize).filter(Boolean);
+          if (!wanted.length) return false;
+          const targets = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [data-action]')).filter(visible);
+          const found = targets.find((el) => {
+            const haystack = normalize([el.innerText, el.value, el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('data-action')].filter(Boolean).join(' '));
+            return wanted.some((text) => haystack.includes(text) || text.includes(haystack));
+          });
+          if (!found) return false;
+          highlightElement(found);
+          const center = centerOf(found);
+          pulseClick(center.x, center.y);
+          return true;
+        };
         window.__manualHighlight = (selector) => {
-          document.querySelectorAll('.manual-highlight').forEach((el) => el.classList.remove('manual-highlight'));
+          clearHighlights();
           const el = document.querySelector(selector);
           if (el) {
-            el.classList.add('manual-highlight');
-            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            highlightElement(el);
           }
         };
+        if (!window.__manualInteractionOverlayInstalled) {
+          window.__manualInteractionOverlayInstalled = true;
+          document.addEventListener('pointermove', (event) => moveCursor(event.clientX, event.clientY), true);
+          document.addEventListener('pointerdown', (event) => {
+            moveCursor(event.clientX, event.clientY);
+            pulseClick(event.clientX, event.clientY);
+          }, true);
+          document.addEventListener('focusin', (event) => {
+            const target = event.target;
+            if (target && target.matches && target.matches('input, textarea, select, [contenteditable="true"]')) {
+              target.classList.add('manual-input-focus');
+              window.__manualMoveCursorToElement(target);
+            }
+          }, true);
+          document.addEventListener('focusout', (event) => {
+            const target = event.target;
+            if (target && target.classList) target.classList.remove('manual-input-focus');
+          }, true);
+        }
+        ensureCursor();
+        })();
         """
     )
 

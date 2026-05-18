@@ -16,6 +16,7 @@ from backend.app.pipeline import (
     _execute_browser_agent_actions,
     _handle_login,
     _install_manual_login_signal,
+    _inject_recording_helpers,
     _make_dirs,
     _playwright_launch_kwargs,
     _prepare_capture_page,
@@ -955,6 +956,29 @@ def test_capture_action_status_reports_login_required_separately():
 
     assert status == "degraded"
     assert reason == "login_required"
+
+
+def test_recording_helpers_include_cursor_click_and_input_focus_overlays():
+    calls = {"styles": [], "scripts": []}
+
+    class FakePage:
+        def add_style_tag(self, content):
+            calls["styles"].append(content)
+
+        def evaluate(self, script, *args):
+            calls["scripts"].append(script)
+
+    _inject_recording_helpers(FakePage())
+
+    style = "\n".join(calls["styles"])
+    script = "\n".join(calls["scripts"])
+    assert ".manual-cursor" in style
+    assert ".manual-click-ripple" in style
+    assert ".manual-input-focus" in style
+    assert "__manualMoveCursorToElement" in script
+    assert "__manualFocusByLabel" in script
+    assert "__manualPulseClick" in script
+    assert "focusin" in script
 
 
 def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configured(tmp_path):
