@@ -42,7 +42,7 @@ def extract_input_values(
             if settings.llm.is_configured
             else _extract_locally(request)
         )
-        source = "internal-llm" if settings.llm.is_configured else "local-deterministic"
+        source = settings.llm.source_label if settings.llm.is_configured else "local-deterministic"
     except Exception as exc:  # noqa: BLE001 - local extraction keeps the pipeline usable.
         extracted_values = _extract_locally(request)
         source = "local-deterministic-fallback"
@@ -69,11 +69,7 @@ def _extract_with_llm(
 ) -> dict[str, str]:
     post = post_json if http_post is None else http_post
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.llm.api_key}",
-        **settings.llm.default_headers(),
-    }
+    headers = settings.llm.chat_headers()
     payload = {
         "model": settings.llm.model,
         "messages": [

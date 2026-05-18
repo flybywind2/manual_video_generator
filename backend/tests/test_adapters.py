@@ -277,6 +277,136 @@ def test_browser_agent_blocks_web_search_toggle_clicks():
     assert action["texts"] == ["Web Search"]
 
 
+def test_browser_agent_uses_last_json_object_when_model_self_corrects():
+    request = PipelineInput(
+        request_text="Genspark AI Chat에 질문 입력",
+        target_url="https://www.genspark.ai/agents?type=ai_chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:31b-cloud",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "```json\n"
+                            "{\"type\":\"click_by_text\",\"texts\":[\"Enter\"],\"reason\":\"전송\"}\n"
+                            "```\n"
+                            "Correction: 버튼이 없으니 대기합니다.\n"
+                            "```json\n"
+                            "{\"type\":\"wait\",\"timeout_ms\":3000,\"reason\":\"답변 대기\"}\n"
+                            "```"
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"fields": [{"label": "무엇이든 물어보고 만들어보세요"}]},
+        history=[],
+        step_index=2,
+        http_post=fake_post,
+    )
+
+    assert action["status"] == "ok"
+    assert action["type"] == "wait"
+    assert action["timeout_ms"] == 3000
+    assert action["reason"] == "답변 대기"
+
+
+def test_browser_agent_allows_enter_key_for_chat_submission():
+    request = PipelineInput(
+        request_text="Genspark AI Chat에 질문 입력 후 전송",
+        target_url="https://www.genspark.ai/agents?type=ai_chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:31b-cloud",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "press_key", "key": "Enter", "reason": "채팅 질문을 전송합니다."},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"fields": [{"label": "무엇이든 물어보고 만들어보세요", "value": "st.form과 st.input 차이"}]},
+        history=[{"step": 1, "type": "fill_by_label", "status": "ok"}],
+        step_index=2,
+        http_post=fake_post,
+    )
+
+    assert action["status"] == "ok"
+    assert action["type"] == "press_key"
+    assert action["key"] == "Enter"
+
+
+def test_browser_agent_stops_when_login_modal_blocks_target():
+    request = PipelineInput(
+        request_text="Genspark AI Chat에 질문 입력 후 답변 확인",
+        target_url="https://www.genspark.ai/agents?type=ai_chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:31b-cloud",
+        }
+    )
+
+    def fail_post(url, headers, payload, timeout_seconds):
+        raise AssertionError("login blocker should be handled before calling LLM")
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"body_text": "로그인 또는 회원가입 Google로 계속하기 Apple로 계속하기"},
+        history=[],
+        step_index=3,
+        http_post=fail_post,
+    )
+
+    assert action["status"] == "blocked"
+    assert action["type"] == "finish"
+    assert action["reason"] == "login_required"
+
+
 def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     request = PipelineInput(
         request_text="MES에서 LOT 조회 방법 영상 만들기",
@@ -353,6 +483,52 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     assert '"component": "planner"' in terminal_log_text
     assert "LLM 생성 단계" in terminal_log_text
     assert "LLM 생성 단계" in llm_log_text
+
+
+def test_internal_planner_calls_ollama_openai_endpoint_without_internal_headers(tmp_path: Path):
+    request = PipelineInput(
+        request_text="Genspark AI Chat에서 질문 입력 후 답변 확인",
+        target_url="https://www.genspark.ai/agents?type=ai_chat",
+        role="사용자",
+        completion_condition="답변이 보이면 완료",
+        input_values={"프롬프트": "st.form과 st.input의 입력 차이점을 알려줘"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:31b-cloud",
+            "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "300",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout_seconds})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "steps": [{"id": "step_ask", "title": "질문 입력", "caption": "질문을 입력합니다.", "narration": "질문을 입력합니다."}],
+                                "actions": [{"id": "a1", "type": "capture_step", "step_id": "step_ask"}],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert plan["source"] == "ollama-llm-planner"
+    assert calls[0]["url"] == "http://127.0.0.1:11434/v1/chat/completions"
+    assert calls[0]["payload"]["model"] == "gemma4:31b-cloud"
+    assert calls[0]["headers"] == {"Content-Type": "application/json", "Accept": "application/json"}
+    assert calls[0]["timeout"] == 300
 
 
 def test_internal_planner_replaces_web_search_toggle_click_with_capture_step(tmp_path: Path):

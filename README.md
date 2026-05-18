@@ -359,6 +359,7 @@ MANUAL_AGENT_DEP_TICKET
 MANUAL_AGENT_SEND_SYSTEM_NAME
 MANUAL_AGENT_USER_ID
 MANUAL_AGENT_USER_TYPE
+MANUAL_AGENT_LLM_PROVIDER
 MANUAL_AGENT_LLM_BASE_URL
 MANUAL_AGENT_LLM_MODEL
 MANUAL_AGENT_ENABLE_INTERNAL_PLANNER
@@ -432,6 +433,18 @@ MANUAL_AGENT_ENABLE_OPENCODE=true
 VRAM 6GB에서 MeloTTS가 OOM을 내면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
 
 설정 변경 후 앱을 재시작합니다.
+
+Ollama OpenAI-compatible endpoint를 내부 planner/browser agent LLM으로 사용할 때는 다음처럼 설정합니다. Ollama provider는 `base_url`과 `model`만으로 configured 상태가 되며, 사내 `x-dep-ticket`, `User-Id` 헤더를 보내지 않습니다.
+
+```env
+MANUAL_AGENT_LLM_PROVIDER=ollama
+MANUAL_AGENT_LLM_BASE_URL=http://127.0.0.1:11434/v1
+MANUAL_AGENT_LLM_MODEL=gemma4:31b-cloud
+MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
+MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
+MANUAL_AGENT_LLM_TIMEOUT_SECONDS=300
+MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
+```
 
 내부 LLM 추론이 오래 걸려 planner가 timeout fallback으로 빠지면 `MANUAL_AGENT_LLM_TIMEOUT_SECONDS=300`처럼 LLM 전용 timeout만 늘립니다. `MANUAL_AGENT_REQUEST_TIMEOUT_SECONDS`는 RAG, Reranker, MCP 같은 비-LLM 어댑터의 공통 timeout이므로 무작정 크게 올리지 않는 편이 좋습니다.
 

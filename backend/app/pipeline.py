@@ -1593,6 +1593,8 @@ def _capture_action_log_status(action_log: list[dict[str, Any]], *, failed_reaso
         if status == "failed":
             return "degraded", failed_reason
         if status in {"blocked", "degraded"}:
+            if reason == "login_required":
+                return "degraded", "login_required"
             return "degraded", failed_reason
         if status == "skipped" and reason not in ignored_skips:
             return "degraded", failed_reason
@@ -1684,6 +1686,12 @@ def _execute_single_browser_agent_action(
             _apply_step_overlay(page, step, action)
             method = _click_by_text(page, _action_text_candidates(action))
             log_entry["method"] = method
+            page.wait_for_timeout(700)
+        elif action_type == "press_key":
+            _apply_step_overlay(page, step, action)
+            key = str(action.get("key") or "Enter")
+            page.keyboard.press(key)
+            log_entry["key"] = key
             page.wait_for_timeout(700)
         elif action_type == "wait":
             page.wait_for_timeout(_action_timeout(action, default=1000))

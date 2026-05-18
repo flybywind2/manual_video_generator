@@ -34,11 +34,11 @@ def build_plan(
         return plan
 
     post = post_json if http_post is None else http_post
-    trace: dict[str, Any] = {"planner": "internal-llm", "rag": None, "reranker": None}
+    trace: dict[str, Any] = {"planner": settings.llm.source_label, "rag": None, "reranker": None}
     try:
         context_docs = _retrieve_context(request, settings, post, trace)
         plan = _call_llm_planner(request, settings, context_docs, post, package_dir=package_dir)
-        plan["source"] = "internal-llm-planner"
+        plan["source"] = f"{settings.llm.source_label}-planner"
         plan["config_status"] = settings.safe_status()
         plan["planner_trace"] = trace
         _write_trace(package_dir, trace)
@@ -226,11 +226,7 @@ def _call_llm_planner(
     package_dir: Path | None,
 ) -> dict[str, Any]:
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.llm.api_key}",
-        **settings.llm.default_headers(),
-    }
+    headers = settings.llm.chat_headers()
     payload = {
         "model": settings.llm.model,
         "messages": [

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 def test_env_example_includes_llm_browser_agent_toggles():
     env_example = Path(".env.example").read_text(encoding="utf-8")
 
+    assert "MANUAL_AGENT_LLM_PROVIDER=" in env_example
     assert "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=" in env_example
     assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
     assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
@@ -120,6 +121,28 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert headers["Prompt-Msg-Id"]
     assert headers["Completion-Msg-Id"]
     assert headers["Accept"] == "application/json"
+
+
+def test_ollama_llm_provider_uses_openai_compatible_endpoint_without_internal_headers():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:31b-cloud",
+        }
+    )
+
+    assert settings.llm.provider == "ollama"
+    assert settings.llm.is_configured is True
+    assert settings.llm.base_url == "http://127.0.0.1:11434/v1"
+    assert settings.llm.model == "gemma4:31b-cloud"
+    headers = settings.llm.chat_headers()
+    assert headers == {"Content-Type": "application/json", "Accept": "application/json"}
+    status = settings.safe_status()
+    assert status["llm"]["configured"] is True
+    assert status["llm"]["provider"] == "ollama"
+    assert status["llm"]["api_key_set"] is False
+    assert status["llm"]["dep_ticket_set"] is False
 
 
 def test_settings_status_does_not_expose_secret_values(tmp_path: Path):

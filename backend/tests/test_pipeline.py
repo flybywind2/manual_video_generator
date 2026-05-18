@@ -10,6 +10,7 @@ from backend.app.config import load_settings
 from backend.app.pipeline import (
     PipelineInput,
     _authenticate_before_recording,
+    _capture_action_log_status,
     _capture_with_playwright,
     _execute_capture_actions,
     _execute_browser_agent_actions,
@@ -903,6 +904,57 @@ def test_execute_browser_agent_actions_observes_page_and_executes_llm_actions(tm
         "click_by_text",
         "finish",
     ]
+
+
+def test_execute_browser_agent_actions_can_press_enter_key(tmp_path):
+    events = []
+
+    class FakeKeyboard:
+        def press(self, key):
+            events.append(("press", key))
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def evaluate(self, script, *args):
+            return {"url": "https://www.genspark.ai/agents?type=ai_chat", "fields": [], "clickables": []}
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("style",))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="Genspark AI Chat에 질문 입력 후 전송",
+        target_url="https://www.genspark.ai/agents?type=ai_chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true", "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "1"})
+
+    def decide_next(request, settings, observation, history, step_index):
+        return {"status": "ok", "type": "press_key", "key": "Enter", "reason": "채팅 질문 전송"}
+
+    result = _execute_browser_agent_actions(FakePage(), request, {"actions": []}, tmp_path, settings, decide_next=decide_next)
+
+    assert ("press", "Enter") in events
+    assert result["action_log"][0]["type"] == "press_key"
+    assert result["action_log"][0]["status"] == "ok"
+
+
+def test_capture_action_status_reports_login_required_separately():
+    status, reason = _capture_action_log_status(
+        [{"type": "finish", "status": "blocked", "reason": "login_required"}],
+        failed_reason="browser_agent_action_failed",
+    )
+
+    assert status == "degraded"
+    assert reason == "login_required"
 
 
 def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configured(tmp_path):

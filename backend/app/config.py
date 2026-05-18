@@ -12,6 +12,7 @@ APP_PREFIX = "MANUAL_AGENT_"
 
 @dataclass(frozen=True)
 class OpenAiCompatibleSettings:
+    provider: str
     api_key: str
     base_url: str
     model: str
@@ -22,6 +23,10 @@ class OpenAiCompatibleSettings:
 
     @property
     def is_configured(self) -> bool:
+        if self.provider in {"ollama", "generic"}:
+            return all([self.base_url, self.model])
+        if self.provider == "openai":
+            return all([self.api_key, self.base_url, self.model])
         return all(
             [
                 self.api_key,
@@ -34,20 +39,38 @@ class OpenAiCompatibleSettings:
             ]
         )
 
+    @property
+    def source_label(self) -> str:
+        return "internal-llm" if self.provider == "internal" else f"{self.provider}-llm"
+
     def default_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "application/json",
-            "x-dep-ticket": self.dep_ticket,
-            "Send-System-Name": self.send_system_name,
-            "User-Id": self.user_id,
-            "User-Type": self.user_type,
-            "Prompt-Msg-Id": str(uuid.uuid4()),
-            "Completion-Msg-Id": str(uuid.uuid4()),
+        headers = {"Accept": "application/json"}
+        if self.provider == "internal":
+            headers.update(
+                {
+                    "x-dep-ticket": self.dep_ticket,
+                    "Send-System-Name": self.send_system_name,
+                    "User-Id": self.user_id,
+                    "User-Type": self.user_type,
+                    "Prompt-Msg-Id": str(uuid.uuid4()),
+                    "Completion-Msg-Id": str(uuid.uuid4()),
+                }
+            )
+        return headers
+
+    def chat_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            **self.default_headers(),
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def safe_status(self) -> dict[str, bool | str]:
         return {
             "configured": self.is_configured,
+            "provider": self.provider,
             "base_url_set": bool(self.base_url),
             "model": self.model,
             "dep_ticket_set": bool(self.dep_ticket),
@@ -228,6 +251,7 @@ def load_settings(
     openai_api_key = _get(env, "OPENAI_API_KEY")
 
     llm = OpenAiCompatibleSettings(
+        provider=_normalize_llm_provider(_get(env, "LLM_PROVIDER", "internal")),
         api_key=openai_api_key,
         base_url=_get(env, "LLM_BASE_URL"),
         model=_get(env, "LLM_MODEL", "QWEN3"),
@@ -237,6 +261,7 @@ def load_settings(
         user_type=user_type,
     )
     vlm = OpenAiCompatibleSettings(
+        provider=_normalize_llm_provider(_get(env, "VLM_PROVIDER", "internal")),
         api_key=_get(env, "VLM_API_KEY", openai_api_key),
         base_url=_get(env, "VLM_BASE_URL"),
         model=_get(env, "VLM_MODEL", "QWEN3-VL"),
@@ -342,6 +367,13 @@ def _get_bool(env: Mapping[str, str], suffix: str, default: bool) -> bool:
     if not value:
         return default
     return value.lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _normalize_llm_provider(value: str) -> str:
+    provider = value.strip().lower()
+    if provider in {"ollama", "openai", "generic"}:
+        return provider
+    return "internal"
 
 
 def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:
