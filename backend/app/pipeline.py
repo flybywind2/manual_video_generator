@@ -933,6 +933,7 @@ def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
             log["completion_signal"] = "selector"
         else:
             log["completion_signal"] = "unknown"
+        _remove_manual_login_signal(page)
     except Exception as exc:  # noqa: BLE001 - keep the package inspectable when manual login times out.
         log["status"] = "failed"
         log["error"] = f"{type(exc).__name__}: {exc}"
@@ -944,6 +945,18 @@ def _install_manual_login_signal(page: Any) -> None:
     (() => {
       window.__manualLoginCompleted = window.__manualLoginCompleted === true;
       const selector = '[data-manual-login-signal="true"]';
+      window.__manualLoginCleanup = () => {
+        const button = document.querySelector(selector);
+        if (button) button.remove();
+        if (window.__manualLoginSignalObserver) {
+          window.__manualLoginSignalObserver.disconnect();
+          window.__manualLoginSignalObserver = null;
+        }
+        if (window.__manualLoginSignalInterval) {
+          window.clearInterval(window.__manualLoginSignalInterval);
+          window.__manualLoginSignalInterval = null;
+        }
+      };
       const markCompleted = (button) => {
         if (!button) return;
         button.textContent = '완료 신호 전송됨';
@@ -954,6 +967,7 @@ def _install_manual_login_signal(page: Any) -> None:
       window.__manualLoginSignal = () => {
         window.__manualLoginCompleted = true;
         markCompleted(document.querySelector(selector));
+        window.setTimeout(window.__manualLoginCleanup, 120);
       };
       const install = () => {
         if (!document.body) return false;
@@ -1008,6 +1022,21 @@ def _install_manual_login_signal(page: Any) -> None:
     """
     page.add_init_script(script)
     page.evaluate(script)
+
+
+def _remove_manual_login_signal(page: Any) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              if (typeof window.__manualLoginCleanup === 'function') {
+                window.__manualLoginCleanup();
+              }
+            }
+            """
+        )
+    except Exception:
+        pass
 
 
 def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any]:

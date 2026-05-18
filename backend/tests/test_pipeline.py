@@ -712,6 +712,33 @@ def test_manual_login_installs_completion_button_and_waits_for_signal():
     }
 
 
+def test_manual_login_removes_signal_button_after_completion():
+    calls = []
+
+    class FakePage:
+        def add_init_script(self, script):
+            calls.append(("add_init_script", script))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", script, args))
+            return {"completed": True, "successSelectorMatched": False}
+
+        def wait_for_function(self, expression, *, arg=None, timeout):
+            calls.append(("wait_for_function", expression, arg, timeout))
+
+    login = {
+        "mode": "manual",
+        "success_selector": "",
+        "manual_timeout_ms": 90000,
+        "credentials_timeout_ms": 30000,
+    }
+
+    log = _handle_login(FakePage(), login)
+
+    assert log["status"] == "ok"
+    assert any("__manualLoginCleanup" in call[1] for call in calls if call[0] == "evaluate")
+
+
 def test_install_manual_login_signal_adds_persistent_button_script():
     calls = []
 
@@ -729,6 +756,9 @@ def test_install_manual_login_signal_adds_persistent_button_script():
     assert "로그인 완료" in calls[0][1]
     assert "MutationObserver" in calls[0][1]
     assert "setInterval" in calls[0][1]
+    assert "__manualLoginCleanup" in calls[0][1]
+    assert "clearInterval" in calls[0][1]
+    assert "disconnect()" in calls[0][1]
     assert calls[1][0] == "evaluate"
 
 
