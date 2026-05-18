@@ -872,7 +872,7 @@ def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
               }
             }
             """,
-            success_selector,
+            arg=success_selector,
             timeout=timeout_ms,
         )
         state = page.evaluate(

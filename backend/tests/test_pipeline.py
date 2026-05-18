@@ -650,8 +650,8 @@ def test_manual_login_waits_for_success_selector_without_credentials():
             calls.append(("evaluate", "manualLoginSignal" in script, args))
             return {"completed": False, "successSelectorMatched": True}
 
-        def wait_for_function(self, expression, selector, timeout):
-            calls.append(("wait_for_function", "manualLoginCompleted" in expression, selector, timeout))
+        def wait_for_function(self, expression, *, arg=None, timeout):
+            calls.append(("wait_for_function", "manualLoginCompleted" in expression, arg, timeout))
 
     login = {
         "mode": "manual",
@@ -685,8 +685,8 @@ def test_manual_login_installs_completion_button_and_waits_for_signal():
             calls.append(("evaluate", "manualLoginSignal" in script, args))
             return {"completed": True, "successSelectorMatched": False}
 
-        def wait_for_function(self, expression, selector, timeout):
-            calls.append(("wait_for_function", "manualLoginCompleted" in expression, selector, timeout))
+        def wait_for_function(self, expression, *, arg=None, timeout):
+            calls.append(("wait_for_function", "manualLoginCompleted" in expression, arg, timeout))
 
     login = {
         "mode": "manual",
@@ -810,9 +810,9 @@ def test_authenticate_before_recording_does_not_return_storage_when_manual_login
         def wait_for_load_state(self, state, timeout):
             calls.append(("wait_for_load_state", state, timeout))
 
-        def wait_for_function(self, *args, **kwargs):
-            calls.append(("wait_for_function", args, kwargs))
-            if len(args) >= 2 and "manualLoginCompleted" in args[0]:
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            calls.append(("wait_for_function", expression, arg, timeout))
+            if "manualLoginCompleted" in expression:
                 raise TimeoutError("manual login was not confirmed")
 
         def add_style_tag(self, content):
