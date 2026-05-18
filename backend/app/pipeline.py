@@ -299,6 +299,11 @@ def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: b
     }
 
 
+def _requires_login_before_mcp_rehearsal(request: PipelineInput, settings: Any) -> bool:
+    login = _resolve_login_options(request, settings)
+    return str(login.get("mode") or "none").lower() in {"manual", "credentials"}
+
+
 def _environment_terminal_details(environment: dict[str, str]) -> dict[str, Any]:
     return {
         "python_version": environment.get("python_version", ""),
@@ -414,7 +419,14 @@ def run_pipeline(
             "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
         },
     )
-    rehearsal = rehearse_plan(plan, settings, dirs.package)
+    defer_mcp_live = _requires_login_before_mcp_rehearsal(effective_request, settings)
+    rehearsal = rehearse_plan(
+        plan,
+        settings,
+        dirs.package,
+        allow_live=not defer_mcp_live,
+        deferred_reason="login_required" if defer_mcp_live else "",
+    )
     artifact_rehearsal = redact_sensitive(rehearsal)
     _record_stage(
         audit,
@@ -428,6 +440,7 @@ def run_pipeline(
         terminal_details={
             "playwright_mcp_mode": settings.playwright_mcp_mode,
             "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+            "deferred_until_login": defer_mcp_live,
         },
     )
     _write_json(dirs.package / "request.json", request_payload)
@@ -571,7 +584,14 @@ def create_pipeline_draft(
             "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
         },
     )
-    rehearsal = rehearse_plan(plan, settings, dirs.package)
+    defer_mcp_live = _requires_login_before_mcp_rehearsal(effective_request, settings)
+    rehearsal = rehearse_plan(
+        plan,
+        settings,
+        dirs.package,
+        allow_live=not defer_mcp_live,
+        deferred_reason="login_required" if defer_mcp_live else "",
+    )
     artifact_rehearsal = redact_sensitive(rehearsal)
     _record_stage(
         audit,
@@ -585,6 +605,7 @@ def create_pipeline_draft(
         terminal_details={
             "playwright_mcp_mode": settings.playwright_mcp_mode,
             "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+            "deferred_until_login": defer_mcp_live,
         },
     )
     _write_json(dirs.package / "request.json", request_payload)
@@ -2274,7 +2295,7 @@ def _rehearsal_audit_status(rehearsal: dict[str, Any]) -> str:
     status = str(rehearsal.get("status", ""))
     if status.endswith("failed"):
         return "degraded"
-    if status in {"skipped", "manifest-only"}:
+    if status in {"skipped", "manifest-only", "deferred-until-authenticated"}:
         return "skipped"
     return "ok"
 

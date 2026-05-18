@@ -226,6 +226,34 @@ def test_pipeline_draft_api_stops_at_plan_review_without_capture_outputs(tmp_pat
     assert not (package_dir / "manual_video_agent_usage.webm").exists()
 
 
+def test_pipeline_draft_defers_live_mcp_when_login_is_required(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("MANUAL_AGENT_PLAYWRIGHT_MCP_MODE", "live")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/pipeline/draft?capture_browser=false",
+        json={
+            "request_text": "사내 chatbot 서비스에 프롬프트를 입력하고 응답 결과를 확인",
+            "target_url": "http://internal.example.local/chat",
+            "role": "사용자",
+            "completion_condition": "답변이 보이면 완료",
+            "login_mode": "manual",
+            "input_values": {"프롬프트": "사내 휴가 규정을 요약해줘"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rehearsal"]["status"] == "deferred-until-authenticated"
+    assert body["rehearsal"]["executed"] is False
+    assert body["rehearsal"]["deferred_reason"] == "login_required"
+
+    package_dir = Path(body["package_dir"])
+    assert (package_dir / "playwright_mcp_calls.json").exists()
+    assert not (package_dir / "playwright_mcp_execution.json").exists()
+
+
 def test_pipeline_continue_api_runs_after_draft_plan_review(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
     client = TestClient(app)

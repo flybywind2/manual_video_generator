@@ -17,6 +17,8 @@ def rehearse_plan(
     settings: AppSettings,
     package_dir: Path,
     *,
+    allow_live: bool = True,
+    deferred_reason: str = "",
     mcp_client_factory: McpClientFactory | None = None,
 ) -> dict[str, Any]:
     actions = [action for action in plan.get("actions", []) if isinstance(action, dict)]
@@ -33,6 +35,10 @@ def rehearse_plan(
     if mode in {"off", "disabled", "none"}:
         status = "skipped"
         adapter = "playwright-mcp-disabled"
+    elif mode == "live" and not allow_live:
+        status = "deferred-until-authenticated"
+        adapter = "playwright-mcp-live-deferred"
+        requires_live_mode = True
     elif mode == "live":
         return _run_live_mcp(plan, settings, package_dir, calls, artifact_calls, calls_path, mcp_client_factory)
     else:
@@ -50,11 +56,20 @@ def rehearse_plan(
         "command": settings.playwright_mcp_command if mode != "off" else "",
         "calls_path": str(calls_path),
         "observations": [
-            "Playwright MCP 후보 tool call manifest만 생성했습니다.",
-            "실제 브라우저 리허설은 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live에서만 실행됩니다.",
+            (
+                "로그인 완료 전이라 Playwright MCP live 실행은 지연하고 후보 tool call manifest만 생성했습니다."
+                if status == "deferred-until-authenticated"
+                else "Playwright MCP 후보 tool call manifest만 생성했습니다."
+            ),
+            (
+                "로그인 세션이 필요한 대상은 인증 후 캡처 단계에서 실행해야 합니다."
+                if status == "deferred-until-authenticated"
+                else "실제 브라우저 리허설은 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live에서만 실행됩니다."
+            ),
         ],
         "checked_actions": [action.get("id", "") for action in actions],
         "candidate_calls": artifact_calls,
+        "deferred_reason": deferred_reason if status == "deferred-until-authenticated" else "",
     }
 
 

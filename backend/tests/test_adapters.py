@@ -658,6 +658,44 @@ def test_playwright_mcp_live_mode_executes_semantic_planner_actions(tmp_path: Pa
     assert execution["executed_actions"] == 4
 
 
+def test_playwright_mcp_live_mode_can_be_deferred_until_after_login(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
+    plan = {
+        "steps": [{"id": "step_chat", "title": "챗봇", "caption": "챗봇", "narration": "챗봇"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://internal.example.local/chat", "step_id": "step_chat"},
+            {"id": "a2", "type": "fill_by_label", "label": "프롬프트", "value": "테스트", "step_id": "step_chat"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            calls.append("entered")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    result = rehearse_plan(
+        plan,
+        settings,
+        tmp_path,
+        allow_live=False,
+        deferred_reason="login_required",
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "deferred-until-authenticated"
+    assert result["mode"] == "live"
+    assert result["executed"] is False
+    assert result["requires_live_mode"] is True
+    assert result["deferred_reason"] == "login_required"
+    assert calls == []
+    assert (tmp_path / "playwright_mcp_calls.json").exists()
+    assert not (tmp_path / "playwright_mcp_execution.json").exists()
+
+
 def test_playwright_mcp_manifest_mode_is_explicitly_not_rehearsed(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
     plan = {
