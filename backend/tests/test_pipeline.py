@@ -177,6 +177,26 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert "playwright_browsers_path" in manifest["environment"]
 
 
+def test_audit_log_records_runtime_tool_usage_events(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="포털 권한 신청 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="신청자",
+            completion_condition="신청 완료 화면",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    events = [json.loads(line) for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()]
+    tools = {event["details"].get("tool") for event in events if event["actor"] == "tool"}
+
+    assert {"llm", "playwright-python", "playwright-mcp", "ffmpeg", "tts", "hyperframes", "opencode"}.issubset(tools)
+    assert all(event["run_id"] == result.job_id for event in events if event["actor"] == "tool")
+
+
 def test_package_manifest_environment_fingerprint_does_not_include_secret_values(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret-key")
     monkeypatch.setenv("MANUAL_AGENT_DEP_TICKET", "credential:SECRET")
@@ -262,6 +282,29 @@ def test_pipeline_terminal_logs_all_stages_when_enabled_and_redacts_secrets(tmp_
     assert "123456" not in log_text
     assert "password" not in log_text.lower()
     assert "otp" not in log_text.lower()
+
+
+def test_pipeline_terminal_logs_runtime_tool_usage_when_enabled(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_ENABLE_TERMINAL_LOGS", "true")
+
+    run_pipeline(
+        PipelineInput(
+            request_text="포털 권한 신청 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="신청자",
+            completion_condition="신청 완료 화면",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    log_text = capsys.readouterr().err
+
+    for tool in ["llm", "playwright-python", "playwright-mcp", "ffmpeg", "tts", "hyperframes", "opencode"]:
+        assert '"actor": "tool"' in log_text
+        assert f'"tool": "{tool}"' in log_text
+    assert '"component": "runtime"' in log_text
 
 
 def test_generated_request_artifact_redacts_sensitive_input_values(tmp_path):

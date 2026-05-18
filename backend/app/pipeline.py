@@ -95,6 +95,162 @@ def _record_stage(
     return audit_event
 
 
+def _record_tool(
+    audit: AuditLog,
+    terminal: TerminalRunLogger,
+    *,
+    tool: str,
+    status: str,
+    details: dict[str, Any] | None = None,
+    degrade_reason: str = "",
+) -> dict[str, Any]:
+    event_details = {"component": "runtime", "tool": tool}
+    event_details.update(details or {})
+    return _record_stage(
+        audit,
+        terminal,
+        actor="tool",
+        step_id=tool,
+        status=status,
+        degrade_reason=degrade_reason,
+        details=event_details,
+        terminal_details=event_details,
+    )
+
+
+def _record_runtime_tool_inventory(
+    audit: AuditLog,
+    terminal: TerminalRunLogger,
+    *,
+    settings: Any,
+    environment: dict[str, str],
+    capture_browser: bool,
+) -> None:
+    _record_tool(
+        audit,
+        terminal,
+        tool="llm",
+        status="configured" if settings.llm.is_configured else "missing",
+        details={
+            "model": settings.llm.model,
+            "base_url_set": bool(settings.llm.base_url),
+            "api_key_set": bool(settings.llm.api_key),
+            "internal_planner_enabled": settings.enable_internal_planner,
+            "browser_agent_enabled": settings.enable_browser_agent,
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="rag",
+        status="configured" if settings.rag.is_configured else "missing",
+        details={
+            "enabled": settings.enable_rag_context,
+            "retrieve_url_set": bool(settings.rag.retrieve_url),
+            "index_name": settings.rag.index_name,
+            "permission_group_count": len(settings.rag.permission_groups),
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="reranker",
+        status="configured" if settings.reranker.is_configured else "missing",
+        details={
+            "enabled": settings.enable_reranker,
+            "url_set": bool(settings.reranker.url),
+            "model": settings.reranker.model,
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="playwright-python",
+        status="enabled" if capture_browser else "skipped",
+        details={
+            "capture_browser": capture_browser,
+            "browser_agent_enabled": settings.enable_browser_agent,
+            "executable_path_set": bool(settings.playwright_executable_path),
+            "playwright_browsers_path_set": bool(environment.get("playwright_browsers_path")),
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="playwright-mcp",
+        status=settings.playwright_mcp_mode.lower(),
+        details={
+            "mode": settings.playwright_mcp_mode,
+            "command_set": bool(settings.playwright_mcp_command),
+            "request_timeout_seconds": settings.request_timeout_seconds,
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="ffmpeg",
+        status=_tool_status_from_version(environment.get("ffmpeg_version", "")),
+        details={"version": environment.get("ffmpeg_version", "")},
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="node",
+        status=_tool_status_from_version(environment.get("node_version", "")),
+        details={"version": environment.get("node_version", "")},
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="npm",
+        status=_tool_status_from_version(environment.get("npm_version", "")),
+        details={"version": environment.get("npm_version", "")},
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="tts",
+        status=settings.tts_provider.lower(),
+        details={
+            "provider": settings.tts_provider,
+            "device": settings.tts_device,
+            "language": settings.tts_language,
+            "speaker": settings.tts_speaker,
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="hyperframes",
+        status="enabled" if settings.video_renderer.lower() == "hyperframes" else "skipped",
+        details={
+            "renderer": settings.video_renderer,
+            "command_set": bool(settings.hyperframes_command),
+            "skills_enabled": settings.enable_hyperframes_skills,
+            "skills_command_set": bool(settings.hyperframes_skills_command),
+        },
+    )
+    _record_tool(
+        audit,
+        terminal,
+        tool="opencode",
+        status="enabled" if settings.enable_opencode else "disabled",
+        details={
+            "command_set": bool(settings.opencode_command),
+            "agent_set": bool(settings.opencode_agent),
+            "model_set": bool(settings.opencode_model),
+            "timeout_seconds": settings.opencode_timeout_seconds,
+        },
+    )
+
+
+def _tool_status_from_version(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "missing", "error", "unknown"}:
+        return normalized or "missing"
+    return "available"
+
+
 def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: bool) -> dict[str, Any]:
     return {
         "output_dir": str(output_root),
@@ -161,6 +317,7 @@ def run_pipeline(
         output_data=environment,
         terminal_details=_environment_terminal_details(environment),
     )
+    _record_runtime_tool_inventory(audit, terminal, settings=settings, environment=environment, capture_browser=capture_browser)
     request_payload = redact_sensitive(request.model_dump())
 
     terminal.record(

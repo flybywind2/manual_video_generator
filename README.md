@@ -442,7 +442,7 @@ MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
 MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
 ```
 
-켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
+켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 또한 `actor="tool"` 로그로 `llm`, `rag`, `reranker`, `playwright-python`, `playwright-mcp`, `ffmpeg`, `node`, `npm`, `tts`, `hyperframes`, `opencode`의 사용/설정/가용 상태를 함께 남깁니다. 같은 tool 이벤트는 `audit_log.jsonl`에도 항상 기록됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
 
 설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
 
@@ -664,7 +664,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-83 passed
+85 passed
 ```
 
 ## 보안 및 운영 주의사항
