@@ -10,6 +10,7 @@ from backend.app.pipeline import (
     _authenticate_before_recording,
     _execute_capture_actions,
     _handle_login,
+    _install_manual_login_signal,
     _playwright_launch_kwargs,
     _prepare_capture_page,
     _resolve_login_options,
@@ -456,11 +457,15 @@ def test_manual_login_waits_for_success_selector_without_credentials():
     calls = []
 
     class FakePage:
-        def wait_for_selector(self, selector, timeout):
-            calls.append(("wait_for_selector", selector, timeout))
+        def add_init_script(self, script):
+            calls.append(("add_init_script", "로그인 완료" in script))
 
-        def wait_for_timeout(self, timeout):
-            calls.append(("wait_for_timeout", timeout))
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", "manualLoginSignal" in script, args))
+            return {"completed": False, "successSelectorMatched": True}
+
+        def wait_for_function(self, expression, selector, timeout):
+            calls.append(("wait_for_function", "manualLoginCompleted" in expression, selector, timeout))
 
     login = {
         "mode": "manual",
@@ -471,8 +476,70 @@ def test_manual_login_waits_for_success_selector_without_credentials():
 
     log = _handle_login(FakePage(), login)
 
-    assert calls == [("wait_for_selector", ".dashboard", 90000)]
-    assert log == {"type": "login", "mode": "manual", "status": "ok", "success_selector_set": True}
+    assert calls[0] == ("add_init_script", True)
+    assert calls[2] == ("wait_for_function", True, ".dashboard", 90000)
+    assert log == {
+        "type": "login",
+        "mode": "manual",
+        "status": "ok",
+        "success_selector_set": True,
+        "signal_button_enabled": True,
+        "completion_signal": "selector",
+    }
+
+
+def test_manual_login_installs_completion_button_and_waits_for_signal():
+    calls = []
+
+    class FakePage:
+        def add_init_script(self, script):
+            calls.append(("add_init_script", "manualLoginCompleted" in script and "로그인 완료" in script))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", "manualLoginSignal" in script, args))
+            return {"completed": True, "successSelectorMatched": False}
+
+        def wait_for_function(self, expression, selector, timeout):
+            calls.append(("wait_for_function", "manualLoginCompleted" in expression, selector, timeout))
+
+    login = {
+        "mode": "manual",
+        "success_selector": "",
+        "manual_timeout_ms": 90000,
+        "credentials_timeout_ms": 30000,
+    }
+
+    log = _handle_login(FakePage(), login)
+
+    assert calls[0] == ("add_init_script", True)
+    assert calls[1][0] == "evaluate"
+    assert calls[2] == ("wait_for_function", True, "", 90000)
+    assert log == {
+        "type": "login",
+        "mode": "manual",
+        "status": "ok",
+        "success_selector_set": False,
+        "signal_button_enabled": True,
+        "completion_signal": "button",
+    }
+
+
+def test_install_manual_login_signal_adds_persistent_button_script():
+    calls = []
+
+    class FakePage:
+        def add_init_script(self, script):
+            calls.append(("add_init_script", script))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", script, args))
+
+    _install_manual_login_signal(FakePage())
+
+    assert calls[0][0] == "add_init_script"
+    assert "manual-login-signal" in calls[0][1]
+    assert "로그인 완료" in calls[0][1]
+    assert calls[1][0] == "evaluate"
 
 
 def test_authenticate_before_recording_does_not_start_video_capture():

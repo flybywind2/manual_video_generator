@@ -20,6 +20,8 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert 'id="input-values"' in body
     assert 'name="login_mode"' in body
     assert 'name="login_success_selector"' in body
+    assert "로그인 완료 신호" in body
+    assert "로그인 완료 버튼" in body
     assert "직접 로그인" in body
     assert ".env ID/password" in body
     assert 'name="login_password"' not in body

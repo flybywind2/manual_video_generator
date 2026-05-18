@@ -536,16 +536,113 @@ def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
 def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
     success_selector = str(login.get("success_selector") or "").strip()
     timeout_ms = int(login.get("manual_timeout_ms") or 120000)
-    log = {"type": "login", "mode": "manual", "status": "ok", "success_selector_set": bool(success_selector)}
+    log = {
+        "type": "login",
+        "mode": "manual",
+        "status": "ok",
+        "success_selector_set": bool(success_selector),
+        "signal_button_enabled": True,
+    }
     try:
-        if success_selector:
-            page.wait_for_selector(success_selector, timeout=timeout_ms)
+        _install_manual_login_signal(page)
+        page.wait_for_function(
+            """
+            (selector) => {
+              if (window.__manualLoginCompleted === true) return true;
+              if (!selector) return false;
+              try {
+                const el = document.querySelector(selector);
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                return style && style.visibility !== 'hidden' && style.display !== 'none';
+              } catch {
+                return false;
+              }
+            }
+            """,
+            success_selector,
+            timeout=timeout_ms,
+        )
+        state = page.evaluate(
+            """
+            (selector) => {
+              const completed = window.__manualLoginCompleted === true;
+              let successSelectorMatched = false;
+              if (selector) {
+                try {
+                  const el = document.querySelector(selector);
+                  if (el) {
+                    const style = window.getComputedStyle(el);
+                    successSelectorMatched = style && style.visibility !== 'hidden' && style.display !== 'none';
+                  }
+                } catch {
+                  successSelectorMatched = false;
+                }
+              }
+              return { completed, successSelectorMatched };
+            }
+            """,
+            success_selector,
+        )
+        if isinstance(state, dict) and state.get("completed"):
+            log["completion_signal"] = "button"
+        elif isinstance(state, dict) and state.get("successSelectorMatched"):
+            log["completion_signal"] = "selector"
         else:
-            page.wait_for_timeout(timeout_ms)
+            log["completion_signal"] = "unknown"
     except Exception as exc:  # noqa: BLE001 - keep the package inspectable when manual login times out.
         log["status"] = "failed"
         log["error"] = f"{type(exc).__name__}: {exc}"
     return log
+
+
+def _install_manual_login_signal(page: Any) -> None:
+    script = """
+    (() => {
+      window.__manualLoginCompleted = window.__manualLoginCompleted === true;
+      window.__manualLoginSignal = () => {
+        window.__manualLoginCompleted = true;
+        const button = document.querySelector('[data-manual-login-signal="true"]');
+        if (button) {
+          button.textContent = '완료 신호 전송됨';
+          button.setAttribute('aria-label', '로그인 완료 신호 전송됨');
+          button.disabled = true;
+          button.style.opacity = '0.72';
+        }
+      };
+      const install = () => {
+        if (!document.body || document.querySelector('[data-manual-login-signal="true"]')) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '로그인 완료';
+        button.setAttribute('data-manual-login-signal', 'true');
+        button.setAttribute('aria-label', '로그인 완료 신호 전송');
+        button.style.cssText = [
+          'position:fixed',
+          'right:24px',
+          'bottom:24px',
+          'z-index:2147483647',
+          'border:0',
+          'border-radius:8px',
+          'padding:14px 18px',
+          'background:#245BFF',
+          'color:#fff',
+          'font:800 15px/1.2 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+          'box-shadow:0 18px 48px rgba(17,24,39,.24)',
+          'cursor:pointer'
+        ].join(';');
+        button.addEventListener('click', window.__manualLoginSignal);
+        document.body.appendChild(button);
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', install, { once: true });
+      } else {
+        install();
+      }
+    })();
+    """
+    page.add_init_script(script)
+    page.evaluate(script)
 
 
 def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any]:

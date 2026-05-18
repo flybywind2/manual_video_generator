@@ -277,10 +277,12 @@ http://127.0.0.1:8000/sample
 로그인 방식은 작업마다 선택할 수 있습니다.
 
 - `로그인 없음`: 기본값입니다. 로그인 페이지가 없는 샘플 또는 이미 접근 가능한 URL에 사용합니다.
-- `직접 로그인`: Playwright가 headed 브라우저를 띄우고 사용자가 직접 로그인합니다. `로그인 완료 selector`를 지정하면 해당 요소가 보일 때까지 기다립니다. selector가 없으면 `.env`의 `MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS` 시간만큼 기다립니다.
+- `직접 로그인`: Playwright가 headed 브라우저를 띄우고 사용자가 직접 로그인합니다. 로그인 브라우저 오른쪽 아래에 `로그인 완료` 버튼이 표시되며, 사용자가 이 버튼을 누르면 다음 단계로 넘어갑니다. `로그인 완료 selector`를 지정하면 selector가 보이거나 버튼을 누르는 것 중 먼저 만족된 신호를 사용합니다.
 - `.env ID/password`: `.env`에 저장한 ID/password와 selector를 사용해 로그인 폼을 자동 입력합니다. 비밀번호 원문은 UI, `/api/config/status`, request artifact, audit log, capture action log에 기록하지 않습니다.
 
 직접 로그인은 OTP, SSO, 사내 인증 앱처럼 자동 입력하면 안 되는 흐름에 사용합니다. ID/password 자동 입력은 테스트 계정이나 승인된 자동화 계정에서만 사용합니다.
+
+수동 로그인 브라우저는 녹화하지 않습니다. 로그인 완료 신호를 받은 뒤 저장된 세션 상태만 녹화 브라우저로 넘겨 실제 매뉴얼 영상 캡처를 시작합니다.
 
 ## 산출물 구조
 
@@ -424,6 +426,8 @@ MANUAL_AGENT_LOGIN_MODE=manual
 MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.main-dashboard
 MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
 ```
+
+`MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR`를 비워도 수동 로그인 브라우저의 `로그인 완료` 버튼으로 진행할 수 있습니다.
 
 설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
 
@@ -645,7 +649,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-66 passed
+68 passed
 ```
 
 ## 보안 및 운영 주의사항
