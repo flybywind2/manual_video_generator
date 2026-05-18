@@ -64,6 +64,24 @@ def test_static_app_exposes_review_artifact_links():
     assert "setWorkflowStep(1)" in body
     assert "setWorkflowStep(5)" in body
     assert "is-complete" in body
+    assert "openArtifactEditor" in body
+    assert "saveArtifactEditor" in body
+    assert "isTextArtifact" in body
+    assert "/api/artifacts/text/" in body
+
+
+def test_home_screen_includes_text_artifact_editor_modal():
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'id="artifact-editor-modal"' in body
+    assert 'id="artifact-editor-text"' in body
+    assert 'data-action="save-artifact-editor"' in body
+    assert 'data-action="close-artifact-editor"' in body
+    assert "텍스트 산출물 편집" in body
 
 
 def test_static_app_marks_local_disabled_and_none_config_as_neutral_not_missing():

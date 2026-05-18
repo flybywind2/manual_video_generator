@@ -238,6 +238,26 @@
       </main>
     </div>
 
+    <div class="modal-backdrop" id="artifact-editor-modal" hidden>
+      <section class="artifact-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-editor-title">
+        <header class="artifact-editor-header">
+          <div>
+            <h2 id="artifact-editor-title">텍스트 산출물 편집</h2>
+            <p id="artifact-editor-path">산출물을 불러오는 중입니다.</p>
+          </div>
+          <button class="icon-button" type="button" data-action="close-artifact-editor" aria-label="편집 창 닫기">×</button>
+        </header>
+        <textarea id="artifact-editor-text" spellcheck="false" aria-label="텍스트 산출물 내용"></textarea>
+        <footer class="artifact-editor-footer">
+          <span id="artifact-editor-status"></span>
+          <div>
+            <a class="button secondary" id="artifact-editor-open-link" href="#" target="_blank" rel="noreferrer">새 탭</a>
+            <button class="button primary" type="button" data-action="save-artifact-editor">저장</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
     <script src="/static/app.js"></script>
   </body>
 </html>

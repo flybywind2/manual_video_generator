@@ -349,6 +349,52 @@ def test_artifact_route_rejects_path_traversal(tmp_path, monkeypatch):
     assert response.status_code == 404
 
 
+def test_text_artifact_api_allows_editing_generated_markdown(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    relative_path = result.artifacts.markdown_manual.relative_to(tmp_path).as_posix()
+    client = TestClient(app)
+
+    read_response = client.get(f"/api/artifacts/text/{relative_path}")
+    save_response = client.put(f"/api/artifacts/text/{relative_path}", json={"content": "# 수정된 매뉴얼\n\n사용자 편집본"})
+
+    assert read_response.status_code == 200
+    assert read_response.json()["editable"] is True
+    assert "MES에서 LOT 조회" in read_response.json()["content"]
+    assert save_response.status_code == 200
+    assert result.artifacts.markdown_manual.read_text(encoding="utf-8") == "# 수정된 매뉴얼\n\n사용자 편집본"
+
+
+def test_text_artifact_api_rejects_non_text_and_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    video_path = result.artifacts.video.relative_to(tmp_path).as_posix()
+    client = TestClient(app)
+
+    assert client.get(f"/api/artifacts/text/{video_path}").status_code == 415
+    assert client.get("/api/artifacts/text/%2e%2e/README.md").status_code == 404
+
+
 def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_TTS_PROVIDER", "melotts")
     result = run_pipeline(

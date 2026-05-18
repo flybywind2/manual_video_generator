@@ -9,11 +9,19 @@ const submitButton = form?.querySelector("button[type='submit']");
 const configGrid = document.querySelector("#config-grid");
 const inputValues = document.querySelector("#input-values");
 const inputValueList = inputValues?.querySelector("[data-input-value-list]");
+const artifactEditorModal = document.querySelector("#artifact-editor-modal");
+const artifactEditorText = document.querySelector("#artifact-editor-text");
+const artifactEditorTitle = document.querySelector("#artifact-editor-title");
+const artifactEditorPath = document.querySelector("#artifact-editor-path");
+const artifactEditorStatus = document.querySelector("#artifact-editor-status");
+const artifactEditorOpenLink = document.querySelector("#artifact-editor-open-link");
+const artifactEditorSaveButton = artifactEditorModal?.querySelector("[data-action='save-artifact-editor']");
 const sampleInputValues = [
   { key: "LOT", value: "LOT-001" },
   { key: "라인", value: "A3" },
 ];
 let currentDraft = null;
+let currentArtifactEditor = null;
 
 loadConfigStatus();
 
@@ -77,6 +85,13 @@ form?.addEventListener("submit", async (event) => {
 });
 
 artifactLinks?.addEventListener("click", async (event) => {
+  const editorButton = event.target?.closest("[data-action='edit-artifact']");
+  if (editorButton) {
+    event.preventDefault();
+    await openArtifactEditor(editorButton.dataset.url, editorButton.dataset.label);
+    return;
+  }
+
   const button = event.target?.closest("[data-action='continue-workflow']");
   if (!button) return;
   event.preventDefault();
@@ -85,6 +100,22 @@ artifactLinks?.addEventListener("click", async (event) => {
     return;
   }
   await continueWorkflow(currentDraft.job_id, button);
+});
+
+artifactEditorModal?.addEventListener("click", async (event) => {
+  const action = event.target?.closest("[data-action]")?.dataset?.action;
+  if (action === "close-artifact-editor") {
+    closeArtifactEditor();
+  }
+  if (action === "save-artifact-editor") {
+    await saveArtifactEditor();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && artifactEditorModal && !artifactEditorModal.hidden) {
+    closeArtifactEditor();
+  }
 });
 
 function createPipelinePayload() {
@@ -284,7 +315,86 @@ function renderArtifacts(result) {
 }
 
 function artifactAnchor(label, url) {
+  if (isTextArtifact(url)) {
+    return `<button class="artifact-link editable" type="button" data-action="edit-artifact" data-label="${escapeHtml(label)}" data-url="${escapeHtml(url)}">${escapeHtml(label)}</button>`;
+  }
   return `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+}
+
+function isTextArtifact(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.pathname.startsWith("/artifacts/") && /\.(md|json|jsonl|vtt|txt|html)$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function artifactTextApiUrl(url) {
+  const parsed = new URL(url, window.location.origin);
+  const prefix = "/artifacts/";
+  if (!parsed.pathname.startsWith(prefix)) {
+    throw new Error("편집 가능한 산출물 URL이 아닙니다.");
+  }
+  return `/api/artifacts/text/${parsed.pathname.slice(prefix.length)}`;
+}
+
+async function openArtifactEditor(url, label = "텍스트 산출물") {
+  if (!artifactEditorModal || !artifactEditorText || !artifactEditorPath || !artifactEditorStatus) return;
+  const apiUrl = artifactTextApiUrl(url);
+  currentArtifactEditor = { url, apiUrl, label };
+  artifactEditorModal.hidden = false;
+  artifactEditorText.value = "";
+  artifactEditorText.disabled = true;
+  artifactEditorStatus.textContent = "불러오는 중...";
+  artifactEditorPath.textContent = url;
+  if (artifactEditorTitle) artifactEditorTitle.textContent = `${label} 편집`;
+  if (artifactEditorOpenLink) artifactEditorOpenLink.href = url;
+  if (artifactEditorSaveButton) artifactEditorSaveButton.disabled = true;
+
+  try {
+    const response = await fetch(apiUrl);
+    if (!response.ok) {
+      throw new Error(`텍스트 산출물을 불러오지 못했습니다: ${response.status}`);
+    }
+    const payload = await response.json();
+    artifactEditorText.value = payload.content || "";
+    artifactEditorText.disabled = false;
+    artifactEditorStatus.textContent = "편집 후 저장할 수 있습니다.";
+    if (artifactEditorSaveButton) artifactEditorSaveButton.disabled = false;
+    artifactEditorText.focus();
+  } catch (error) {
+    artifactEditorStatus.textContent = error.message || "텍스트 산출물을 불러오지 못했습니다.";
+  }
+}
+
+async function saveArtifactEditor() {
+  if (!currentArtifactEditor || !artifactEditorText || !artifactEditorStatus || !artifactEditorSaveButton) return;
+  artifactEditorSaveButton.disabled = true;
+  artifactEditorStatus.textContent = "저장 중...";
+  try {
+    const response = await fetch(currentArtifactEditor.apiUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: artifactEditorText.value }),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || `저장 실패: ${response.status}`);
+    }
+    artifactEditorStatus.textContent = "저장되었습니다.";
+  } catch (error) {
+    artifactEditorStatus.textContent = error.message || "저장 중 오류가 발생했습니다.";
+  } finally {
+    artifactEditorSaveButton.disabled = false;
+  }
+}
+
+function closeArtifactEditor() {
+  if (!artifactEditorModal) return;
+  artifactEditorModal.hidden = true;
+  currentArtifactEditor = null;
 }
 
 function escapeHtml(value) {

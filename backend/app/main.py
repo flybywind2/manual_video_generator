@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from backend.app.config import load_settings
 from backend.app.pipeline import (
@@ -15,6 +16,12 @@ from backend.app.pipeline import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
+TEXT_ARTIFACT_SUFFIXES = {".md", ".json", ".jsonl", ".vtt", ".txt", ".html"}
+MAX_TEXT_ARTIFACT_BYTES = 2 * 1024 * 1024
+
+
+class TextArtifactUpdate(BaseModel):
+    content: str
 
 app = FastAPI(title="Manual Video Agent")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -40,8 +47,42 @@ def sample() -> str:
     return (APP_DIR / "templates" / "sample.html").read_text(encoding="utf-8")
 
 
+@app.get("/api/artifacts/text/{artifact_path:path}")
+def read_text_artifact(artifact_path: str) -> dict[str, object]:
+    target = _resolve_artifact_path(artifact_path)
+    _ensure_editable_text_artifact(target)
+    return {
+        "path": artifact_path,
+        "name": target.name,
+        "editable": True,
+        "content": target.read_text(encoding="utf-8"),
+    }
+
+
+@app.put("/api/artifacts/text/{artifact_path:path}")
+def update_text_artifact(artifact_path: str, payload: TextArtifactUpdate) -> dict[str, object]:
+    target = _resolve_artifact_path(artifact_path)
+    _ensure_editable_text_artifact(target)
+    encoded = payload.content.encode("utf-8")
+    if len(encoded) > MAX_TEXT_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="text artifact is too large")
+    _validate_text_artifact_content(target, payload.content)
+    target.write_text(payload.content, encoding="utf-8")
+    return {
+        "path": artifact_path,
+        "name": target.name,
+        "saved": True,
+        "bytes": len(encoded),
+    }
+
+
 @app.get("/artifacts/{artifact_path:path}")
 def artifact_file(artifact_path: str) -> FileResponse:
+    target = _resolve_artifact_path(artifact_path)
+    return FileResponse(target)
+
+
+def _resolve_artifact_path(artifact_path: str) -> Path:
     output_dir = Path(load_settings().output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     target = (output_dir / artifact_path).resolve()
@@ -51,7 +92,39 @@ def artifact_file(artifact_path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="artifact not found") from exc
     if not target.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
-    return FileResponse(target)
+    return target
+
+
+def _ensure_editable_text_artifact(target: Path) -> None:
+    if target.suffix.lower() not in TEXT_ARTIFACT_SUFFIXES:
+        raise HTTPException(status_code=415, detail="artifact is not an editable text file")
+    if target.stat().st_size > MAX_TEXT_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="text artifact is too large")
+    try:
+        target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=415, detail="artifact is not UTF-8 text") from exc
+
+
+def _validate_text_artifact_content(target: Path, content: str) -> None:
+    suffix = target.suffix.lower()
+    if suffix == ".json":
+        import json
+
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid JSON: {exc.msg}") from exc
+    if suffix == ".jsonl":
+        import json
+
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail=f"invalid JSONL at line {line_number}: {exc.msg}") from exc
 
 
 @app.post("/api/pipeline/run")

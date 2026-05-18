@@ -887,7 +887,8 @@ a {
   gap: 8px;
 }
 
-.artifact-links a {
+.artifact-links a,
+.artifact-link {
   padding: 7px 10px;
   border: 1px solid rgba(36, 91, 255, 0.24);
   border-radius: 999px;
@@ -895,6 +896,16 @@ a {
   color: var(--ai-indigo);
   font-size: 12px;
   font-weight: 800;
+  cursor: pointer;
+}
+
+.artifact-link.editable::after {
+  content: "편집";
+  margin-left: 7px;
+  padding-left: 7px;
+  border-left: 1px solid rgba(36, 91, 255, 0.22);
+  color: var(--body);
+  font-size: 11px;
 }
 
 .plan-review {
@@ -934,6 +945,90 @@ a {
   color: var(--danger);
   font-size: 13px;
   font-weight: 800;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(5, 8, 22, 0.34);
+  backdrop-filter: blur(10px);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.artifact-editor-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 68vh) auto;
+  width: min(1040px, 100%);
+  max-height: calc(100vh - 56px);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas-raised);
+  box-shadow: 0 34px 90px rgba(17, 24, 39, 0.28);
+  overflow: hidden;
+}
+
+.artifact-editor-header,
+.artifact-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.artifact-editor-footer {
+  border-top: 1px solid var(--hairline);
+  border-bottom: 0;
+}
+
+.artifact-editor-header h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 20px;
+  line-height: 28px;
+}
+
+.artifact-editor-header p,
+.artifact-editor-footer span {
+  margin: 4px 0 0;
+  color: var(--body);
+  font-size: 13px;
+  line-height: 20px;
+  word-break: break-all;
+}
+
+.artifact-editor-footer div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#artifact-editor-text {
+  width: 100%;
+  height: 100%;
+  min-height: 360px;
+  padding: 18px 20px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: #fbfcff;
+  color: var(--ink);
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+}
+
+#artifact-editor-text:focus {
+  box-shadow: inset 0 0 0 3px rgba(36, 91, 255, 0.12);
 }
 
 @media (max-width: 1040px) {
