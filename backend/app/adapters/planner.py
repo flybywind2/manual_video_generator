@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from backend.app.action_safety import click_text_candidates, is_disallowed_click_texts
 from backend.app.config import AppSettings
+from backend.app.llm_logging import record_llm_response
 
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
@@ -36,7 +37,7 @@ def build_plan(
     trace: dict[str, Any] = {"planner": "internal-llm", "rag": None, "reranker": None}
     try:
         context_docs = _retrieve_context(request, settings, post, trace)
-        plan = _call_llm_planner(request, settings, context_docs, post)
+        plan = _call_llm_planner(request, settings, context_docs, post, package_dir=package_dir)
         plan["source"] = "internal-llm-planner"
         plan["config_status"] = settings.safe_status()
         plan["planner_trace"] = trace
@@ -221,6 +222,8 @@ def _call_llm_planner(
     settings: AppSettings,
     context_docs: list[str],
     post: HttpPost,
+    *,
+    package_dir: Path | None,
 ) -> dict[str, Any]:
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -260,6 +263,14 @@ def _call_llm_planner(
     }
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
+    record_llm_response(
+        component="planner",
+        model=settings.llm.model,
+        response=response,
+        content=content,
+        terminal_enabled=settings.enable_terminal_logs,
+        package_dir=package_dir,
+    )
     return _normalize_plan(_parse_json_content(content), request)
 
 

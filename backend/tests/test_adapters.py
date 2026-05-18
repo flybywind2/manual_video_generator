@@ -33,7 +33,7 @@ def test_input_extractor_derives_values_from_request_text_without_llm(tmp_path: 
     assert (tmp_path / "input_extraction.json").exists()
 
 
-def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Path):
+def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Path, capsys):
     request = PipelineInput(
         request_text="사용자 U100 권한 조회하고 OTP 123456은 쓰지 마",
         target_url="http://internal.example.local",
@@ -51,6 +51,7 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
             "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "180",
+            "MANUAL_AGENT_ENABLE_TERMINAL_LOGS": "true",
         }
     )
     calls = []
@@ -81,6 +82,17 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
     rendered = (tmp_path / "input_extraction.json").read_text(encoding="utf-8")
     assert "123456" not in rendered
     assert "plain" not in rendered
+    llm_log = tmp_path / "llm_responses.jsonl"
+    assert llm_log.exists()
+    llm_log_text = llm_log.read_text(encoding="utf-8")
+    terminal_log_text = capsys.readouterr().err
+    assert '"actor": "llm_response"' in terminal_log_text
+    assert '"component": "input_extractor"' in terminal_log_text
+    assert '"content_preview"' in terminal_log_text
+    assert "123456" not in llm_log_text
+    assert "plain" not in llm_log_text
+    assert "123456" not in terminal_log_text
+    assert "plain" not in terminal_log_text
 
 
 def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path: Path):
@@ -100,7 +112,7 @@ def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path
     assert result["explicit_input_keys"] == ["LOT"]
 
 
-def test_browser_agent_decides_next_action_from_page_observation():
+def test_browser_agent_decides_next_action_from_page_observation(tmp_path: Path, capsys):
     request = PipelineInput(
         request_text="MES에서 LOT 조회 후 상세 화면 확인 방법 영상 만들기",
         target_url="http://127.0.0.1:8000/sample",
@@ -119,6 +131,7 @@ def test_browser_agent_decides_next_action_from_page_observation():
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
             "MANUAL_AGENT_LLM_TIMEOUT_SECONDS": "180",
+            "MANUAL_AGENT_ENABLE_TERMINAL_LOGS": "true",
         }
     )
     calls = []
@@ -150,6 +163,7 @@ def test_browser_agent_decides_next_action_from_page_observation():
         history=[],
         step_index=1,
         http_post=fake_post,
+        package_dir=tmp_path,
     )
 
     assert action["status"] == "ok"
@@ -161,6 +175,11 @@ def test_browser_agent_decides_next_action_from_page_observation():
     assert calls[0]["headers"]["Accept"] == "application/json"
     assert calls[0]["timeout"] == 180
     assert calls[0]["payload"]["messages"][1]["content"]
+    log_text = capsys.readouterr().err
+    assert '"actor": "llm_response"' in log_text
+    assert '"component": "browser_agent"' in log_text
+    assert "LOT 입력칸이 보입니다." in log_text
+    assert "LOT 입력칸이 보입니다." in (tmp_path / "llm_responses.jsonl").read_text(encoding="utf-8")
 
 
 def test_browser_agent_blocks_dangerous_click_texts():
@@ -258,7 +277,7 @@ def test_browser_agent_blocks_web_search_toggle_clicks():
     assert action["texts"] == ["Web Search"]
 
 
-def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
+def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     request = PipelineInput(
         request_text="MES에서 LOT 조회 방법 영상 만들기",
         target_url="http://127.0.0.1:8000/sample",
@@ -276,6 +295,7 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
             "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
             "MANUAL_AGENT_USER_ID": "USER01",
             "MANUAL_AGENT_USER_TYPE": "AD_ID",
+            "MANUAL_AGENT_ENABLE_TERMINAL_LOGS": "true",
         }
     )
     calls = []
@@ -325,6 +345,14 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path):
     trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
     assert trace["rag"] == {"status": "skipped"}
     assert trace["reranker"] == {"status": "skipped", "reason": "rag_context_skipped"}
+    llm_log = tmp_path / "llm_responses.jsonl"
+    assert llm_log.exists()
+    llm_log_text = llm_log.read_text(encoding="utf-8")
+    terminal_log_text = capsys.readouterr().err
+    assert '"actor": "llm_response"' in terminal_log_text
+    assert '"component": "planner"' in terminal_log_text
+    assert "LLM 생성 단계" in terminal_log_text
+    assert "LLM 생성 단계" in llm_log_text
 
 
 def test_internal_planner_replaces_web_search_toggle_click_with_capture_step(tmp_path: Path):

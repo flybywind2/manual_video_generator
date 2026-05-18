@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.action_safety import is_disallowed_click_texts
-from backend.app.config import AppSettings
 from backend.app.adapters.planner import post_json
+from backend.app.config import AppSettings
+from backend.app.llm_logging import record_llm_response
 
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
@@ -38,6 +40,7 @@ def decide_browser_agent_action(
     *,
     step_index: int,
     http_post: HttpPost | None = None,
+    package_dir: Path | None = None,
 ) -> dict[str, Any]:
     if not settings.enable_browser_agent:
         return {"status": "disabled", "type": "finish", "reason": "browser_agent_disabled"}
@@ -95,6 +98,14 @@ def decide_browser_agent_action(
     }
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
+    record_llm_response(
+        component="browser_agent",
+        model=settings.llm.model,
+        response=response,
+        content=content,
+        terminal_enabled=settings.enable_terminal_logs,
+        package_dir=package_dir,
+    )
     return _normalize_browser_agent_action(_parse_json_content(content), request)
 
 

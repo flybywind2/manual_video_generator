@@ -300,6 +300,7 @@ output/jobs/<job_id>/
   manual.pdf
   action_plan.json
   input_extraction.json
+  llm_responses.jsonl
   approval_log.json
   audit_log.jsonl
   capture_action_log.json
@@ -324,7 +325,7 @@ output/jobs/<job_id>/
 
 `MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
 
-`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, audit log, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
+`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, LLM 응답 preview 로그, audit log, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
 
 `degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
 
@@ -451,7 +452,9 @@ MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
 MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
 ```
 
-켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 또한 `actor="tool"` 로그로 `llm`, `rag`, `reranker`, `playwright-python`, `playwright-mcp`, `ffmpeg`, `node`, `npm`, `tts`, `hyperframes`, `opencode`의 사용/설정/가용 상태를 함께 남깁니다. 같은 tool 이벤트는 `audit_log.jsonl`에도 항상 기록됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
+켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 또한 `actor="tool"` 로그로 `llm`, `rag`, `reranker`, `playwright-python`, `playwright-mcp`, `ffmpeg`, `node`, `npm`, `tts`, `hyperframes`, `opencode`의 사용/설정/가용 상태를 함께 남깁니다.
+
+내부 LLM 호출이 실제로 응답을 받으면 `actor="llm_response"` 로그가 추가로 출력됩니다. 이 로그에는 `component`(`input_extractor`, `planner`, `browser_agent`), `model`, `content_preview`, `content_length`, `choice_count`가 들어갑니다. Planner와 input extractor 응답 preview는 생성 패키지의 `llm_responses.jsonl`에도 저장됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
 
 설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
 
@@ -583,7 +586,7 @@ Content-Type: application/json
 POST /api/pipeline/run?capture_browser=false
 ```
 
-응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `audit_log`, `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
+응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `llm_responses`, `audit_log`, `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
 `input_extraction_url`에서는 요청문에서 추출된 입력값과 최종 적용된 입력값을 확인할 수 있습니다.
 
 ## 프로젝트 구조

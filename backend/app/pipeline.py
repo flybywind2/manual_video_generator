@@ -987,6 +987,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
 
 def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
     rel_base = f"/artifacts/jobs/{result.job_id}"
+    llm_responses = result.package_dir / "llm_responses.jsonl"
     return {
         "job_id": result.job_id,
         "status": result.status,
@@ -1013,6 +1014,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
         "supporting_artifacts": {
             "request": f"{rel_base}/request.json",
             "input_extraction": f"{rel_base}/input_extraction.json",
+            "llm_responses": f"{rel_base}/llm_responses.jsonl" if llm_responses.exists() else None,
             "planner_trace": f"{rel_base}/planner_trace.json",
             "rehearsal_log": f"{rel_base}/rehearsal_log.json",
             "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
@@ -1025,9 +1027,11 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
 
 def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str, str | None]:
     mcp_execution = result.package_dir / "playwright_mcp_execution.json"
+    llm_responses = result.package_dir / "llm_responses.jsonl"
     return {
         "request": f"{rel_base}/request.json",
         "input_extraction": f"{rel_base}/input_extraction.json",
+        "llm_responses": f"{rel_base}/llm_responses.jsonl" if llm_responses.exists() else None,
         "planner_trace": f"{rel_base}/planner_trace.json",
         "rehearsal_log": f"{rel_base}/rehearsal_log.json",
         "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
@@ -1437,13 +1441,16 @@ def _execute_browser_agent_actions(
     for step_index in range(1, max_steps + 1):
         try:
             observation = _observe_browser_for_agent(page)
+            decide_kwargs: dict[str, Any] = {"step_index": step_index}
+            if decide_next is decide_browser_agent_action:
+                decide_kwargs["package_dir"] = capture_dir.parent
             action = dict(
                 decide_next(
                     request,
                     settings,
                     observation,
                     history,
-                    step_index=step_index,
+                    **decide_kwargs,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - fallback keeps the package inspectable.
@@ -2240,6 +2247,7 @@ def _manifest(
     supporting_artifacts = {
         "request": str(package_dir / "request.json"),
         "input_extraction": str(result.artifacts.input_extraction),
+        "llm_responses": _optional_path(package_dir / "llm_responses.jsonl"),
         "planner_trace": str(package_dir / "planner_trace.json"),
         "rehearsal_log": str(package_dir / "rehearsal_log.json"),
         "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),

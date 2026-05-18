@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from backend.app.adapters.planner import post_json
 from backend.app.config import AppSettings
+from backend.app.llm_logging import record_llm_response
 from backend.app.redaction import is_sensitive_key, redact_sensitive
 
 
@@ -36,7 +37,11 @@ def extract_input_values(
     status = "ok"
     reason = ""
     try:
-        extracted_values = _extract_with_llm(request, settings, http_post=http_post) if settings.llm.is_configured else _extract_locally(request)
+        extracted_values = (
+            _extract_with_llm(request, settings, package_dir=package_dir, http_post=http_post)
+            if settings.llm.is_configured
+            else _extract_locally(request)
+        )
         source = "internal-llm" if settings.llm.is_configured else "local-deterministic"
     except Exception as exc:  # noqa: BLE001 - local extraction keeps the pipeline usable.
         extracted_values = _extract_locally(request)
@@ -55,7 +60,13 @@ def extract_input_values(
     return result
 
 
-def _extract_with_llm(request: Any, settings: AppSettings, *, http_post: HttpPost | None) -> dict[str, str]:
+def _extract_with_llm(
+    request: Any,
+    settings: AppSettings,
+    *,
+    package_dir: Path | None,
+    http_post: HttpPost | None,
+) -> dict[str, str]:
     post = post_json if http_post is None else http_post
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -94,6 +105,14 @@ def _extract_with_llm(request: Any, settings: AppSettings, *, http_post: HttpPos
     }
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
+    record_llm_response(
+        component="input_extractor",
+        model=settings.llm.model,
+        response=response,
+        content=content,
+        terminal_enabled=settings.enable_terminal_logs,
+        package_dir=package_dir,
+    )
     return _parse_llm_values(content)
 
 
