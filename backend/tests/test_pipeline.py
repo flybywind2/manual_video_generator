@@ -9,10 +9,12 @@ from backend.app.config import load_settings
 from backend.app.pipeline import (
     PipelineInput,
     _authenticate_before_recording,
+    _capture_with_playwright,
     _execute_capture_actions,
     _execute_browser_agent_actions,
     _handle_login,
     _install_manual_login_signal,
+    _make_dirs,
     _playwright_launch_kwargs,
     _prepare_capture_page,
     _raise_if_login_failed,
@@ -861,6 +863,134 @@ def test_authenticate_before_recording_does_not_return_storage_when_manual_login
     assert auth["action_log"][0]["status"] == "failed"
     assert "manual login was not confirmed" in auth["action_log"][0]["error"]
     assert ("storage_state",) not in calls
+
+
+def test_manual_capture_reuses_logged_in_recording_context(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+    context_options = []
+
+    class FakeLocator:
+        def click(self):
+            events.append(("locator_click",))
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, *args, **kwargs):
+            events.append(("wait_for_function", "manualLoginCompleted" in expression, args, kwargs))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def add_init_script(self, script):
+            events.append(("add_init_script",))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+            if "return { completed" in script:
+                return {"completed": True, "successSelectorMatched": False}
+            return None
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+        def get_by_role(self, *args, **kwargs):
+            return FakeLocator()
+
+    class FakeContext:
+        def __init__(self, options):
+            self.options = options
+
+        def new_page(self):
+            events.append(("new_page",))
+            return FakePage()
+
+        def storage_state(self):
+            events.append(("storage_state",))
+            return {"cookies": [{"name": "sid", "value": "manual"}], "origins": []}
+
+        def close(self):
+            events.append(("context_close",))
+            raw_dir = self.options.get("record_video_dir")
+            if raw_dir:
+                Path(raw_dir).mkdir(parents=True, exist_ok=True)
+                Path(raw_dir, "manual.webm").write_bytes(b"webm")
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            context_options.append(kwargs)
+            events.append(("new_context", bool(kwargs.get("record_video_dir"))))
+            return FakeContext(kwargs)
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs.get("headless")))
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        enable_browser_agent = False
+
+        class login:
+            mode = "manual"
+            username_selector = ""
+            password_selector = ""
+            submit_selector = ""
+            success_selector = ""
+            username = ""
+            password = ""
+            manual_timeout_seconds = 120.0
+            credentials_timeout_seconds = 30.0
+
+    plan = {
+        "steps": [{"id": "step_intro", "title": "홈", "caption": "홈", "narration": "홈"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://internal.example.local", "step_id": "step_intro"},
+            {"id": "a2", "type": "capture_step", "step_id": "step_intro"},
+        ],
+    }
+    dirs = _make_dirs(tmp_path / "package")
+    request = PipelineInput(
+        request_text="로그인 후 화면 확인",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈",
+        login_mode="manual",
+    )
+
+    result = _capture_with_playwright(request, plan, dirs, Settings())
+
+    assert len(context_options) == 1
+    assert "record_video_dir" in context_options[0]
+    assert result["action_log"][0]["type"] == "login"
+    assert result["action_log"][0]["status"] == "ok"
+    assert ("storage_state",) not in events
+    assert events.count(("new_page",)) == 1
+    assert result["video"].exists()
 
 
 def test_raise_if_login_failed_aborts_capture_on_failed_login():

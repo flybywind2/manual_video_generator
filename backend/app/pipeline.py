@@ -306,25 +306,33 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual")
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
-        auth_result = _authenticate_before_recording(browser, request, login) if login["mode"] in {"manual", "credentials"} else {"storage_state": None, "action_log": []}
-        _raise_if_login_failed(auth_result)
         context_options: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 800},
             "record_video_dir": str(dirs.raw_video),
             "record_video_size": {"width": 1280, "height": 800},
         }
+        auth_result = {"storage_state": None, "action_log": []}
+        if login["mode"] == "credentials":
+            auth_result = _authenticate_before_recording(browser, request, login)
+            _raise_if_login_failed(auth_result)
         if auth_result.get("storage_state"):
             context_options["storage_state"] = auth_result["storage_state"]
         context = browser.new_context(**context_options)
         page = context.new_page()
+        manual_authenticated = False
+        if login["mode"] == "manual":
+            auth_result = _authenticate_recording_page(page, request, login)
+            _raise_if_login_failed(auth_result)
+            manual_authenticated = True
         actions = plan.get("actions", [])
         if getattr(settings, "enable_browser_agent", False):
-            _prepare_capture_page(page, request.target_url)
+            if not manual_authenticated:
+                _prepare_capture_page(page, request.target_url)
             capture_result = _execute_browser_agent_actions(page, request, plan, dirs.captures, settings)
         else:
-            if not actions or actions[0].get("type") != "navigate":
+            if not manual_authenticated and (not actions or actions[0].get("type") != "navigate"):
                 _prepare_capture_page(page, request.target_url)
-            capture_result = _execute_capture_actions(page, plan, dirs.captures)
+            capture_result = _execute_capture_actions(page, plan, dirs.captures, skip_initial_navigate=manual_authenticated)
         capture_result["action_log"] = [*auth_result.get("action_log", []), *capture_result.get("action_log", [])]
         captures = capture_result["captures"]
         if not captures:
@@ -453,6 +461,23 @@ def _authenticate_before_recording(browser: Any, request: PipelineInput, login: 
     return {"storage_state": storage_state, "action_log": action_log}
 
 
+def _authenticate_recording_page(page: Any, request: PipelineInput, login: dict[str, Any]) -> dict[str, Any]:
+    action_log: list[dict[str, Any]] = []
+    try:
+        _prepare_capture_page(page, request.target_url)
+        action_log.append(_handle_login(page, login))
+    except Exception as exc:  # noqa: BLE001 - caller records the failure and aborts capture.
+        action_log.append(
+            {
+                "type": "login",
+                "mode": login.get("mode", "none"),
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+    return {"storage_state": None, "action_log": action_log}
+
+
 def _raise_if_login_failed(auth_result: dict[str, Any]) -> None:
     for entry in auth_result.get("action_log", []):
         if isinstance(entry, dict) and entry.get("type") == "login" and entry.get("status") != "ok":
@@ -464,13 +489,15 @@ def _execute_capture_actions(
     page: Any,
     plan: dict[str, Any],
     capture_dir: Path,
+    *,
+    skip_initial_navigate: bool = False,
 ) -> dict[str, Any]:
     steps = {str(step.get("id")): step for step in plan.get("steps", []) if isinstance(step, dict)}
     captures: list[Path] = []
     action_log: list[dict[str, Any]] = []
     used_names: set[str] = set()
 
-    for action in plan.get("actions", []):
+    for index, action in enumerate(plan.get("actions", [])):
         if not isinstance(action, dict):
             continue
         action_id = str(action.get("id") or "")
@@ -479,14 +506,18 @@ def _execute_capture_actions(
         log_entry = {"action_id": action_id, "type": action_type, "step_id": step.get("id"), "status": "ok"}
         try:
             if action_type == "navigate":
-                target = str(action.get("target") or "")
-                if not target:
+                if skip_initial_navigate and index == 0:
                     log_entry["status"] = "skipped"
-                    log_entry["reason"] = "missing_target"
+                    log_entry["reason"] = "manual_login_current_page"
                 else:
-                    _prepare_capture_page(page, target)
-                    _apply_step_overlay(page, step, action)
-                    page.wait_for_timeout(500)
+                    target = str(action.get("target") or "")
+                    if not target:
+                        log_entry["status"] = "skipped"
+                        log_entry["reason"] = "missing_target"
+                    else:
+                        _prepare_capture_page(page, target)
+                        _apply_step_overlay(page, step, action)
+                        page.wait_for_timeout(500)
             elif action_type == "fill":
                 selector = str(action.get("selector") or "")
                 if not selector:
