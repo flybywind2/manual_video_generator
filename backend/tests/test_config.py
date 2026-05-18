@@ -53,6 +53,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_OPENCODE_AGENT=build",
                 "MANUAL_AGENT_OPENCODE_MODEL=openai/gpt-5",
                 "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=900",
+                "MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true",
             ]
         ),
         encoding="utf-8",
@@ -94,6 +95,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.opencode_agent == "build"
     assert settings.opencode_model == "openai/gpt-5"
     assert settings.opencode_timeout_seconds == 900
+    assert settings.enable_terminal_logs is True
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
     assert headers["x-dep-ticket"] == "credential:TICKET-123"
@@ -135,6 +137,7 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert status["login"]["password_set"] is True
     assert "enable_internal_planner" in status["runtime"]
     assert "enable_browser_agent" in status["runtime"]
+    assert status["runtime"]["enable_terminal_logs"] is False
 
 
 def test_process_environment_overrides_env_file_values(tmp_path: Path):

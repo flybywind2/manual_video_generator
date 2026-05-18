@@ -57,7 +57,7 @@ flowchart LR
     G --> H["WebM / Markdown / PDF / JSON 패키지"]
 ```
 
-현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터를 실제 실행합니다.
+현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
 
 ## 환경 준비
 
@@ -376,6 +376,7 @@ MANUAL_AGENT_LOGIN_PASSWORD
 MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS
 MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS
 MANUAL_AGENT_OUTPUT_DIR
+MANUAL_AGENT_ENABLE_TERMINAL_LOGS
 MANUAL_AGENT_TTS_PROVIDER
 MANUAL_AGENT_TTS_DEVICE
 MANUAL_AGENT_TTS_LANGUAGE
@@ -434,6 +435,14 @@ MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
 ```
 
 `MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR`를 비워도 수동 로그인 브라우저의 `로그인 완료` 버튼으로 진행할 수 있습니다.
+
+터미널에서 파이프라인 구성요소별 진행 상황을 보려면 다음을 켭니다.
+
+```env
+MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
+```
+
+켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
 
 설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
 
@@ -655,7 +664,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-80 passed
+82 passed
 ```
 
 ## 보안 및 운영 주의사항

@@ -199,6 +199,71 @@ def test_package_manifest_environment_fingerprint_does_not_include_secret_values
     assert "do-not-echo" not in manifest_text
 
 
+def test_pipeline_terminal_logs_are_disabled_by_default(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("MANUAL_AGENT_ENABLE_TERMINAL_LOGS", raising=False)
+
+    run_pipeline(
+        PipelineInput(
+            request_text="포털 권한 신청 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="신청자",
+            completion_condition="신청 완료 화면",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    captured = capsys.readouterr()
+    assert "[manual-agent]" not in captured.err
+
+
+def test_pipeline_terminal_logs_all_stages_when_enabled_and_redacts_secrets(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_ENABLE_TERMINAL_LOGS", "true")
+    monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret-key")
+    monkeypatch.setenv("MANUAL_AGENT_DEP_TICKET", "credential:SECRET")
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="포털 비밀번호 초기화 방법 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="사용자",
+            completion_condition="초기화 완료 화면",
+            input_values={"password": "plain-password", "OTP": "123456"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    captured = capsys.readouterr()
+    log_text = captured.err
+    expected_actors = {
+        "pipeline",
+        "environment",
+        "planner",
+        "rehearsal",
+        "approval",
+        "capture",
+        "masking",
+        "tts",
+        "render",
+        "opencode",
+        "manifest",
+    }
+    for actor in expected_actors:
+        assert f'"actor": "{actor}"' in log_text
+
+    assert f'"run_id": "{result.job_id}"' in log_text
+    assert '"status": "started"' in log_text
+    assert '"status": "completed"' in log_text
+    assert "super-secret-key" not in log_text
+    assert "credential:SECRET" not in log_text
+    assert "plain-password" not in log_text
+    assert "123456" not in log_text
+    assert "password" not in log_text.lower()
+    assert "otp" not in log_text.lower()
+
+
 def test_generated_request_artifact_redacts_sensitive_input_values(tmp_path):
     result = run_pipeline(
         PipelineInput(

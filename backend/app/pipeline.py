@@ -24,6 +24,7 @@ from backend.app.config import load_settings
 from backend.app.env_bootstrap import apply_runtime_environment, runtime_fingerprint
 from backend.app.policies import ApprovalGate
 from backend.app.redaction import redact_sensitive
+from backend.app.terminal_logging import TerminalRunLogger
 
 
 class PipelineInput(BaseModel):
@@ -81,6 +82,55 @@ def default_output_dir() -> Path:
     return Path(os.environ.get("MANUAL_AGENT_OUTPUT_DIR", "output")).resolve()
 
 
+def _record_stage(
+    audit: AuditLog,
+    terminal: TerminalRunLogger,
+    *,
+    terminal_details: dict[str, Any] | None = None,
+    **event: Any,
+) -> dict[str, Any]:
+    audit_event = audit.record(**event)
+    terminal.record_audit_event(audit_event, details=terminal_details)
+    return audit_event
+
+
+def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: bool) -> dict[str, Any]:
+    return {
+        "output_dir": str(output_root),
+        "capture_browser": capture_browser,
+        "planner": "internal" if settings.enable_internal_planner else "local-deterministic",
+        "rag_context_enabled": settings.enable_rag_context,
+        "reranker_enabled": settings.enable_reranker,
+        "browser_agent_enabled": settings.enable_browser_agent,
+        "browser_agent_max_steps": settings.browser_agent_max_steps,
+        "playwright_mcp_mode": settings.playwright_mcp_mode,
+        "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+        "playwright_executable_path_set": bool(settings.playwright_executable_path),
+        "login_mode": settings.login.mode,
+        "tts_provider": settings.tts_provider,
+        "tts_device": settings.tts_device,
+        "video_renderer": settings.video_renderer,
+        "hyperframes_command_set": bool(settings.hyperframes_command),
+        "hyperframes_skills_enabled": settings.enable_hyperframes_skills,
+        "opencode_enabled": settings.enable_opencode,
+        "request_timeout_seconds": settings.request_timeout_seconds,
+    }
+
+
+def _environment_terminal_details(environment: dict[str, str]) -> dict[str, Any]:
+    return {
+        "python_version": environment.get("python_version", ""),
+        "node_version": environment.get("node_version", ""),
+        "npm_version": environment.get("npm_version", ""),
+        "ffmpeg_version": environment.get("ffmpeg_version", ""),
+        "playwright_browsers_path_set": bool(environment.get("playwright_browsers_path")),
+        "hf_home_set": bool(environment.get("hf_home")),
+        "npm_config_cache_set": bool(environment.get("npm_config_cache")),
+        "requests_ca_bundle_set": environment.get("requests_ca_bundle_set", "false"),
+        "node_extra_ca_certs_set": environment.get("node_extra_ca_certs_set", "false"),
+    }
+
+
 def run_pipeline(
     request: PipelineInput,
     *,
@@ -93,46 +143,112 @@ def run_pipeline(
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     dirs = _make_dirs(output_root / "jobs" / job_id)
     audit = AuditLog(run_id=job_id, path=dirs.package / "audit_log.jsonl")
+    terminal = TerminalRunLogger(enabled=settings.enable_terminal_logs)
+    terminal.record(
+        run_id=job_id,
+        actor="pipeline",
+        status="started",
+        details=_pipeline_start_details(settings, output_root, capture_browser),
+    )
+    terminal.record(run_id=job_id, actor="environment", status="started")
     environment = runtime_fingerprint()
-    audit.record(actor="environment", status="ok", output_data=environment)
+    _record_stage(
+        audit,
+        terminal,
+        actor="environment",
+        status="ok",
+        output_data=environment,
+        terminal_details=_environment_terminal_details(environment),
+    )
     request_payload = redact_sensitive(request.model_dump())
 
+    terminal.record(
+        run_id=job_id,
+        actor="planner",
+        status="started",
+        details={
+            "internal_planner_enabled": settings.enable_internal_planner,
+            "rag_context_enabled": settings.enable_rag_context,
+            "reranker_enabled": settings.enable_reranker,
+        },
+    )
     plan = build_plan(request, settings, package_dir=dirs.package)
     artifact_plan = redact_sensitive(plan)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="planner",
         status=_planner_audit_status(plan),
         input_data=request_payload,
         output_data=artifact_plan,
         degrade_reason=_planner_degrade_reason(plan),
         artifacts=[dirs.package / "planner_trace.json"],
+        terminal_details={
+            "planner": str(plan.get("planner") or ""),
+            "internal_planner_enabled": settings.enable_internal_planner,
+            "rag_context_enabled": settings.enable_rag_context,
+            "reranker_enabled": settings.enable_reranker,
+            "action_count": len(plan.get("actions") or []),
+            "step_count": len(plan.get("steps") or []),
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="rehearsal",
+        status="started",
+        details={
+            "playwright_mcp_mode": settings.playwright_mcp_mode,
+            "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+        },
     )
     rehearsal = rehearse_plan(plan, settings, dirs.package)
     artifact_rehearsal = redact_sensitive(rehearsal)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="rehearsal",
         status=_rehearsal_audit_status(rehearsal),
         input_data=artifact_plan,
         output_data=artifact_rehearsal,
         degrade_reason=_rehearsal_degrade_reason(rehearsal),
         artifacts=[dirs.package / "playwright_mcp_calls.json"],
+        terminal_details={
+            "playwright_mcp_mode": settings.playwright_mcp_mode,
+            "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+        },
     )
     _write_json(dirs.package / "request.json", request_payload)
     action_plan_path = dirs.package / "action_plan.json"
     approval_log_path = dirs.package / "approval_log.json"
+    terminal.record(run_id=job_id, actor="approval", status="started", details={"policy_mode": "sample-mvp"})
     approval = ApprovalGate(mode="sample-mvp").approve(plan)
     _write_json(action_plan_path, artifact_plan)
     _write_json(approval_log_path, approval)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="approval",
         status="ok",
         input_data=artifact_plan.get("actions", []),
         output_data=approval,
         artifacts=[approval_log_path],
         details={"danger_actions": len(approval["danger_actions"])},
+        terminal_details={
+            "policy_mode": "sample-mvp",
+            "danger_actions": len(approval["danger_actions"]),
+        },
     )
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
 
+    terminal.record(
+        run_id=job_id,
+        actor="capture",
+        status="started",
+        details={
+            "mode": "browser" if capture_browser else "placeholder",
+            "browser_agent_enabled": settings.enable_browser_agent,
+        },
+    )
     if capture_browser:
         capture_result = _capture_with_playwright(request, plan, dirs, settings)
         capture_status = str(capture_result.get("status") or "ok")
@@ -141,7 +257,9 @@ def run_pipeline(
         capture_result = _create_placeholder_captures(request, dirs)
         capture_status = "degraded"
         capture_degrade_reason = "browser_capture_disabled"
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="capture",
         status=capture_status,
         input_data={"capture_browser": capture_browser, "target_url": request.target_url},
@@ -152,19 +270,60 @@ def run_pipeline(
         },
         degrade_reason=capture_degrade_reason,
         artifacts=[*capture_result["captures"], capture_result["video"], capture_result.get("action_log_path")],
+        terminal_details={
+            "mode": "browser" if capture_browser else "placeholder",
+            "browser_agent_enabled": settings.enable_browser_agent,
+            "capture_count": len(capture_result.get("captures") or []),
+            "action_count": len(capture_result.get("action_log") or []),
+        },
     )
 
+    terminal.record(
+        run_id=job_id,
+        actor="masking",
+        status="started",
+        details={"capture_count": len(capture_result["captures"])},
+    )
     masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, request.input_values)
-    audit.record(actor="masking", status="ok", input_data=capture_result["masked_names"], artifacts=[masking_log_path])
+    _record_stage(
+        audit,
+        terminal,
+        actor="masking",
+        status="ok",
+        input_data=capture_result["masked_names"],
+        artifacts=[masking_log_path],
+        terminal_details={
+            "capture_count": len(capture_result.get("captures") or []),
+            "input_value_count": len(request.input_values),
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="tts",
+        status="started",
+        details={
+            "provider": settings.tts_provider,
+            "device": settings.tts_device,
+            "language": settings.tts_language,
+        },
+    )
     tts_result = synthesize_tts(plan, settings, dirs.tts)
     tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="tts",
         status="degraded" if tts_degrade_reason else "ok",
         input_data=plan.get("steps", []),
         output_data=tts_result.entries,
         degrade_reason=tts_degrade_reason,
         artifacts=[tts_result.metadata_path, *tts_result.audio_paths],
+        terminal_details={
+            "provider": settings.tts_provider,
+            "device": settings.tts_device,
+            "language": settings.tts_language,
+            "audio_count": len(tts_result.audio_paths),
+        },
     )
     html_path = _render_preview(request, plan, dirs, capture_result["masked_names"], tts_result.audio_paths)
     markdown_path = _render_markdown(request, plan, dirs, capture_result["masked_names"])
@@ -172,6 +331,16 @@ def run_pipeline(
     video_path = capture_result["video"]
     if not video_path.exists():
         video_path = _render_placeholder_video(dirs.package)
+    terminal.record(
+        run_id=job_id,
+        actor="render",
+        status="started",
+        details={
+            "renderer": settings.video_renderer,
+            "hyperframes_command_set": bool(settings.hyperframes_command),
+            "hyperframes_skills_enabled": settings.enable_hyperframes_skills,
+        },
+    )
     video_render = render_final_video(
         plan=plan,
         package_dir=dirs.package,
@@ -180,21 +349,45 @@ def run_pipeline(
         settings=settings,
     )
     render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="render",
         status="degraded" if render_degrade_reason else "ok",
         input_data={"renderer": settings.video_renderer},
         output_data={"video": str(video_render.video_path)},
         degrade_reason=render_degrade_reason,
         artifacts=[video_render.metadata_path, video_render.video_path, video_render.composition_dir / "index.html"],
+        terminal_details={
+            "renderer": settings.video_renderer,
+            "used_fallback": video_render.used_fallback,
+            "video_name": video_render.video_path.name,
+        },
+    )
+    terminal.record(
+        run_id=job_id,
+        actor="opencode",
+        status="started",
+        details={
+            "enabled": settings.enable_opencode,
+            "agent_set": bool(settings.opencode_agent),
+            "model_set": bool(settings.opencode_model),
+        },
     )
     opencode_result = run_opencode_agent(plan=plan, package_dir=dirs.package, settings=settings)
-    audit.record(
+    _record_stage(
+        audit,
+        terminal,
         actor="opencode",
         status=opencode_result.status,
         input_data={"enabled": settings.enable_opencode},
         output_data={"metadata_path": str(opencode_result.metadata_path)},
         artifacts=[opencode_result.prompt_path, opencode_result.metadata_path],
+        terminal_details={
+            "enabled": settings.enable_opencode,
+            "agent_set": bool(settings.opencode_agent),
+            "model_set": bool(settings.opencode_model),
+        },
     )
 
     manifest_path = dirs.package / "package_manifest.json"
@@ -224,8 +417,20 @@ def run_pipeline(
         rehearsal=artifact_rehearsal,
         artifacts=artifacts,
     )
-    audit.record(actor="manifest", status="ok", artifacts=[manifest_path])
+    terminal.record(run_id=job_id, actor="manifest", status="started")
+    _record_stage(audit, terminal, actor="manifest", status="ok", artifacts=[manifest_path])
     _write_json(manifest_path, _manifest(result, degradations=audit.degradations(), environment=environment))
+    terminal.record(
+        run_id=job_id,
+        actor="pipeline",
+        status="completed",
+        details={
+            "package_dir": str(dirs.package),
+            "degradation_count": len(audit.degradations()),
+            "video_name": video_render.video_path.name,
+        },
+        artifacts=[manifest_path, video_render.video_path],
+    )
     return result
 
 
