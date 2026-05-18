@@ -19,7 +19,7 @@ sampleButton?.addEventListener("click", () => {
   form.elements.request.value = "MES에서 LOT 조회 방법 영상 만들기";
   form.elements.url.value = `${window.location.origin}/sample`;
   form.elements.role.value = "작업자";
-  form.elements.login_mode.value = "none";
+  form.elements.login_mode.value = "";
   form.elements.login_success_selector.value = "";
   form.elements.done.value = "상세 화면이 보이면 완료";
   renderInputValues(sampleInputValues);

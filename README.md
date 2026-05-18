@@ -651,7 +651,7 @@ python -m pytest -q --basetemp .pytest_tmp
 현재 기준 기대 결과:
 
 ```text
-70 passed
+73 passed
 ```
 
 ## 보안 및 운영 주의사항

@@ -31,7 +31,7 @@ class PipelineInput(BaseModel):
     role: str
     completion_condition: str
     input_values: dict[str, str] = Field(default_factory=dict)
-    login_mode: str = "none"
+    login_mode: str = ""
     login_success_selector: str = ""
 
 
@@ -306,6 +306,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
         auth_result = _authenticate_before_recording(browser, request, login) if login["mode"] in {"manual", "credentials"} else {"storage_state": None, "action_log": []}
+        _raise_if_login_failed(auth_result)
         context_options: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 800},
             "record_video_dir": str(dirs.raw_video),
@@ -429,8 +430,10 @@ def _authenticate_before_recording(browser: Any, request: PipelineInput, login: 
     try:
         page = context.new_page()
         _prepare_capture_page(page, request.target_url)
-        action_log.append(_handle_login(page, login))
-        storage_state = context.storage_state()
+        login_log = _handle_login(page, login)
+        action_log.append(login_log)
+        if login_log.get("status") == "ok":
+            storage_state = context.storage_state()
     except Exception as exc:  # noqa: BLE001 - continue to produce an inspectable capture package.
         action_log.append(
             {
@@ -443,6 +446,13 @@ def _authenticate_before_recording(browser: Any, request: PipelineInput, login: 
     finally:
         context.close()
     return {"storage_state": storage_state, "action_log": action_log}
+
+
+def _raise_if_login_failed(auth_result: dict[str, Any]) -> None:
+    for entry in auth_result.get("action_log", []):
+        if isinstance(entry, dict) and entry.get("type") == "login" and entry.get("status") != "ok":
+            reason = entry.get("error") or entry.get("reason") or "login was not confirmed"
+            raise RuntimeError(f"login did not complete; capture aborted: {reason}")
 
 
 def _execute_capture_actions(

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
@@ -13,6 +14,7 @@ from backend.app.pipeline import (
     _install_manual_login_signal,
     _playwright_launch_kwargs,
     _prepare_capture_page,
+    _raise_if_login_failed,
     _resolve_login_options,
     run_pipeline,
 )
@@ -466,6 +468,20 @@ def test_resolve_login_options_prefers_request_mode_and_env_credentials():
     assert login["success_selector"] == ".dashboard"
 
 
+def test_resolve_login_options_uses_env_mode_when_request_mode_is_empty():
+    settings = load_settings(environ={"MANUAL_AGENT_LOGIN_MODE": "manual"})
+    request = PipelineInput(
+        request_text="로그인 후 메뉴얼",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈 화면",
+    )
+
+    login = _resolve_login_options(request, settings)
+
+    assert login["mode"] == "manual"
+
+
 def test_handle_login_uses_env_credentials_and_redacts_action_log():
     calls = []
 
@@ -662,3 +678,81 @@ def test_authenticate_before_recording_does_not_start_video_capture():
     assert auth["storage_state"]["cookies"][0]["name"] == "sid"
     assert auth["action_log"][0]["status"] == "ok"
     assert ("fill", "#pwd", "plain-password") in calls
+
+
+def test_authenticate_before_recording_does_not_return_storage_when_manual_login_fails():
+    calls = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            calls.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            calls.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, *args, **kwargs):
+            calls.append(("wait_for_function", args, kwargs))
+            if len(args) >= 2 and "manualLoginCompleted" in args[0]:
+                raise TimeoutError("manual login was not confirmed")
+
+        def add_style_tag(self, content):
+            calls.append(("add_style_tag",))
+
+        def add_init_script(self, script):
+            calls.append(("add_init_script",))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+    class FakeContext:
+        def new_page(self):
+            return FakePage()
+
+        def storage_state(self):
+            calls.append(("storage_state",))
+            return {"cookies": [{"name": "sid", "value": "should-not-use"}], "origins": []}
+
+        def close(self):
+            calls.append(("auth_context_close",))
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            return FakeContext()
+
+    request = PipelineInput(
+        request_text="로그인 후 매뉴얼",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈 화면",
+        login_mode="manual",
+    )
+    login = {
+        "mode": "manual",
+        "success_selector": "",
+        "credentials_timeout_ms": 30000,
+        "manual_timeout_ms": 100,
+    }
+
+    auth = _authenticate_before_recording(FakeBrowser(), request, login)
+
+    assert auth["storage_state"] is None
+    assert auth["action_log"][0]["status"] == "failed"
+    assert "manual login was not confirmed" in auth["action_log"][0]["error"]
+    assert ("storage_state",) not in calls
+
+
+def test_raise_if_login_failed_aborts_capture_on_failed_login():
+    auth_result = {
+        "storage_state": None,
+        "action_log": [
+            {
+                "type": "login",
+                "mode": "manual",
+                "status": "failed",
+                "error": "TimeoutError: manual login was not confirmed",
+            }
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="login did not complete; capture aborted"):
+        _raise_if_login_failed(auth_result)
