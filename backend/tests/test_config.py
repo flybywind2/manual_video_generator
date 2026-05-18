@@ -11,6 +11,7 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=" in env_example
     assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
     assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
+    assert "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=" in env_example
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -63,6 +64,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_OPENCODE_AGENT=build",
                 "MANUAL_AGENT_OPENCODE_MODEL=openai/gpt-5",
                 "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=900",
+                "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=720",
                 "MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true",
             ]
         ),
@@ -107,6 +109,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.opencode_agent == "build"
     assert settings.opencode_model == "openai/gpt-5"
     assert settings.opencode_timeout_seconds == 900
+    assert settings.demonstration_timeout_seconds == 720
     assert settings.enable_terminal_logs is True
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
@@ -151,6 +154,7 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert "enable_internal_planner" in status["runtime"]
     assert "enable_input_extractor" in status["runtime"]
     assert "enable_browser_agent" in status["runtime"]
+    assert "demonstration_timeout_seconds" in status["runtime"]
     assert status["runtime"]["enable_terminal_logs"] is False
 
 

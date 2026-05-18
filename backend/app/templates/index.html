@@ -111,6 +111,21 @@
                   <input name="done" value="상세 화면이 보이면 완료" />
                 </label>
                 <div class="field field-wide">
+                  <span>실행 방식</span>
+                  <div class="mode-toggle" role="radiogroup" aria-label="실행 방식">
+                    <label class="mode-option">
+                      <input type="radio" name="execution_mode" value="demonstration" checked />
+                      <strong>직접 시연</strong>
+                      <small>브라우저에서 직접 조작 후 시연 완료</small>
+                    </label>
+                    <label class="mode-option">
+                      <input type="radio" name="execution_mode" value="ai" />
+                      <strong>AI 자동 실행</strong>
+                      <small>AI가 화면을 보고 안전 동작 선택</small>
+                    </label>
+                  </div>
+                </div>
+                <div class="field field-wide">
                   <span>입력값</span>
                   <div class="input-values" id="input-values" aria-label="Scenario input values">
                     <div class="input-value-list" data-input-value-list>

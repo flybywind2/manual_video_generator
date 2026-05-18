@@ -512,6 +512,52 @@ a {
   gap: 10px;
 }
 
+.mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mode-option {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+}
+
+.mode-option input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--ai-blue);
+}
+
+.mode-option strong {
+  color: var(--ink-strong);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.mode-option small {
+  grid-column: 2;
+  color: var(--mute);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.mode-option:has(input:checked) {
+  border-color: rgba(36, 91, 255, 0.34);
+  background: var(--canvas-tint);
+  box-shadow: 0 0 0 3px rgba(36, 91, 255, 0.08);
+}
+
 .input-value-list {
   display: grid;
   gap: 8px;
@@ -956,6 +1002,10 @@ a {
   .field {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .mode-toggle {
+    grid-template-columns: 1fr;
   }
 
   .actions {

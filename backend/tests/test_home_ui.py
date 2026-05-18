@@ -21,6 +21,11 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert 'name="login_mode"' in body
     assert '<option value="" selected>설정값 사용</option>' in body
     assert 'name="login_success_selector"' in body
+    assert 'name="execution_mode"' in body
+    assert 'value="demonstration"' in body
+    assert 'value="ai"' in body
+    assert "직접 시연" in body
+    assert "AI 자동 실행" in body
     assert "로그인 완료 신호" in body
     assert "로그인 완료 버튼" in body
     assert "직접 로그인" in body
@@ -43,6 +48,8 @@ def test_static_app_exposes_review_artifact_links():
     assert "HyperFrames Composition" in body
     assert "OpenCode Prompt" in body
     assert "login_mode" in body
+    assert "execution_mode" in body
+    assert 'execution_mode.value = "demonstration";' in body
     assert "Browser Agent" in body
     assert "browser_agent_max_steps" in body
     assert 'login_mode.value = "";' in body

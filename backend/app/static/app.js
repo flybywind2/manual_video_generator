@@ -23,6 +23,7 @@ sampleButton?.addEventListener("click", () => {
   form.elements.role.value = "작업자";
   form.elements.login_mode.value = "";
   form.elements.login_success_selector.value = "";
+  form.elements.execution_mode.value = "demonstration";
   form.elements.done.value = "상세 화면이 보이면 완료";
   renderInputValues(sampleInputValues);
   panelState.textContent = "Sample loaded";
@@ -49,7 +50,7 @@ form?.addEventListener("submit", async (event) => {
   setWorkflowStep(0);
   setPipelineProgress(0);
   setStatus("Planning");
-  setArtifactMessage("요청을 분석하고 Action Plan, 승인 로그, MCP 리허설 결과를 생성합니다. 아직 캡처나 영상 렌더는 실행하지 않습니다.");
+  setArtifactMessage(planningMessage());
 
   try {
     const response = await fetch("/api/pipeline/draft", {
@@ -94,6 +95,7 @@ function createPipelinePayload() {
     completion_condition: form.elements.done.value.trim(),
     login_mode: form.elements.login_mode.value,
     login_success_selector: form.elements.login_success_selector.value.trim(),
+    execution_mode: form.elements.execution_mode.value,
     input_values: readInputValues(),
   };
 }
@@ -104,7 +106,7 @@ async function continueWorkflow(jobId, button) {
   setWorkflowStep(2);
   setPipelineProgress(2);
   setStatus("Running");
-  setArtifactMessage("승인된 계획으로 브라우저 캡처, 마스킹, TTS, HyperFrames 렌더를 실행합니다.");
+  setArtifactMessage(continueMessage(currentDraft));
 
   try {
     const response = await fetch(`/api/pipeline/continue/${encodeURIComponent(jobId)}`, {
@@ -127,6 +129,21 @@ async function continueWorkflow(jobId, button) {
   } finally {
     setBusy(false);
   }
+}
+
+function planningMessage() {
+  if (form.elements.execution_mode.value === "demonstration") {
+    return "요청을 분석하고 검수용 계획을 만듭니다. 승인 후 브라우저가 열리면 직접 시연하고 시연 완료 버튼을 누릅니다.";
+  }
+  return "요청을 분석하고 Action Plan, 승인 로그, MCP 리허설 결과를 생성합니다. 승인 후 AI가 화면을 보고 안전 동작을 선택합니다.";
+}
+
+function continueMessage(draft) {
+  const mode = draft?.execution_mode || form.elements.execution_mode.value;
+  if (mode === "demonstration") {
+    return "브라우저가 열리면 사용자가 직접 로그인/입력/클릭을 시연합니다. 완료 후 화면의 시연 완료 버튼을 누르면 마스킹, TTS, 렌더를 진행합니다.";
+  }
+  return "승인된 계획으로 AI 브라우저 판단, 캡처, 마스킹, TTS, HyperFrames 렌더를 실행합니다.";
 }
 
 function readInputValues() {

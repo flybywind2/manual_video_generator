@@ -29,6 +29,7 @@
 | 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
 | Action plan | 구현 | 기본은 입력값 라벨/버튼 텍스트 기반 semantic action planner, 옵션으로 내부 LLM planner 호출 |
 | 브라우저 캡처 | 구현 | Playwright action plan 기반 범용 캡처 및 WebM 녹화 |
+| 실행 방식 선택 | 구현 | UI에서 직접 시연 또는 AI 자동 실행 선택 |
 | 로그인 처리 | 구현 | 로그인 없음, 사용자가 직접 로그인, `.env` ID/password 자동 입력 지원 |
 | 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
 | `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
@@ -264,13 +265,22 @@ http://127.0.0.1:8000/sample
 
 ## 사용 방법
 
-1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 입력값을 확인합니다. 입력값을 비워도 요청문에서 업무 입력값을 자동 추출합니다.
+1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 실행 방식, 입력값을 확인합니다. 입력값을 비워도 요청문에서 업무 입력값을 자동 추출합니다.
 2. 로그인 창이 나오는 시스템이면 `로그인 방식`을 고릅니다.
 3. 기본 대상 URL은 `/sample`입니다.
 4. `파이프라인 실행`을 누릅니다.
 5. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
 6. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
 7. 최종 영상 파일은 관리자가 별도 보관합니다.
+
+### 실행 방식
+
+작업마다 홈 화면의 `실행 방식`에서 다음 둘 중 하나를 고릅니다.
+
+- `직접 시연`: 승인 후 headed Playwright 브라우저가 열립니다. 사용자가 로그인, 입력, 클릭, 조회를 직접 수행한 뒤 화면 오른쪽 아래의 `시연 완료` 버튼을 누르면 녹화를 끝내고 마스킹, TTS, HyperFrames/영상 패키징을 진행합니다. 이 모드에서는 브라우저 에이전트가 action plan을 대신 클릭하지 않습니다.
+- `AI 자동 실행`: 승인 후 내부 planner/browser agent 설정에 따라 AI가 화면을 관찰하고 안전한 입력, 클릭, 대기, 캡처 동작을 선택합니다. `MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`와 LLM 설정이 있어야 LLM 기반 화면 판단 루프가 동작하며, 꺼져 있으면 확정된 action plan 기반 캡처로 fallback합니다.
+
+사내 시스템 화면 구성이 자주 바뀌거나 요청문만으로 selector/버튼 의미를 안정적으로 맞추기 어려운 경우에는 `직접 시연`을 기본으로 사용합니다. 반복 가능한 샘플 화면이나 검수된 target에서는 `AI 자동 실행`을 사용할 수 있습니다.
 
 Input Extractor는 먼저 요청문에서 `LOT-001`, `라인 A3`, `사용자ID U100` 같은 업무 입력값을 뽑아 `input_values`를 보강합니다. LLM이 설정되어 있으면 LLM JSON extractor를 사용하고, 없으면 로컬 규칙으로 fallback합니다. 사용자가 직접 입력한 `input_values`는 추출값보다 우선합니다. 비밀번호, OTP, token, API key, ticket류는 추출하지 않습니다.
 
@@ -383,6 +393,7 @@ MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS
 MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS
 MANUAL_AGENT_OUTPUT_DIR
 MANUAL_AGENT_ENABLE_TERMINAL_LOGS
+MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS
 MANUAL_AGENT_TTS_PROVIDER
 MANUAL_AGENT_TTS_DEVICE
 MANUAL_AGENT_TTS_LANGUAGE
@@ -409,6 +420,7 @@ MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
 MANUAL_AGENT_ENABLE_RERANKER=true
 MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=8
+MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=600
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
 MANUAL_AGENT_TTS_PROVIDER=melotts
 MANUAL_AGENT_TTS_DEVICE=cuda:0
@@ -573,12 +585,15 @@ Content-Type: application/json
   "target_url": "http://127.0.0.1:8000/sample",
   "role": "작업자",
   "completion_condition": "상세 화면이 보이면 완료",
+  "execution_mode": "demonstration",
   "input_values": {
     "LOT": "LOT-001",
     "라인": "A3"
   }
 }
 ```
+
+`execution_mode`는 `demonstration` 또는 `ai`입니다. 생략하면 백엔드 기본값은 `ai`지만, 홈 화면 기본 선택은 실제 사내 화면에서 사용자가 직접 절차를 보여줄 수 있도록 `직접 시연`입니다.
 
 빠른 테스트에서 브라우저 캡처를 생략하려면 query parameter를 사용합니다.
 

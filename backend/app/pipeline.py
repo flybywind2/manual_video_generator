@@ -35,6 +35,7 @@ class PipelineInput(BaseModel):
     role: str
     completion_condition: str
     input_values: dict[str, str] = Field(default_factory=dict)
+    execution_mode: str = "ai"
     login_mode: str = ""
     login_success_selector: str = ""
 
@@ -77,6 +78,7 @@ class PipelineDraftResult(BaseModel):
     status: str
     current_step: str
     can_continue: bool
+    execution_mode: str = "ai"
     package_dir: Path
     plan: dict[str, Any]
     rehearsal: dict[str, Any]
@@ -299,9 +301,20 @@ def _pipeline_start_details(settings: Any, output_root: Path, capture_browser: b
     }
 
 
+def _execution_mode(request: PipelineInput) -> str:
+    mode = str(getattr(request, "execution_mode", "") or "").strip().lower()
+    if mode in {"demonstration", "direct", "manual", "manual_demo", "record"}:
+        return "demonstration"
+    return "ai"
+
+
+def _is_demonstration_mode(request: PipelineInput) -> bool:
+    return _execution_mode(request) == "demonstration"
+
+
 def _requires_login_before_mcp_rehearsal(request: PipelineInput, settings: Any) -> bool:
     login = _resolve_login_options(request, settings)
-    return str(login.get("mode") or "none").lower() in {"manual", "credentials"}
+    return _is_demonstration_mode(request) or str(login.get("mode") or "none").lower() in {"manual", "credentials"}
 
 
 def _environment_terminal_details(environment: dict[str, str]) -> dict[str, Any]:
@@ -653,6 +666,7 @@ def create_pipeline_draft(
         status="awaiting_plan_review",
         current_step="plan_review",
         can_continue=True,
+        execution_mode=_execution_mode(effective_request),
         package_dir=dirs.package,
         plan=artifact_plan,
         rehearsal=artifact_rehearsal,
@@ -993,6 +1007,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
         "status": result.status,
         "current_step": result.current_step,
         "can_continue": result.can_continue,
+        "execution_mode": result.execution_mode,
         "package_dir": str(result.package_dir),
         "plan": result.plan,
         "rehearsal": result.rehearsal,
@@ -1098,7 +1113,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     from playwright.sync_api import sync_playwright
 
     login = _resolve_login_options(request, settings)
-    launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual")
+    demonstration_mode = _is_demonstration_mode(request)
+    launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual" or demonstration_mode)
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
         context_options: dict[str, Any] = {
@@ -1120,7 +1136,11 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
             _raise_if_login_failed(auth_result)
             manual_authenticated = True
         actions = plan.get("actions", [])
-        if getattr(settings, "enable_browser_agent", False):
+        if demonstration_mode:
+            if not manual_authenticated:
+                _prepare_capture_page(page, request.target_url)
+            capture_result = _execute_demonstration_capture(page, request, plan, dirs.captures, settings)
+        elif getattr(settings, "enable_browser_agent", False):
             if not manual_authenticated:
                 _prepare_capture_page(page, request.target_url)
             capture_result = _execute_browser_agent_actions(page, request, plan, dirs.captures, settings)
@@ -1404,6 +1424,68 @@ def _execute_capture_actions(
 
     status, degrade_reason = _capture_action_log_status(action_log, failed_reason="capture_action_failed")
     return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
+
+
+def _execute_demonstration_capture(
+    page: Any,
+    request: PipelineInput,
+    plan: dict[str, Any],
+    capture_dir: Path,
+    settings: Any,
+) -> dict[str, Any]:
+    used_names: set[str] = set()
+    captures: list[Path] = []
+    step = {
+        "id": "direct_demonstration",
+        "title": "직접 시연",
+        "caption": "사용자가 브라우저에서 직접 수행한 절차를 기록합니다.",
+        "narration": "사용자가 브라우저에서 직접 수행한 절차를 기록합니다.",
+    }
+    first_step = _first_plan_step(plan)
+    if first_step.get("title"):
+        step["caption"] = str(first_step.get("caption") or step["caption"])
+        step["narration"] = str(first_step.get("narration") or step["narration"])
+
+    signal_state = _ManualLoginSignalState()
+    timeout_ms = int(float(getattr(settings, "demonstration_timeout_seconds", 600.0) or 600.0) * 1000)
+    action_log: list[dict[str, Any]] = []
+    try:
+        _install_demonstration_recorder(page)
+        _install_demonstration_signal(page, signal_state=signal_state)
+        _apply_step_overlay(page, step)
+        completion_signal = _wait_for_demonstration_completion(page, timeout_ms, signal_state)
+        events = _read_demonstration_events(page)
+        _remove_demonstration_signal(page)
+        captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
+        action_log.append(
+            {
+                "type": "demonstration",
+                "mode": "demonstration",
+                "status": "ok",
+                "completion_signal": completion_signal,
+                "event_count": len(events),
+                "target_url": request.target_url,
+            }
+        )
+        action_log.extend(events)
+        return {"captures": captures, "action_log": action_log, "status": "ok", "degrade_reason": ""}
+    except Exception as exc:  # noqa: BLE001 - preserve the video and final frame when direct demonstration fails.
+        action_log.append(
+            {
+                "type": "demonstration",
+                "mode": "demonstration",
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        if not captures:
+            captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
+        return {
+            "captures": captures,
+            "action_log": action_log,
+            "status": "degraded",
+            "degrade_reason": "demonstration_capture_failed",
+        }
 
 
 def _execute_browser_agent_actions(
@@ -1712,6 +1794,216 @@ def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
     if mode == "credentials":
         return _submit_login_credentials(page, login)
     return {"type": "login", "mode": mode, "status": "skipped"}
+
+
+def _install_demonstration_recorder(page: Any) -> None:
+    script = """
+    (() => {
+      if (window.__manualDemonstrationRecorderInstalled) return;
+      window.__manualDemonstrationRecorderInstalled = true;
+      window.__manualDemonstrationEvents = window.__manualDemonstrationEvents || [];
+      const sensitive = /password|passwd|pwd|otp|pin|token|secret|api[_ -]?key|ticket|credential|authorization/i;
+      const now = () => new Date().toISOString();
+      const visibleText = (el) => (el?.innerText || el?.value || el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || '').trim();
+      const labelFor = (el) => {
+        const labels = Array.from(el?.labels || []).map((label) => label.innerText.trim()).filter(Boolean);
+        if (labels.length) return labels.join(' ');
+        const id = el?.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+        return (id?.innerText || el?.getAttribute?.('aria-label') || el?.getAttribute?.('placeholder') || el?.name || '').trim();
+      };
+      const redactValue = (el) => {
+        const marker = `${el?.type || ''} ${el?.name || ''} ${el?.id || ''} ${labelFor(el)}`;
+        if (sensitive.test(marker)) return '<redacted>';
+        return String(el?.value || '').slice(0, 160);
+      };
+      const push = (event) => {
+        if (window.__manualDemonstrationEvents.length >= 500) return;
+        window.__manualDemonstrationEvents.push(event);
+      };
+      document.addEventListener('click', (event) => {
+        const el = event.target?.closest?.('button,[role="button"],a,input,textarea,select');
+        if (!el || el.getAttribute('data-manual-demonstration-signal') === 'true' || el.getAttribute('data-manual-login-signal') === 'true') return;
+        push({
+          type: 'click',
+          timestamp: now(),
+          label: labelFor(el),
+          text: visibleText(el).slice(0, 160),
+          tag: el.tagName?.toLowerCase?.() || '',
+          role: el.getAttribute?.('role') || '',
+          href: el.tagName?.toLowerCase?.() === 'a' ? el.getAttribute('href') || '' : ''
+        });
+      }, true);
+      document.addEventListener('change', (event) => {
+        const el = event.target;
+        if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return;
+        push({
+          type: 'input',
+          timestamp: now(),
+          label: labelFor(el),
+          field: el.name || el.id || '',
+          input_type: el.getAttribute('type') || el.tagName.toLowerCase(),
+          value: redactValue(el)
+        });
+      }, true);
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        const el = event.target;
+        push({
+          type: 'key',
+          timestamp: now(),
+          key: 'Enter',
+          label: labelFor(el),
+          field: el?.name || el?.id || ''
+        });
+      }, true);
+    })();
+    """
+    page.add_init_script(script)
+    page.evaluate(script)
+
+
+def _install_demonstration_signal(page: Any, signal_state: _ManualLoginSignalState | None = None) -> None:
+    signal_state = signal_state or _ManualLoginSignalState()
+    try:
+        page.expose_function("__manualDemonstrationSignalFromPage", signal_state.mark_completed)
+    except Exception:
+        pass
+    script = """
+    (() => {
+      const readStoredCompletion = () => {
+        try { return window.sessionStorage.getItem('__manualDemonstrationCompleted') === 'true'; } catch { return false; }
+      };
+      window.__manualDemonstrationCompleted = window.__manualDemonstrationCompleted === true || readStoredCompletion();
+      const selector = '[data-manual-demonstration-signal="true"]';
+      window.__manualDemonstrationCleanup = () => {
+        const button = document.querySelector(selector);
+        if (button) button.remove();
+        if (window.__manualDemonstrationSignalObserver) {
+          window.__manualDemonstrationSignalObserver.disconnect();
+          window.__manualDemonstrationSignalObserver = null;
+        }
+        if (window.__manualDemonstrationSignalInterval) {
+          window.clearInterval(window.__manualDemonstrationSignalInterval);
+          window.__manualDemonstrationSignalInterval = null;
+        }
+      };
+      window.__manualDemonstrationSignal = () => {
+        window.__manualDemonstrationCompleted = true;
+        try { window.sessionStorage.setItem('__manualDemonstrationCompleted', 'true'); } catch {}
+        try {
+          if (typeof window.__manualDemonstrationSignalFromPage === 'function') {
+            window.__manualDemonstrationSignalFromPage();
+          }
+        } catch {}
+        const button = document.querySelector(selector);
+        if (button) {
+          button.textContent = '시연 완료됨';
+          button.disabled = true;
+          button.style.opacity = '0.72';
+        }
+      };
+      const install = () => {
+        if (!document.body || document.querySelector(selector)) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '시연 완료';
+        button.setAttribute('data-manual-demonstration-signal', 'true');
+        button.setAttribute('aria-label', '시연 완료 신호 전송');
+        button.style.cssText = [
+          'position:fixed',
+          'right:24px',
+          'bottom:24px',
+          'z-index:2147483647',
+          'border:0',
+          'border-radius:8px',
+          'padding:14px 18px',
+          'background:#111827',
+          'color:#fff',
+          'font:800 15px/1.2 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+          'box-shadow:0 18px 48px rgba(17,24,39,.24)',
+          'cursor:pointer'
+        ].join(';');
+        button.addEventListener('click', window.__manualDemonstrationSignal);
+        document.body.appendChild(button);
+      };
+      const keepInstalled = () => {
+        try { install(); } catch {}
+      };
+      if (!window.__manualDemonstrationSignalObserver && typeof MutationObserver !== 'undefined') {
+        window.__manualDemonstrationSignalObserver = new MutationObserver(keepInstalled);
+        window.__manualDemonstrationSignalObserver.observe(document.documentElement || document, {
+          childList: true,
+          subtree: true
+        });
+      }
+      if (!window.__manualDemonstrationSignalInterval) {
+        window.__manualDemonstrationSignalInterval = window.setInterval(keepInstalled, 1000);
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', keepInstalled, { once: true });
+      } else {
+        keepInstalled();
+      }
+    })();
+    """
+    page.add_init_script(script)
+    page.evaluate(script)
+
+
+def _wait_for_demonstration_completion(
+    page: Any,
+    timeout_ms: int,
+    signal_state: _ManualLoginSignalState,
+) -> str:
+    deadline = time.monotonic() + (max(timeout_ms, 1) / 1000)
+    last_error = ""
+    while time.monotonic() < deadline:
+        if signal_state.completed:
+            return "button"
+        try:
+            state = page.evaluate(
+                """
+                () => {
+                  const storedCompleted = (() => {
+                    try { return window.sessionStorage.getItem('__manualDemonstrationCompleted') === 'true'; } catch { return false; }
+                  })();
+                  const completed = window.__manualDemonstrationCompleted === true || storedCompleted;
+                  return { completed };
+                }
+                """
+            )
+            if isinstance(state, dict) and state.get("completed"):
+                return "button"
+        except Exception as exc:  # noqa: BLE001 - navigation can temporarily destroy the execution context.
+            last_error = f"{type(exc).__name__}: {exc}"
+        _manual_login_wait_tick(page)
+    suffix = f" Last page check: {last_error}" if last_error else ""
+    raise TimeoutError(f"demonstration was not confirmed.{suffix}")
+
+
+def _read_demonstration_events(page: Any) -> list[dict[str, Any]]:
+    try:
+        events = page.evaluate("() => (window.__manualDemonstrationEvents || []).slice()")
+    except Exception:
+        return []
+    if not isinstance(events, list):
+        return []
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _remove_demonstration_signal(page: Any) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              if (typeof window.__manualDemonstrationCleanup === 'function') {
+                window.__manualDemonstrationCleanup();
+              }
+            }
+            """
+        )
+    except Exception:
+        pass
 
 
 def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
