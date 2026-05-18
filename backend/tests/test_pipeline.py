@@ -337,6 +337,32 @@ def test_audit_log_records_runtime_tool_usage_events(tmp_path):
     assert all(event["run_id"] == result.job_id for event in events if event["actor"] == "tool")
 
 
+def test_runtime_tool_log_marks_rag_disabled_when_context_toggle_is_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_RAG_RETRIEVE_URL", "http://api.net/elastic/v2/retrieve-rrf")
+    monkeypatch.setenv("MANUAL_AGENT_RAG_API_KEY", "rag-key")
+    monkeypatch.setenv("MANUAL_AGENT_RAG_DEP_TICKET", "credential:TICKET-123")
+    monkeypatch.setenv("MANUAL_AGENT_RAG_INDEX_NAME", "manual-video")
+    monkeypatch.setenv("MANUAL_AGENT_ENABLE_RAG_CONTEXT", "false")
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="포털 권한 신청 영상 만들기",
+            target_url="http://internal.example.local/portal",
+            role="신청자",
+            completion_condition="신청 완료 화면",
+            input_values={"사용자ID": "U100"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    events = [json.loads(line) for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()]
+    rag_event = next(event for event in events if event["actor"] == "tool" and event["details"].get("tool") == "rag")
+
+    assert rag_event["status"] == "disabled"
+    assert rag_event["details"]["enabled"] is False
+
+
 def test_package_manifest_environment_fingerprint_does_not_include_secret_values(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OPENAI_API_KEY", "super-secret-key")
     monkeypatch.setenv("MANUAL_AGENT_DEP_TICKET", "credential:SECRET")

@@ -133,6 +133,12 @@ def _record_tool(
     )
 
 
+def _enabled_tool_status(enabled: bool, configured: bool) -> str:
+    if not enabled:
+        return "disabled"
+    return "configured" if configured else "missing"
+
+
 def _record_runtime_tool_inventory(
     audit: AuditLog,
     terminal: TerminalRunLogger,
@@ -159,7 +165,7 @@ def _record_runtime_tool_inventory(
         audit,
         terminal,
         tool="rag",
-        status="configured" if settings.rag.is_configured else "missing",
+        status=_enabled_tool_status(settings.enable_rag_context, settings.rag.is_configured),
         details={
             "enabled": settings.enable_rag_context,
             "retrieve_url_set": bool(settings.rag.retrieve_url),
@@ -171,7 +177,7 @@ def _record_runtime_tool_inventory(
         audit,
         terminal,
         tool="reranker",
-        status="configured" if settings.reranker.is_configured else "missing",
+        status=_enabled_tool_status(settings.enable_reranker, settings.reranker.is_configured),
         details={
             "enabled": settings.enable_reranker,
             "url_set": bool(settings.reranker.url),
