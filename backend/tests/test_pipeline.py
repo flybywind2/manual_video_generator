@@ -1865,6 +1865,136 @@ def test_demonstration_capture_waits_for_user_signal_instead_of_browser_agent(tm
     assert result["video"].exists()
 
 
+def test_demonstration_mode_ignores_manual_login_gate_and_uses_only_demo_signal(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakePage:
+        def __init__(self, kind="recorded"):
+            self.kind = kind
+
+        def goto(self, url, wait_until):
+            events.append((self.kind, "goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append((self.kind, "wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, *args, **kwargs):
+            events.append((self.kind, "wait_for_function", "manualLoginCompleted" in expression, args, kwargs))
+            return True
+
+        def add_style_tag(self, content):
+            events.append((self.kind, "add_style_tag"))
+
+        def add_init_script(self, script):
+            events.append((self.kind, "add_init_script", "로그인 완료" in script, "시연 완료" in script))
+
+        def expose_function(self, name, callback):
+            events.append((self.kind, "expose_function", name))
+            if name == "__manualDemonstrationSignalFromPage":
+                callback()
+
+        def evaluate(self, script, *args):
+            if "__manualDemonstrationEvents" in script and "slice()" in script:
+                return [{"type": "click", "label": "로그인 버튼", "text": "로그인"}]
+            if "manualDemonstrationCompleted" in script:
+                return {"completed": True}
+            if "manualLoginCompleted" in script or "manualLoginSignal" in script:
+                events.append((self.kind, "unexpected_manual_login_evaluate"))
+                return {"completed": True, "successSelectorMatched": False}
+            events.append((self.kind, "evaluate", args))
+            return None
+
+        def wait_for_timeout(self, timeout):
+            events.append((self.kind, "wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append((self.kind, "screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    class FakeContext:
+        def __init__(self, options):
+            self.options = options
+            self.kind = "recorded" if options.get("record_video_dir") else "control"
+
+        def new_page(self):
+            events.append((self.kind, "new_page"))
+            return FakePage(self.kind)
+
+        def storage_state(self):
+            events.append((self.kind, "storage_state"))
+            return {"cookies": [{"name": "sid", "value": "should-not-use"}], "origins": []}
+
+        def close(self):
+            raw_dir = self.options.get("record_video_dir")
+            if raw_dir:
+                Path(raw_dir).mkdir(parents=True, exist_ok=True)
+                Path(raw_dir, "demo.webm").write_bytes(b"webm")
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            return FakeContext(kwargs)
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs.get("headless")))
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        enable_browser_agent = True
+        demonstration_timeout_seconds = 60.0
+
+        class llm:
+            is_configured = True
+
+        class login:
+            mode = "manual"
+            username_selector = ""
+            password_selector = ""
+            submit_selector = ""
+            success_selector = ""
+            username = ""
+            password = ""
+            manual_timeout_seconds = 120.0
+            credentials_timeout_seconds = 30.0
+
+    request = PipelineInput(
+        request_text="로그인부터 직접 시연",
+        target_url="http://internal.example.local/login",
+        role="사용자",
+        completion_condition="홈",
+        execution_mode="demonstration",
+        login_mode="manual",
+    )
+    dirs = _make_dirs(tmp_path / "package")
+
+    result = _capture_with_playwright(request, {"steps": [], "actions": []}, dirs, Settings())
+
+    assert not any(event[0] == "control" and event[1] == "add_init_script" and event[2] is True for event in events)
+    assert any(event == ("control", "add_init_script", False, True) for event in events)
+    assert not any(event == ("control", "expose_function", "__manualLoginSignalFromPage") for event in events)
+    assert not any(event == ("recorded", "storage_state") for event in events)
+    assert not any(entry.get("type") == "login" for entry in result["action_log"])
+    assert result["action_log"][0]["type"] == "demonstration"
+    assert result["video"].exists()
+
+
 def test_demonstration_recorder_records_events_without_burned_in_captions():
     calls = []
 

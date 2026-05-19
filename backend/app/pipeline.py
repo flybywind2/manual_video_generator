@@ -1314,6 +1314,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
 
     login = _resolve_login_options(request, settings)
     demonstration_mode = _is_demonstration_mode(request)
+    if demonstration_mode:
+        login = {**login, "mode": "none", "success_selector": ""}
     launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual" or demonstration_mode)
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
@@ -1460,7 +1462,7 @@ def _open_signal_control_page(browser: Any) -> tuple[Any, Any]:
 </head>
 <body>
   <h1>Manual Video Agent Control</h1>
-  <p>대상 시스템 조작은 녹화 브라우저에서 진행하고, 로그인/시연 완료 신호만 이 창에서 누릅니다.</p>
+  <p>대상 시스템 조작은 녹화 브라우저에서 진행하고, 현재 단계의 완료 신호만 이 창에서 누릅니다.</p>
 </body>
 </html>"""
     set_content = getattr(page, "set_content", None)
