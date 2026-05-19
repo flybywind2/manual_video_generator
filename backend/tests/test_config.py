@@ -24,6 +24,14 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_CDP_ENDPOINT=" in env_example
     assert "MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT=" in env_example
     assert "MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN=" in env_example
+    assert "--codex" not in env_example
+
+
+def test_default_runtime_config_is_opencode_only_friendly():
+    settings = load_settings(environ={})
+
+    assert "--codex" not in settings.hyperframes_skills_command
+    assert settings.opencode_command.startswith("opencode run")
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -81,7 +89,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_VIDEO_RENDERER=hyperframes",
                 "MANUAL_AGENT_HYPERFRAMES_COMMAND=npx hyperframes render",
                 "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true",
-                "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex",
+                "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx skills add heygen-com/hyperframes",
                 "MANUAL_AGENT_ENABLE_OPENCODE=true",
                 "MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json",
                 "MANUAL_AGENT_OPENCODE_AGENT=build",
@@ -142,7 +150,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.video_renderer == "hyperframes"
     assert settings.hyperframes_command == "npx hyperframes render"
     assert settings.enable_hyperframes_skills is True
-    assert settings.hyperframes_skills_command == "npx hyperframes skills --codex"
+    assert settings.hyperframes_skills_command == "npx skills add heygen-com/hyperframes"
     assert settings.enable_opencode is True
     assert settings.opencode_command == "opencode run --format json"
     assert settings.opencode_agent == "build"

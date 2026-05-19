@@ -110,6 +110,8 @@ stateDiagram-v2
 
 개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
 
+사내 PC에서 Codex를 사용할 수 없고 OpenCode만 허용되는 배포 기준은 [OpenCode Only 사내 배포 메모](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 따릅니다.
+
 ## 환경 준비
 
 이 프로젝트의 Python 표준 버전은 `3.10.19`입니다. Python 3.11 이상을 전제로 설치하지 않습니다.
@@ -160,25 +162,11 @@ ffmpeg -version
 
 백엔드 파이프라인은 기본 캡처에는 Python Playwright를 직접 사용합니다. `playwright-mcp`는 `live` 모드에서 action plan을 실제 브라우저 tool call로 검증하는 MCP 서버입니다. 기본 `manifest` 모드는 실제 리허설이 아니라 후보 MCP call manifest만 생성합니다.
 
-Node.js와 `npx`가 필요합니다.
+Node.js와 `npx`가 필요합니다. 사내 운영 환경에서는 Codex CLI나 Codex MCP 설정을 사용하지 않습니다. 백엔드가 `.env`의 `MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND`를 직접 실행하므로 OpenCode만 설치된 PC에서도 이 단계는 동작할 수 있습니다.
 
 ```powershell
 node -v
 npx -v
-```
-
-Codex MCP 서버로 추가할 때는 다음 명령을 사용합니다.
-
-```powershell
-codex mcp add playwright npx "@playwright/mcp@latest"
-```
-
-수동으로 설정할 경우 `~/.codex/config.toml`에 다음 구성을 추가합니다.
-
-```toml
-[mcp_servers.playwright]
-command = "npx"
-args = ["@playwright/mcp@latest"]
 ```
 
 Windows에서 `npx`가 인식되지 않으면 Node.js 설치 경로가 `PATH`에 들어갔는지 먼저 확인합니다.
@@ -223,11 +211,13 @@ npx skills add heygen-com/hyperframes
 
 ```env
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
-MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx hyperframes skills --codex
+MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx skills add heygen-com/hyperframes
 MANUAL_AGENT_HYPERFRAMES_COMMAND=npx --yes hyperframes render
 ```
 
 이 명령은 렌더링 전에 실행되고 결과는 `hyperframes_skills.json`에 저장됩니다. 사내망에서 npm 접근이 막혀 실패해도 composition 생성과 fallback 영상 생성은 계속됩니다.
+
+사내 PC에서 Codex를 사용할 수 없는 경우에도 위 명령은 Codex 설정에 의존하지 않습니다. OpenCode 후처리는 별도 `MANUAL_AGENT_ENABLE_OPENCODE=true` 설정으로 실행합니다.
 
 HyperFrames 저장소 자체를 clone해서 개발할 경우 Git LFS가 필요할 수 있습니다.
 

@@ -1381,7 +1381,7 @@ def test_hyperframes_skills_command_runs_when_enabled(tmp_path: Path):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS": "true",
-            "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND": "npx hyperframes skills --codex",
+            "MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND": "npx skills add heygen-com/hyperframes",
         }
     )
 
@@ -1395,7 +1395,7 @@ def test_hyperframes_skills_command_runs_when_enabled(tmp_path: Path):
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["enabled"] is True
     assert Path(metadata["command"][0]).name.lower() in {"npx", "npx.cmd"}
-    assert metadata["command"][1:] == ["hyperframes", "skills", "--codex"]
+    assert metadata["command"][1:] == ["skills", "add", "heygen-com/hyperframes"]
     assert metadata["stdout"] == "skills installed"
 
 

@@ -381,7 +381,7 @@ def load_settings(
         video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
         hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx --yes hyperframes render"),
         enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
-        hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx hyperframes skills --codex"),
+        hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx skills add heygen-com/hyperframes"),
         enable_opencode=_get_bool(env, "ENABLE_OPENCODE", False),
         opencode_command=_get(env, "OPENCODE_COMMAND", "opencode run --format json"),
         opencode_agent=_get(env, "OPENCODE_AGENT"),
