@@ -4,6 +4,7 @@ import wave
 from pathlib import Path
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
+from backend.app.adapters.extension_bridge import ExtensionBridgeClient
 from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
@@ -406,6 +407,41 @@ def test_browser_agent_stops_when_login_modal_blocks_target():
     assert action["status"] == "blocked"
     assert action["type"] == "finish"
     assert action["reason"] == "login_required"
+
+
+def test_extension_bridge_client_uses_observe_act_verify_contract():
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout_seconds})
+        if url.endswith("/observe"):
+            return {"status": "ok", "observation": {"url": "https://internal.local", "fields": []}}
+        if url.endswith("/act"):
+            return {"status": "ok", "result": {"status": "ok", "method": "extension.click"}}
+        if url.endswith("/verify"):
+            return {"status": "ok", "verification": {"status": "ok", "changed": True}}
+        raise AssertionError(url)
+
+    client = ExtensionBridgeClient(
+        endpoint="http://127.0.0.1:8765/",
+        token="local-token",
+        timeout_seconds=5,
+        http_post=fake_post,
+    )
+
+    observation = client.observe()
+    act_result = client.act({"type": "click_by_text", "texts": ["조회"]})
+    verification = client.verify({"type": "click_by_text", "texts": ["조회"]}, act_result)
+
+    assert observation["url"] == "https://internal.local"
+    assert act_result["method"] == "extension.click"
+    assert verification["status"] == "ok"
+    assert [call["url"] for call in calls] == [
+        "http://127.0.0.1:8765/observe",
+        "http://127.0.0.1:8765/act",
+        "http://127.0.0.1:8765/verify",
+    ]
+    assert all(call["headers"]["Authorization"] == "Bearer local-token" for call in calls)
 
 
 def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):

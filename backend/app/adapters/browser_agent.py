@@ -61,6 +61,7 @@ def decide_browser_agent_action(
                 "content": (
                     "You are a browser automation agent for an internal system manual video. "
                     "Inspect the current Playwright page observation and choose exactly one next safe read-only action. "
+                    "Each turn will be executed as observe -> act -> verify, so choose an action that can be verified from the next page state. "
                     "Return JSON only. Allowed types: fill_by_label, click_by_text, press_key, wait, capture_step, finish. "
                     "Use fill_by_label only with provided input_values. Use click_by_text only for navigation/search/detail/read actions. "
                     "Use press_key only for Enter after a chat/search input has already been filled and needs submission. "

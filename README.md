@@ -462,6 +462,8 @@ MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND
 MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH
 MANUAL_AGENT_BROWSER_RUNNER
 MANUAL_AGENT_CDP_ENDPOINT
+MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT
+MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN
 MANUAL_AGENT_ENABLE_BROWSER_AGENT
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS
 MANUAL_AGENT_LOGIN_MODE
@@ -574,6 +576,8 @@ MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.company.local
 처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`을 재사용합니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
 
 Playwright가 새 브라우저를 띄우는 방식이 사내 SSO/보안정책과 맞지 않으면 CDP attach 모드를 사용할 수 있습니다. 자세한 절차는 [docs/CDP_USAGE.md](docs/CDP_USAGE.md)를 참고하세요.
+
+사내 정책상 CDP 포트를 열기 어렵거나, 사용자가 이미 로그인한 실제 브라우저 탭 안에서 agent를 동작시켜야 하면 extension bridge 모드를 사용할 수 있습니다. 이 모드는 LiteWebAgent 계열처럼 브라우저 확장/로컬 네이티브 호스트가 `observe → act → verify` API를 제공하고, Manual Video Agent는 그 계약에 따라 다음 행동을 결정합니다. 자세한 계약은 [docs/EXTENSION_BRIDGE.md](docs/EXTENSION_BRIDGE.md)를 참고하세요.
 
 터미널에서 파이프라인 구성요소별 진행 상황을 보려면 다음을 켭니다.
 

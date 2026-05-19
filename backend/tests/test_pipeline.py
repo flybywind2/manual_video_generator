@@ -1173,6 +1173,87 @@ def test_execute_browser_agent_actions_observes_page_and_executes_llm_actions(tm
     ]
 
 
+def test_execute_browser_agent_actions_records_observe_act_verify_turns(tmp_path):
+    observations = [
+        {"url": "http://internal.example.local", "fields": [{"label": "검색어", "value": ""}], "clickables": []},
+        {"url": "http://internal.example.local", "fields": [{"label": "검색어", "value": "LOT-001"}], "clickables": []},
+    ]
+    calls = []
+
+    class FakeLocator:
+        def fill(self, value):
+            calls.append(("fill", value))
+
+    class FakePage:
+        def get_by_label(self, label, exact=False):
+            calls.append(("get_by_label", label, exact))
+            return FakeLocator()
+
+        def get_by_placeholder(self, label, exact=False):
+            raise AssertionError("label should be enough")
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def add_style_tag(self, content):
+            calls.append(("add_style_tag",))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    class Settings:
+        enable_browser_agent = True
+        browser_agent_max_steps = 1
+
+        class llm:
+            is_configured = True
+
+    request = PipelineInput(
+        request_text="검색어 입력",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="입력 완료",
+        input_values={"검색어": "LOT-001"},
+    )
+
+    def observe_page(page):
+        return observations.pop(0)
+
+    def decide_next(request, settings, observation, history, step_index):
+        assert observation["fields"][0]["label"] == "검색어"
+        return {
+            "status": "ok",
+            "source": "browser-agent-llm",
+            "type": "fill_by_label",
+            "label": "검색어",
+            "value": "LOT-001",
+            "reason": "검색어를 입력합니다.",
+        }
+
+    result = _execute_browser_agent_actions(
+        FakePage(),
+        request,
+        {"steps": [], "actions": []},
+        tmp_path,
+        Settings(),
+        decide_next=decide_next,
+        observe_page=observe_page,
+    )
+
+    assert result["status"] == "ok"
+    assert result["action_log"][0]["phase"] == "act"
+    assert result["action_log"][0]["observation"]["fields"][0]["label"] == "검색어"
+    assert result["action_log"][0]["verification"]["phase"] == "verify"
+    assert result["action_log"][0]["verification"]["status"] == "ok"
+    trace = json.loads((tmp_path.parent / "browser_agent_trace.json").read_text(encoding="utf-8"))
+    assert trace["contract"] == "observe-act-verify"
+    assert trace["turns"][0]["action"]["type"] == "fill_by_label"
+    assert trace["turns"][0]["verification"]["status"] == "ok"
+
+
 def test_execute_browser_agent_actions_can_press_enter_key(tmp_path):
     events = []
 
@@ -2858,6 +2939,75 @@ def test_capture_with_playwright_can_attach_to_cdp_browser_context(tmp_path, mon
     assert result["video"].exists()
     assert result["status"] == "degraded"
     assert result["degrade_reason"] == "browser_recording_missing"
+
+
+def test_capture_can_use_extension_bridge_observe_act_verify_runner(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout_seconds})
+        if url.endswith("/observe"):
+            return {
+                "status": "ok",
+                "observation": {
+                    "url": "http://internal.example.local",
+                    "fields": [{"label": "질문", "value": ""}],
+                    "clickables": [{"text": "전송"}],
+                    "body_text": "사내 챗봇",
+                },
+            }
+        if url.endswith("/act"):
+            return {"status": "ok", "result": {"status": "ok", "method": "extension.fill"}}
+        if url.endswith("/verify"):
+            return {"status": "ok", "verification": {"status": "ok", "reason": "extension_verified"}}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(pipeline_module, "post_json", fake_post)
+
+    class Settings:
+        browser_runner = "extension_bridge"
+        extension_bridge_endpoint = "http://127.0.0.1:8765"
+        extension_bridge_token = "bridge-token"
+        request_timeout_seconds = 5
+        enable_browser_agent = True
+        browser_agent_max_steps = 1
+
+        class llm:
+            is_configured = True
+
+    plan = {"steps": [{"id": "step_intro", "title": "챗봇", "caption": "챗봇"}], "actions": []}
+    dirs = _make_dirs(tmp_path / "package")
+    request = PipelineInput(
+        request_text="질문 입력",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="답변",
+        input_values={"질문": "st.form과 st.input 차이"},
+    )
+
+    def fake_decide(request, settings, observation, history, step_index):
+        return {
+            "status": "ok",
+            "source": "browser-agent-llm",
+            "type": "fill_by_label",
+            "label": "질문",
+            "value": "st.form과 st.input 차이",
+            "reason": "질문 입력",
+        }
+
+    result = pipeline_module._capture_with_extension_bridge(request, plan, dirs, Settings(), decide_next=fake_decide)
+
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "extension_bridge_video_unavailable"
+    assert result["video"].exists()
+    assert result["action_log"][0]["source"] == "extension-bridge"
+    assert result["action_log"][0]["verification"]["status"] == "ok"
+    assert [call["url"] for call in calls][:3] == [
+        "http://127.0.0.1:8765/observe",
+        "http://127.0.0.1:8765/act",
+        "http://127.0.0.1:8765/verify",
+    ]
+    assert calls[0]["headers"]["Authorization"] == "Bearer bridge-token"
 
 
 def test_raise_if_login_failed_aborts_capture_on_failed_login():

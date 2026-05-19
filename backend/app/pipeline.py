@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
+from backend.app.adapters.extension_bridge import ExtensionBridgeClient
 from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.planner import build_plan, post_json
@@ -1598,6 +1599,9 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
 def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, settings: Any) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
+    if _browser_runner_mode(settings) == "extension_bridge":
+        return _capture_with_extension_bridge(request, plan, dirs, settings)
+
     login = _resolve_login_options(request, settings)
     demonstration_mode = _is_demonstration_mode(request)
     if demonstration_mode:
@@ -1721,6 +1725,97 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     }
 
 
+def _capture_with_extension_bridge(
+    request: PipelineInput,
+    plan: dict[str, Any],
+    dirs: PipelineDirs,
+    settings: Any,
+    *,
+    decide_next: Any = decide_browser_agent_action,
+) -> dict[str, Any]:
+    client = ExtensionBridgeClient(
+        endpoint=str(getattr(settings, "extension_bridge_endpoint", "") or "http://127.0.0.1:8765"),
+        token=str(getattr(settings, "extension_bridge_token", "") or ""),
+        timeout_seconds=float(getattr(settings, "request_timeout_seconds", 30.0) or 30.0),
+        http_post=post_json,
+    )
+    action_log: list[dict[str, Any]] = []
+    history: list[dict[str, Any]] = []
+    trace_turns: list[dict[str, Any]] = []
+    max_steps = max(int(getattr(settings, "browser_agent_max_steps", 8) or 8), 1)
+    if not getattr(settings, "enable_browser_agent", False):
+        result = _create_placeholder_captures(request, dirs)
+        result["status"] = "degraded"
+        result["degrade_reason"] = "extension_bridge_browser_agent_disabled"
+        return result
+
+    for step_index in range(1, max_steps + 1):
+        try:
+            observation = client.observe()
+            decide_kwargs: dict[str, Any] = {"step_index": step_index}
+            if decide_next is decide_browser_agent_action:
+                decide_kwargs["package_dir"] = dirs.package
+            action = dict(decide_next(request, settings, observation, history, **decide_kwargs))
+            action.setdefault("id", f"ext{step_index}")
+            action.setdefault("source", "extension-bridge")
+            action["step_id"] = f"extension_bridge_step_{step_index}"
+            act_result = client.act(action)
+            verification = client.verify(action, act_result)
+            log_entry = {
+                "action_id": str(action.get("id") or ""),
+                "type": str(action.get("type") or ""),
+                "source": "extension-bridge",
+                "phase": "act",
+                "step_id": action["step_id"],
+                "status": str(act_result.get("status") or action.get("status") or "ok"),
+                "reason": str(action.get("reason") or ""),
+                "observation": observation,
+                "result": act_result,
+                "verification": {"phase": "verify", **verification},
+            }
+        except Exception as exc:  # noqa: BLE001 - keep a package when the local bridge is not reachable.
+            log_entry = {
+                "type": "extension_bridge",
+                "source": "extension-bridge",
+                "phase": "act",
+                "status": "failed",
+                "reason": "extension_bridge_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "verification": {"phase": "verify", "status": "failed", "reason": "extension_bridge_failed"},
+            }
+            action_log.append(log_entry)
+            break
+        action_log.append(log_entry)
+        trace_turns.append(
+            {
+                "step": step_index,
+                "observation": observation,
+                "action": action,
+                "result": act_result,
+                "verification": log_entry["verification"],
+            }
+        )
+        history.append(
+            {
+                "step": step_index,
+                "type": log_entry.get("type"),
+                "status": log_entry.get("status"),
+                "verification_status": log_entry["verification"].get("status"),
+                "reason": log_entry.get("reason", ""),
+            }
+        )
+        if action.get("type") == "finish":
+            break
+
+    _write_browser_agent_trace(dirs.package, trace_turns)
+    result = _create_placeholder_captures(request, dirs)
+    result["action_log"] = action_log
+    result["status"] = "degraded"
+    result["degrade_reason"] = "extension_bridge_video_unavailable"
+    _write_capture_action_log(result)
+    return result
+
+
 def _playwright_launch_kwargs(
     settings: Any,
     browser_roots: list[Path] | None = None,
@@ -1779,6 +1874,8 @@ def _browser_runner_mode(settings: Any) -> str:
     normalized = str(getattr(settings, "browser_runner", "playwright") or "playwright").strip().lower().replace("-", "_")
     if normalized in {"cdp", "cdp_attach", "attach"}:
         return "cdp_attach"
+    if normalized in {"extension", "extension_bridge", "browser_extension"}:
+        return "extension_bridge"
     return "playwright"
 
 
@@ -2514,6 +2611,8 @@ def _execute_browser_agent_actions(
     settings: Any,
     *,
     decide_next: Any = decide_browser_agent_action,
+    observe_page: Any = None,
+    verify_action: Any = None,
 ) -> dict[str, Any]:
     if not getattr(settings, "enable_browser_agent", False):
         return _execute_capture_actions(page, plan, capture_dir)
@@ -2535,12 +2634,15 @@ def _execute_browser_agent_actions(
     captures: list[Path] = []
     action_log: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
+    trace_turns: list[dict[str, Any]] = []
     used_names: set[str] = set()
     max_steps = max(int(getattr(settings, "browser_agent_max_steps", 8) or 8), 1)
+    observer = observe_page or _observe_browser_for_agent
+    verifier = verify_action
 
     for step_index in range(1, max_steps + 1):
         try:
-            observation = _observe_browser_for_agent(page)
+            observation = observer(page)
             decide_kwargs: dict[str, Any] = {"step_index": step_index}
             if decide_next is decide_browser_agent_action:
                 decide_kwargs["package_dir"] = capture_dir.parent
@@ -2575,12 +2677,33 @@ def _execute_browser_agent_actions(
         action.setdefault("source", "browser-agent-llm")
         action["step_id"] = f"browser_agent_step_{step_index}"
         log_entry = _execute_single_browser_agent_action(page, action, capture_dir, used_names)
+        verification = (
+            verifier(page, action, log_entry, observation)
+            if verifier is not None
+            else _verify_browser_agent_action(page, action, log_entry, observation, observe_page=observer)
+        )
+        log_entry["phase"] = "act"
+        log_entry["observation"] = observation
+        log_entry["verification"] = verification
+        if verification.get("status") == "failed" and log_entry.get("status") == "ok":
+            log_entry["status"] = "failed"
+            log_entry["reason"] = verification.get("reason", "verification_failed")
         action_log.append(log_entry)
+        trace_turns.append(
+            {
+                "step": step_index,
+                "observation": observation,
+                "action": action,
+                "result": {key: value for key, value in log_entry.items() if key not in {"observation", "verification"}},
+                "verification": verification,
+            }
+        )
         history.append(
             {
                 "step": step_index,
                 "type": log_entry.get("type"),
                 "status": log_entry.get("status"),
+                "verification_status": verification.get("status"),
                 "reason": log_entry.get("reason") or log_entry.get("error") or action.get("reason", ""),
             }
         )
@@ -2596,7 +2719,20 @@ def _execute_browser_agent_actions(
         captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
 
     status, degrade_reason = _capture_action_log_status(action_log, failed_reason="browser_agent_action_failed")
+    _write_browser_agent_trace(capture_dir.parent, trace_turns)
     return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
+
+
+def _write_browser_agent_trace(package_dir: Path, turns: list[dict[str, Any]]) -> None:
+    if not turns:
+        return
+    _write_json(
+        package_dir / "browser_agent_trace.json",
+        {
+            "contract": "observe-act-verify",
+            "turns": redact_sensitive(turns),
+        },
+    )
 
 
 def _capture_action_log_status(action_log: list[dict[str, Any]], *, failed_reason: str) -> tuple[str, str]:
@@ -2670,6 +2806,65 @@ def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
           };
         }
         """
+    )
+
+
+def _verify_browser_agent_action(
+    page: Any,
+    action: dict[str, Any],
+    log_entry: dict[str, Any],
+    before_observation: dict[str, Any],
+    *,
+    observe_page: Any = _observe_browser_for_agent,
+) -> dict[str, Any]:
+    if log_entry.get("status") in {"failed", "blocked"}:
+        return {
+            "phase": "verify",
+            "status": "failed",
+            "reason": log_entry.get("reason") or log_entry.get("error") or "action_failed",
+        }
+    action_type = str(action.get("type") or "")
+    if action_type == "fill_by_label":
+        try:
+            after = observe_page(page)
+        except Exception as exc:  # noqa: BLE001
+            return {"phase": "verify", "status": "failed", "reason": f"observe_failed:{type(exc).__name__}"}
+        expected = str(action.get("value") or "")
+        value_found = any(str(field.get("value") or "") == expected for field in after.get("fields", []))
+        return {
+            "phase": "verify",
+            "status": "ok" if value_found else "failed",
+            "reason": "field_value_observed" if value_found else "field_value_not_observed",
+        }
+    if action_type in {"click_by_text", "press_key", "wait"}:
+        try:
+            after = observe_page(page)
+        except Exception:
+            after = {}
+        changed = bool(after) and _observation_signature(after) != _observation_signature(before_observation)
+        return {
+            "phase": "verify",
+            "status": "ok",
+            "changed": changed,
+            "reason": "page_changed" if changed else "action_completed_unverified",
+        }
+    if action_type in {"capture_step", "finish"}:
+        return {
+            "phase": "verify",
+            "status": "ok" if log_entry.get("capture") else "failed",
+            "reason": "capture_created" if log_entry.get("capture") else "capture_missing",
+        }
+    return {"phase": "verify", "status": "ok", "reason": "no_verification_rule"}
+
+
+def _observation_signature(observation: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        observation.get("url"),
+        observation.get("title"),
+        tuple(observation.get("headings") or []),
+        tuple((item.get("text"), item.get("href")) for item in observation.get("clickables") or []),
+        tuple((item.get("label"), item.get("value")) for item in observation.get("fields") or []),
+        observation.get("body_text"),
     )
 
 

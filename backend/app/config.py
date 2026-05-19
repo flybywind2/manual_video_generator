@@ -185,6 +185,8 @@ class AppSettings:
     playwright_executable_path: str
     browser_runner: str
     cdp_endpoint: str
+    extension_bridge_endpoint: str
+    extension_bridge_token: str
     enable_browser_agent: bool
     browser_agent_max_steps: int
     tts_provider: str
@@ -237,6 +239,8 @@ class AppSettings:
                 "playwright_executable_path_set": bool(self.playwright_executable_path),
                 "browser_runner": self.browser_runner,
                 "cdp_endpoint_set": bool(self.cdp_endpoint),
+                "extension_bridge_endpoint_set": bool(self.extension_bridge_endpoint),
+                "extension_bridge_token_set": bool(self.extension_bridge_token),
                 "browser_channel": self.login.browser_channel,
                 "sso_profile_dir_set": bool(self.login.sso_profile_dir),
                 "enable_browser_agent": self.enable_browser_agent,
@@ -362,6 +366,8 @@ def load_settings(
         playwright_executable_path=_get(env, "PLAYWRIGHT_EXECUTABLE_PATH"),
         browser_runner=_normalize_browser_runner(_get(env, "BROWSER_RUNNER", "playwright")),
         cdp_endpoint=_get(env, "CDP_ENDPOINT", "http://127.0.0.1:9222"),
+        extension_bridge_endpoint=_get(env, "EXTENSION_BRIDGE_ENDPOINT", "http://127.0.0.1:8765"),
+        extension_bridge_token=_get(env, "EXTENSION_BRIDGE_TOKEN"),
         enable_browser_agent=_get_bool(env, "ENABLE_BROWSER_AGENT", False),
         browser_agent_max_steps=_get_int(env, "BROWSER_AGENT_MAX_STEPS", 8),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
@@ -487,6 +493,8 @@ def _normalize_browser_runner(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_")
     if normalized in {"cdp", "cdp_attach", "attach"}:
         return "cdp_attach"
+    if normalized in {"extension", "extension_bridge", "browser_extension"}:
+        return "extension_bridge"
     return "playwright"
 
 
