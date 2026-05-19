@@ -1,5 +1,6 @@
 import json
 import subprocess
+import wave
 from pathlib import Path
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
@@ -895,6 +896,51 @@ def test_hyperframes_render_muxes_tts_audio_into_final_video(tmp_path: Path, mon
     assert metadata["audio"]["status"] == "completed"
     assert metadata["audio"]["input_count"] == 2
     assert metadata["audio"]["video"] == str(result.video_path)
+
+
+def test_hyperframes_composition_duration_tracks_tts_audio(tmp_path: Path):
+    def write_wav(path: Path, duration_seconds: float):
+        frame_rate = 8000
+        frame_count = int(frame_rate * duration_seconds)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(frame_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
+
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "missing-hyperframes-command",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    audio_1 = tmp_path / "tts" / "01_intro.wav"
+    audio_2 = tmp_path / "tts" / "02_search.wav"
+    write_wav(audio_1, 1.25)
+    write_wav(audio_2, 2.75)
+    plan = {"steps": [{"id": "step_intro", "title": "요청 확인"}, {"id": "step_search", "title": "조회"}]}
+
+    render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_1, audio_2],
+        command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+
+    html = (tmp_path / "hyperframes" / "index.html").read_text(encoding="utf-8")
+    manifest = json.loads((tmp_path / "hyperframes" / "hyperframes_manifest.json").read_text(encoding="utf-8"))
+
+    assert 'data-duration="4.000"' in html
+    assert manifest["duration_seconds"] == 4.0
+    assert manifest["duration_source"] == "tts_audio"
 
 
 def test_hyperframes_render_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):

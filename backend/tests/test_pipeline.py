@@ -1989,7 +1989,7 @@ def test_demonstration_mode_ignores_manual_login_gate_and_uses_only_demo_signal(
     assert not any(event[0] == "control" and event[1] == "add_init_script" and event[2] is True for event in events)
     assert any(event == ("control", "add_init_script", False, True) for event in events)
     assert not any(event == ("control", "expose_function", "__manualLoginSignalFromPage") for event in events)
-    assert not any(event == ("recorded", "storage_state") for event in events)
+    assert any(event == ("recorded", "storage_state") for event in events)
     assert not any(entry.get("type") == "login" for entry in result["action_log"])
     assert result["action_log"][0]["type"] == "demonstration"
     assert result["video"].exists()
@@ -2151,6 +2151,264 @@ def test_demonstration_pipeline_uses_recorded_events_for_outputs(tmp_path, monke
     assert "subtitles.vtt" in preview
     assert "manual_video_agent_usage.webm" in preview
     assert [entry["step_id"] for entry in tts_metadata["entries"]][:2] == ["demo_start", "demo_01_input"]
+
+
+def test_demonstration_pipeline_replays_events_after_tts_for_final_video(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_capture(request, plan, dirs, settings):
+        import base64
+
+        capture = dirs.captures / "direct_demo.png"
+        capture.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+            )
+        )
+        direct_video = dirs.package / "direct_demonstration_source.webm"
+        direct_video.write_bytes(b"direct-demo")
+        action_log = [
+            {"type": "demonstration", "status": "ok", "event_count": 2},
+            {"type": "input", "label": "질문", "value": "st.form과 st.input 차이"},
+            {"type": "click", "text": "전송"},
+        ]
+        action_log_path = dirs.package / "capture_action_log.json"
+        action_log_path.write_text(json.dumps({"status": "completed", "entries": action_log}, ensure_ascii=False), encoding="utf-8")
+        return {
+            "captures": [capture],
+            "masked_names": [capture.name],
+            "video": direct_video,
+            "final_frame": capture,
+            "action_log": action_log,
+            "action_log_path": action_log_path,
+            "status": "ok",
+            "degrade_reason": "",
+            "storage_state": {"cookies": [{"name": "sid", "value": "demo"}], "origins": []},
+        }
+
+    def fake_replay(request, media_plan, action_log, dirs, settings, *, tts_audio, storage_state=None):
+        calls["replay"] = {
+            "source": media_plan.get("source"),
+            "tts_audio_count": len(tts_audio),
+            "storage_state": storage_state,
+        }
+        replay_capture = dirs.captures / "playwright_replay.png"
+        replay_capture.write_bytes((dirs.captures / "direct_demo.png").read_bytes())
+        replay_video = dirs.package / "manual_video_agent_usage.webm"
+        replay_video.write_bytes(b"playwright-replay")
+        return {
+            "status": "ok",
+            "degrade_reason": "",
+            "video": replay_video,
+            "captures": [replay_capture],
+            "masked_names": [replay_capture.name],
+            "final_frame": replay_capture,
+            "action_log": [{"type": "demonstration_replay", "status": "ok", "event_count": 2}],
+        }
+
+    class FakeVideoRender:
+        def __init__(self, package_dir: Path, fallback_video: Path):
+            self.video_path = package_dir / "manual_video_agent_usage.mp4"
+            self.video_path.write_bytes(fallback_video.read_bytes())
+            self.composition_dir = package_dir / "hyperframes"
+            self.composition_dir.mkdir(exist_ok=True)
+            self.composition_dir.joinpath("index.html").write_text("<html></html>", encoding="utf-8")
+            self.metadata_path = package_dir / "video_render.json"
+            self.metadata_path.write_text(
+                json.dumps({"fallback_video": str(fallback_video), "used_fallback": True}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.skills_metadata_path = package_dir / "hyperframes_skills.json"
+            self.skills_metadata_path.write_text("{}", encoding="utf-8")
+            self.used_fallback = True
+
+    def fake_render_final_video(*, plan, package_dir, preview_html, fallback_video, settings, tts_audio):
+        calls["render_fallback"] = fallback_video
+        return FakeVideoRender(package_dir, fallback_video)
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", fake_capture)
+    monkeypatch.setattr(pipeline_module, "_replay_demonstration_with_playwright", fake_replay, raising=False)
+    monkeypatch.setattr(pipeline_module, "render_final_video", fake_render_final_video)
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 챗봇 시연",
+            target_url="http://internal.example.local/chat",
+            role="사용자",
+            completion_condition="답변",
+            execution_mode="demonstration",
+        ),
+        base_dir=tmp_path,
+        capture_browser=True,
+    )
+
+    assert calls["replay"]["source"] == "direct-demonstration-media-plan"
+    assert calls["replay"]["tts_audio_count"] > 0
+    assert calls["replay"]["storage_state"]["cookies"][0]["name"] == "sid"
+    assert calls["render_fallback"].name == "manual_video_agent_usage.webm"
+    assert calls["render_fallback"].read_bytes() == b"playwright-replay"
+    assert result.artifacts.video.read_bytes() == b"playwright-replay"
+
+
+def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkeypatch):
+    import wave
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    def write_wav(path: Path, duration_seconds: float):
+        frame_rate = 8000
+        frame_count = int(frame_rate * duration_seconds)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(frame_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
+
+    class FakeLocator:
+        def __init__(self, kind, name):
+            self.kind = kind
+            self.name = name
+
+        def fill(self, value):
+            events.append(("fill", self.kind, self.name, value))
+
+        def click(self):
+            events.append(("click", self.kind, self.name))
+
+    class FakeKeyboard:
+        def press(self, key):
+            events.append(("key", key))
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+            return True
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag", "manual-cursor" in content))
+
+        def add_init_script(self, script):
+            events.append(("add_init_script", "__manualInstallRecordingHelpers" in script))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", script if isinstance(script, str) and script.startswith("window.") else "script", args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+        def get_by_label(self, name, *args, **kwargs):
+            return FakeLocator("label", name)
+
+        def get_by_placeholder(self, name, *args, **kwargs):
+            return FakeLocator("placeholder", name)
+
+        def get_by_role(self, role, *args, **kwargs):
+            return FakeLocator(role, kwargs.get("name") or "")
+
+        def get_by_text(self, text, *args, **kwargs):
+            return FakeLocator("text", text)
+
+    class FakeContext:
+        def __init__(self, options):
+            self.options = options
+
+        def new_page(self):
+            events.append(("new_page",))
+            return FakePage()
+
+        def close(self):
+            raw_dir = Path(self.options["record_video_dir"])
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / "replay.webm").write_bytes(b"replay-webm")
+            events.append(("context_close",))
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            events.append(("new_context", kwargs.get("storage_state"), bool(kwargs.get("record_video_dir"))))
+            return FakeContext(kwargs)
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs.get("headless")))
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+
+    dirs = _make_dirs(tmp_path / "package")
+    audio_paths = [dirs.tts / "00.wav", dirs.tts / "01.wav", dirs.tts / "02.wav", dirs.tts / "03.wav"]
+    for path, duration in zip(audio_paths, [1.1, 2.0, 1.5, 1.2]):
+        write_wav(path, duration)
+
+    media_plan = {
+        "source": "direct-demonstration-media-plan",
+        "steps": [
+            {"id": "demo_start", "title": "시작", "caption": "시작", "narration": "시작"},
+            {"id": "demo_01_input", "title": "질문 입력", "caption": "질문 입력", "narration": "질문 입력"},
+            {"id": "demo_02_click", "title": "전송 클릭", "caption": "전송 클릭", "narration": "전송 클릭"},
+            {"id": "demo_03_key", "title": "Enter", "caption": "Enter", "narration": "Enter"},
+        ],
+    }
+    action_log = [
+        {"type": "demonstration", "status": "ok", "event_count": 3},
+        {"type": "input", "label": "질문", "value": "st.form과 st.input 차이"},
+        {"type": "click", "text": "전송"},
+        {"type": "key", "key": "Enter", "label": "질문"},
+    ]
+
+    result = pipeline_module._replay_demonstration_with_playwright(
+        PipelineInput(
+            request_text="챗봇 질문",
+            target_url="http://internal.example.local/chat",
+            role="사용자",
+            completion_condition="답변",
+            execution_mode="demonstration",
+        ),
+        media_plan,
+        action_log,
+        dirs,
+        Settings(),
+        tts_audio=audio_paths,
+        storage_state={"cookies": [{"name": "sid", "value": "ok"}], "origins": []},
+    )
+
+    assert result["status"] == "ok"
+    assert result["video"].name == "manual_video_agent_usage.webm"
+    assert result["video"].read_bytes() == b"replay-webm"
+    assert ("new_context", {"cookies": [{"name": "sid", "value": "ok"}], "origins": []}, True) in events
+    assert ("fill", "label", "질문", "st.form과 st.input 차이") in events
+    assert ("click", "button", "전송") in events
+    assert ("key", "Enter") in events
+    assert any(item == ("wait_for_timeout", 1100) for item in events)
+    assert len(result["captures"]) == 3
 
 
 def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):

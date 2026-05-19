@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 import uuid
+import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -965,30 +966,8 @@ def _complete_pipeline_execution(
         },
     )
 
-    terminal.record(
-        run_id=job_id,
-        actor="masking",
-        status="started",
-        details={"capture_count": len(capture_result["captures"])},
-    )
-    masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, effective_request.input_values)
-    _record_stage(
-        audit,
-        terminal,
-        actor="masking",
-        status="ok",
-        input_data=capture_result["masked_names"],
-        artifacts=[masking_log_path],
-        terminal_details={
-            "capture_count": len(capture_result.get("captures") or []),
-            "input_value_count": len(effective_request.input_values),
-        },
-    )
     media_plan = _media_plan_for_outputs(effective_request, plan, capture_result.get("action_log", []))
     media_plan_path = _write_media_plan(media_plan, dirs.package)
-    video_path = capture_result["video"]
-    if not video_path.exists():
-        video_path = _render_placeholder_video(dirs.package)
     subtitles_path = _render_subtitles(media_plan, dirs.package)
     terminal.record(
         run_id=job_id,
@@ -1018,6 +997,94 @@ def _complete_pipeline_execution(
             "audio_count": len(tts_result.audio_paths),
         },
     )
+    replay_result: dict[str, Any] | None = None
+    if capture_browser and _should_replay_demonstration(effective_request, capture_result.get("action_log", [])):
+        terminal.record(
+            run_id=job_id,
+            actor="replay",
+            status="started",
+            details={
+                "source": "direct-demonstration-events",
+                "audio_count": len(tts_result.audio_paths),
+            },
+        )
+        try:
+            replay_result = _replay_demonstration_with_playwright(
+                effective_request,
+                media_plan,
+                capture_result.get("action_log", []),
+                dirs,
+                settings,
+                tts_audio=tts_result.audio_paths,
+                storage_state=capture_result.get("storage_state"),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep original demonstration package inspectable.
+            replay_result = {
+                "status": "degraded",
+                "degrade_reason": "demonstration_replay_failed",
+                "action_log": [
+                    {
+                        "type": "demonstration_replay",
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ],
+            }
+        _apply_replay_result(capture_result, replay_result)
+        _write_capture_action_log(capture_result)
+        _record_stage(
+            audit,
+            terminal,
+            actor="replay",
+            status=str(replay_result.get("status") or "ok"),
+            input_data={
+                "source": "direct-demonstration-events",
+                "event_count": len(_demonstration_events_for_media(capture_result.get("action_log", []))),
+            },
+            output_data={
+                "video": str(replay_result.get("video") or ""),
+                "captures": replay_result.get("masked_names", []),
+                "action_log": redact_sensitive(replay_result.get("action_log", [])),
+            },
+            degrade_reason=str(replay_result.get("degrade_reason") or ""),
+            artifacts=[
+                Path(path)
+                for path in [
+                    *(replay_result.get("captures") or []),
+                    replay_result.get("video"),
+                    capture_result.get("action_log_path"),
+                ]
+                if path
+            ],
+            terminal_details={
+                "status": str(replay_result.get("status") or "ok"),
+                "audio_count": len(tts_result.audio_paths),
+                "capture_count": len(replay_result.get("captures") or []),
+            },
+        )
+
+    terminal.record(
+        run_id=job_id,
+        actor="masking",
+        status="started",
+        details={"capture_count": len(capture_result["captures"])},
+    )
+    masking_log_path = _mask_captures(capture_result["captures"], dirs.masked, effective_request.input_values)
+    _record_stage(
+        audit,
+        terminal,
+        actor="masking",
+        status="ok",
+        input_data=capture_result["masked_names"],
+        artifacts=[masking_log_path],
+        terminal_details={
+            "capture_count": len(capture_result.get("captures") or []),
+            "input_value_count": len(effective_request.input_values),
+        },
+    )
+    video_path = capture_result["video"]
+    if not video_path.exists():
+        video_path = _render_placeholder_video(dirs.package)
     html_path = _render_preview(
         effective_request,
         media_plan,
@@ -1364,6 +1431,11 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
                 page.wait_for_timeout(900)
                 captures.append(_screenshot(page, dirs.captures, _step_capture_name(first_step, set())))
             final_frame = _screenshot(page, dirs.package, "final_frame.png")
+            if demonstration_mode:
+                try:
+                    capture_result["storage_state"] = context.storage_state()
+                except Exception:
+                    capture_result["storage_state"] = None
         finally:
             if context is not None:
                 context.close()
@@ -1372,7 +1444,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
             browser.close()
 
     videos = sorted(dirs.raw_video.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
-    video = dirs.package / "manual_video_agent_usage.webm"
+    video_name = "direct_demonstration_source.webm" if demonstration_mode else "manual_video_agent_usage.webm"
+    video = dirs.package / video_name
     if videos:
         shutil.copy2(videos[0], video)
     else:
@@ -1740,6 +1813,232 @@ def _execute_demonstration_capture(
             "status": "degraded",
             "degrade_reason": "demonstration_capture_failed",
         }
+
+
+def _should_replay_demonstration(request: PipelineInput, action_log: list[dict[str, Any]]) -> bool:
+    return _is_demonstration_mode(request) and bool(_demonstration_events_for_media(action_log))
+
+
+def _replay_demonstration_with_playwright(
+    request: PipelineInput,
+    media_plan: dict[str, Any],
+    action_log: list[dict[str, Any]],
+    dirs: PipelineDirs,
+    settings: Any,
+    *,
+    tts_audio: list[Path],
+    storage_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    events = _demonstration_events_for_media(action_log)
+    if not events:
+        return {
+            "status": "skipped",
+            "degrade_reason": "",
+            "captures": [],
+            "masked_names": [],
+            "action_log": [{"type": "demonstration_replay", "status": "skipped", "reason": "no_demonstration_events"}],
+        }
+
+    replay_dir = dirs.raw_video / "replay"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    captures: list[Path] = []
+    replay_log: list[dict[str, Any]] = [
+        {
+            "type": "demonstration_replay",
+            "status": "started",
+            "event_count": len(events),
+            "source": "direct-demonstration-events",
+        }
+    ]
+    used_names: set[str] = set()
+    durations = _step_audio_durations(media_plan, tts_audio)
+    steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
+    launch_kwargs = _playwright_launch_kwargs(settings, interactive=False)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**launch_kwargs)
+        context = None
+        try:
+            context_options: dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 800},
+                "record_video_dir": str(replay_dir),
+                "record_video_size": {"width": 1280, "height": 800},
+            }
+            if isinstance(storage_state, dict) and storage_state:
+                context_options["storage_state"] = storage_state
+            context = browser.new_context(**context_options)
+            page = context.new_page()
+            _prepare_capture_page(page, request.target_url)
+            if durations:
+                _wait_for_replay_step(page, durations[0])
+            for index, event in enumerate(events, start=1):
+                step = steps[index] if index < len(steps) else _demonstration_event_to_step(index, event)
+                duration = durations[index] if index < len(durations) else _fallback_step_duration_seconds(step)
+                replay_log.append(_execute_demonstration_replay_event(page, event, step, duration))
+                captures.append(_screenshot(page, dirs.captures, _step_capture_name(step, used_names)))
+            final_frame = _screenshot(page, dirs.package, "final_frame.png")
+        finally:
+            if context is not None:
+                context.close()
+            browser.close()
+
+    videos = sorted(replay_dir.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not videos:
+        replay_log.append({"type": "demonstration_replay_video", "status": "failed", "reason": "browser_recording_missing"})
+        return {
+            "status": "degraded",
+            "degrade_reason": "demonstration_replay_recording_missing",
+            "captures": captures,
+            "masked_names": [path.name for path in captures],
+            "final_frame": final_frame if "final_frame" in locals() else None,
+            "action_log": replay_log,
+        }
+    video = dirs.package / "manual_video_agent_usage.webm"
+    shutil.copy2(videos[0], video)
+    replay_log[0]["status"] = "ok"
+    replay_log.append({"type": "demonstration_replay_video", "status": "ok", "video": str(video)})
+    return {
+        "status": "ok",
+        "degrade_reason": "",
+        "video": video,
+        "captures": captures,
+        "masked_names": [path.name for path in captures],
+        "final_frame": final_frame,
+        "action_log": replay_log,
+    }
+
+
+def _execute_demonstration_replay_event(page: Any, event: dict[str, Any], step: dict[str, Any], duration_seconds: float) -> dict[str, Any]:
+    event_type = str(event.get("type") or "")
+    log_entry = {
+        "type": "demonstration_replay_event",
+        "source_event_type": event_type,
+        "step_id": step.get("id"),
+        "status": "ok",
+        "duration_seconds": round(float(duration_seconds), 3),
+    }
+    pre_ms, post_ms = _replay_wait_parts(duration_seconds)
+    try:
+        _apply_replay_visual_cue(page, event)
+        page.wait_for_timeout(pre_ms)
+        if event_type == "input":
+            value = str(event.get("value") or "")
+            label = _event_target_label(event, fallback="입력값")
+            if value == "<redacted>":
+                log_entry["status"] = "skipped"
+                log_entry["reason"] = "redacted_input_value"
+            else:
+                log_entry["method"] = _fill_by_label(page, label, value)
+        elif event_type == "click":
+            texts = _replay_text_candidates(event)
+            log_entry["method"] = _click_by_text(page, texts)
+        elif event_type == "key":
+            key = str(event.get("key") or "Enter")
+            page.keyboard.press(key)
+            log_entry["key"] = key
+        else:
+            log_entry["status"] = "skipped"
+            log_entry["reason"] = "unsupported_demonstration_event"
+        page.wait_for_timeout(post_ms)
+    except Exception as exc:  # noqa: BLE001 - keep replay going so a partial video is still produced.
+        log_entry["status"] = "failed"
+        log_entry["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            page.wait_for_timeout(max(post_ms, 250))
+        except Exception:
+            pass
+    return log_entry
+
+
+def _apply_replay_visual_cue(page: Any, event: dict[str, Any]) -> None:
+    event_type = str(event.get("type") or "")
+    try:
+        if event_type == "input":
+            page.evaluate("window.__manualFocusByLabel", _event_target_label(event, fallback="입력값"))
+        elif event_type == "click":
+            page.evaluate("window.__manualFocusByText", _replay_text_candidates(event))
+    except Exception:
+        pass
+
+
+def _replay_text_candidates(event: dict[str, Any]) -> list[str]:
+    candidates = [
+        str(event.get("text") or "").strip(),
+        str(event.get("label") or "").strip(),
+        str(event.get("role") or "").strip(),
+        str(event.get("tag") or "").strip(),
+    ]
+    return [candidate for candidate in candidates if candidate]
+
+
+def _step_audio_durations(media_plan: dict[str, Any], audio_paths: list[Path]) -> list[float]:
+    steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
+    durations: list[float] = []
+    for index, step in enumerate(steps):
+        audio_path = audio_paths[index] if index < len(audio_paths) else None
+        duration = _wav_duration_seconds(audio_path) if audio_path else 0.0
+        durations.append(duration if duration > 0 else _fallback_step_duration_seconds(step))
+    return durations
+
+
+def _wav_duration_seconds(path: Path | None) -> float:
+    if path is None or not path.exists() or path.stat().st_size <= 0:
+        return 0.0
+    try:
+        with wave.open(str(path), "rb") as handle:
+            frame_rate = handle.getframerate()
+            if frame_rate <= 0:
+                return 0.0
+            return float(handle.getnframes()) / float(frame_rate)
+    except Exception:
+        return 0.0
+
+
+def _fallback_step_duration_seconds(step: dict[str, Any]) -> float:
+    text = str(step.get("narration") or step.get("caption") or step.get("title") or "")
+    estimated = max(1.4, len(text) / 9.0)
+    return min(8.0, estimated)
+
+
+def _replay_wait_parts(duration_seconds: float) -> tuple[int, int]:
+    total_ms = max(900, int(max(duration_seconds, 0.1) * 1000))
+    pre_ms = min(900, max(250, int(total_ms * 0.28)))
+    return pre_ms, max(250, total_ms - pre_ms)
+
+
+def _wait_for_replay_step(page: Any, duration_seconds: float) -> None:
+    page.wait_for_timeout(max(500, int(max(duration_seconds, 0.1) * 1000)))
+
+
+def _apply_replay_result(capture_result: dict[str, Any], replay_result: dict[str, Any]) -> None:
+    capture_result["action_log"] = [*capture_result.get("action_log", []), *replay_result.get("action_log", [])]
+    if replay_result.get("video"):
+        capture_result["video"] = Path(replay_result["video"])
+    if replay_result.get("captures"):
+        capture_result["captures"] = [Path(path) for path in replay_result["captures"]]
+    if replay_result.get("masked_names"):
+        capture_result["masked_names"] = list(replay_result["masked_names"])
+    if replay_result.get("final_frame"):
+        capture_result["final_frame"] = Path(replay_result["final_frame"])
+    if str(replay_result.get("status") or "") == "degraded":
+        capture_result["status"] = "degraded"
+        capture_result["degrade_reason"] = str(replay_result.get("degrade_reason") or "demonstration_replay_failed")
+
+
+def _write_capture_action_log(capture_result: dict[str, Any]) -> None:
+    path = capture_result.get("action_log_path")
+    if not path:
+        return
+    status = "completed" if str(capture_result.get("status", "ok")) == "ok" else str(capture_result.get("status"))
+    payload: dict[str, Any] = {
+        "status": status,
+        "entries": redact_sensitive(capture_result.get("action_log", [])),
+    }
+    if capture_result.get("degrade_reason"):
+        payload["reason"] = str(capture_result.get("degrade_reason"))
+    _write_json(Path(path), payload)
 
 
 def _execute_browser_agent_actions(

@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -35,17 +36,27 @@ def render_final_video(
     tts_audio: list[Path] | None = None,
     command_runner: CommandRunner | None = None,
 ) -> VideoRenderResult:
-    composition_dir = _write_hyperframes_composition(plan, package_dir, preview_html, fallback_video)
+    audio_paths = [Path(path) for path in (tts_audio or [])]
+    duration_seconds, duration_source = _composition_duration(plan, audio_paths)
+    composition_dir = _write_hyperframes_composition(
+        plan,
+        package_dir,
+        preview_html,
+        fallback_video,
+        duration_seconds=duration_seconds,
+        duration_source=duration_source,
+    )
     metadata_path = package_dir / "video_render.json"
     runner = subprocess.run if command_runner is None else command_runner
     renderer = settings.video_renderer.lower()
-    audio_paths = [Path(path) for path in (tts_audio or [])]
 
     metadata: dict[str, Any] = {
         "renderer": renderer,
         "composition_dir": str(composition_dir),
         "preview_html": str(preview_html),
         "fallback_video": str(fallback_video),
+        "composition_duration_seconds": duration_seconds,
+        "composition_duration_source": duration_source,
         "used_fallback": True,
     }
     skills = ensure_hyperframes_skills(settings, package_dir)
@@ -263,7 +274,36 @@ def _concat_file_line(path: Path) -> str:
     return f"file '{normalized}'"
 
 
-def _write_hyperframes_composition(plan: dict[str, Any], package_dir: Path, preview_html: Path, fallback_video: Path) -> Path:
+def _composition_duration(plan: dict[str, Any], audio_paths: list[Path]) -> tuple[float, str]:
+    audio_duration = sum(_wav_duration_seconds(path) for path in audio_paths)
+    if audio_duration > 0:
+        return round(max(1.0, audio_duration), 3), "tts_audio"
+    step_count = max(1, len([step for step in plan.get("steps", []) if isinstance(step, dict)]))
+    return float(max(6, min(90, step_count * 4))), "step_count"
+
+
+def _wav_duration_seconds(path: Path) -> float:
+    if not path.exists() or path.stat().st_size <= 0:
+        return 0.0
+    try:
+        with wave.open(str(path), "rb") as handle:
+            frame_rate = handle.getframerate()
+            if frame_rate <= 0:
+                return 0.0
+            return float(handle.getnframes()) / float(frame_rate)
+    except Exception:
+        return 0.0
+
+
+def _write_hyperframes_composition(
+    plan: dict[str, Any],
+    package_dir: Path,
+    preview_html: Path,
+    fallback_video: Path,
+    *,
+    duration_seconds: float,
+    duration_source: str,
+) -> Path:
     composition_dir = package_dir / "hyperframes"
     composition_dir.mkdir(parents=True, exist_ok=True)
     source_video = Path(os.path.relpath(fallback_video, composition_dir)).as_posix()
@@ -305,7 +345,7 @@ def _write_hyperframes_composition(plan: dict[str, Any], package_dir: Path, prev
   </style>
 </head>
 <body>
-  <div data-composition-id="manual-video-agent" data-duration="18" data-fps="30">
+  <div data-composition-id="manual-video-agent" data-duration="{duration_seconds:.3f}" data-fps="30">
     <div class="stage">
       <video class="manual-source-video" src="{_escape(source_video)}" muted autoplay loop playsinline></video>
       <div class="manual-video-pointer"></div>
@@ -328,6 +368,8 @@ def _write_hyperframes_composition(plan: dict[str, Any], package_dir: Path, prev
                 "source_preview": str(preview_html),
                 "source_video": str(fallback_video),
                 "source_video_relative": source_video,
+                "duration_seconds": duration_seconds,
+                "duration_source": duration_source,
                 "steps": len(slides),
             },
             ensure_ascii=False,
