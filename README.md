@@ -108,6 +108,8 @@ stateDiagram-v2
 
 현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
 
+개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
+
 ## 환경 준비
 
 이 프로젝트의 Python 표준 버전은 `3.10.19`입니다. Python 3.11 이상을 전제로 설치하지 않습니다.
