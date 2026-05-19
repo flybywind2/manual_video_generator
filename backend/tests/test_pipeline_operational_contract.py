@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,63 @@ def test_continue_is_idempotent_after_workflow_completed(tmp_path: Path, monkeyp
 
     assert second_result.job_id == first_result.job_id
     assert second_result.artifacts.package_manifest == first_result.artifacts.package_manifest
+
+
+def test_continue_updates_workflow_state_between_execution_stages(tmp_path: Path, monkeypatch):
+    draft = create_pipeline_draft(_request(), base_dir=tmp_path, capture_browser=False)
+    state_path = draft.package_dir / "workflow_state.json"
+    observed_steps: list[str] = []
+
+    original_synthesize_tts = pipeline_module.synthesize_tts
+
+    def read_current_step() -> str:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        return str(state["current_step"])
+
+    def checking_synthesize_tts(*args, **kwargs):
+        observed_steps.append(read_current_step())
+        return original_synthesize_tts(*args, **kwargs)
+
+    def checking_render_final_video(*, fallback_video, package_dir, **_kwargs):
+        observed_steps.append(read_current_step())
+        composition_dir = package_dir / "hyperframes"
+        composition_dir.mkdir(parents=True, exist_ok=True)
+        (composition_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+        metadata_path = package_dir / "video_render.json"
+        metadata_path.write_text(
+            json.dumps({"status": "skipped", "used_fallback": True, "video": str(fallback_video)}),
+            encoding="utf-8",
+        )
+        skills_metadata_path = package_dir / "hyperframes_skills.json"
+        skills_metadata_path.write_text(json.dumps({"status": "skipped"}), encoding="utf-8")
+        return SimpleNamespace(
+            video_path=fallback_video,
+            composition_dir=composition_dir,
+            metadata_path=metadata_path,
+            skills_metadata_path=skills_metadata_path,
+            used_fallback=True,
+        )
+
+    def checking_run_opencode_agent(*, package_dir, **_kwargs):
+        observed_steps.append(read_current_step())
+        metadata_path = package_dir / "opencode_agent.json"
+        prompt_path = package_dir / "opencode_prompt.md"
+        metadata_path.write_text(json.dumps({"status": "skipped"}), encoding="utf-8")
+        prompt_path.write_text("skipped", encoding="utf-8")
+        return SimpleNamespace(status="skipped", metadata_path=metadata_path, prompt_path=prompt_path, enabled=False)
+
+    monkeypatch.setattr(pipeline_module, "synthesize_tts", checking_synthesize_tts)
+    monkeypatch.setattr(pipeline_module, "render_final_video", checking_render_final_video)
+    monkeypatch.setattr(pipeline_module, "run_opencode_agent", checking_run_opencode_agent)
+
+    continue_pipeline_draft(draft.job_id, base_dir=tmp_path, capture_browser=False)
+
+    assert observed_steps == ["tts", "render", "opencode"]
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "completed"
+    assert state["current_step"] == "completed"
+    assert state["can_continue"] is False
+    assert "updated_at" in state
 
 
 def test_continue_rejects_job_id_path_traversal(tmp_path: Path):

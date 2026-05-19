@@ -66,6 +66,16 @@ def test_build_bundle_skip_downloads_creates_manifest_and_zip(tmp_path: Path):
     versions = json.loads((dist / "versions.json").read_text(encoding="utf-8-sig"))
     assert versions["files"]
     assert any(item["path"] == "scripts\\doctor.ps1" for item in versions["files"])
+    assert not any(".pytest_tmp" in item["path"] for item in versions["files"])
+    assert not any("bundle\\runtime" in item["path"] for item in versions["files"])
+
+
+def test_build_bundle_script_excludes_pytest_temp_dirs_and_dist_self_copy():
+    script = Path("scripts/build_bundle.ps1").read_text(encoding="utf-8")
+
+    assert ".pytest_tmp*" in script
+    assert "Test-IsInsidePath" in script
+    assert "$Dist" in script
 
 
 def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp_path: Path):

@@ -100,8 +100,55 @@ class PipelineDirs:
     raw_video: Path
 
 
+_WORKFLOW_UNSET = object()
+
+
 def default_output_dir() -> Path:
     return Path(os.environ.get("MANUAL_AGENT_OUTPUT_DIR", "output")).resolve()
+
+
+def _update_workflow_state(
+    package_dir: Path,
+    *,
+    status: str | None = None,
+    current_step: str | None = None,
+    can_continue: bool | None = None,
+    request: PipelineInput | dict[str, Any] | object = _WORKFLOW_UNSET,
+    capture_browser: bool | object = _WORKFLOW_UNSET,
+    environment: dict[str, str] | object = _WORKFLOW_UNSET,
+    details: dict[str, Any] | None = None,
+    last_error: str | None = None,
+) -> None:
+    state_path = package_dir / "workflow_state.json"
+    state: dict[str, Any] = {}
+    if state_path.exists():
+        try:
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            state = loaded
+
+    if status is not None:
+        state["status"] = status
+    if current_step is not None:
+        state["current_step"] = current_step
+    if can_continue is not None:
+        state["can_continue"] = can_continue
+    if request is not _WORKFLOW_UNSET:
+        request_payload = request.model_dump() if isinstance(request, PipelineInput) else request
+        if isinstance(request_payload, dict):
+            state["request"] = redact_sensitive(request_payload)
+    if capture_browser is not _WORKFLOW_UNSET:
+        state["capture_browser"] = bool(capture_browser)
+    if environment is not _WORKFLOW_UNSET:
+        state["environment"] = redact_sensitive(environment)
+    if details is not None:
+        state["details"] = redact_sensitive(details)
+    if last_error is not None:
+        state["last_error"] = last_error
+    state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _write_json(state_path, state)
 
 
 def _record_stage(
@@ -667,16 +714,14 @@ def create_pipeline_draft(
         },
     )
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
-    _write_json(
-        dirs.package / "workflow_state.json",
-        {
-            "status": "awaiting_plan_review",
-            "current_step": "plan_review",
-            "can_continue": True,
-            "request": request_payload,
-            "capture_browser": capture_browser,
-            "environment": environment,
-        },
+    _update_workflow_state(
+        dirs.package,
+        status="awaiting_plan_review",
+        current_step="plan_review",
+        can_continue=True,
+        request=request_payload,
+        capture_browser=capture_browser,
+        environment=environment,
     )
     terminal.record(
         run_id=job_id,
@@ -731,14 +776,12 @@ def continue_pipeline_draft(
     audit = AuditLog(run_id=job_id, path=package_dir / "audit_log.jsonl", reset=False)
     terminal = TerminalRunLogger(enabled=settings.enable_terminal_logs)
     terminal.record(run_id=job_id, actor="pipeline", status="continue-started", details={"package_dir": str(package_dir)})
-    _write_json(
-        state_path,
-        {
-            **state,
-            "status": "running",
-            "current_step": "capture",
-            "can_continue": False,
-        },
+    _update_workflow_state(
+        package_dir,
+        status="running",
+        current_step="capture",
+        can_continue=False,
+        details={"message": "캡처와 브라우저 실행을 준비합니다."},
     )
     try:
         return _complete_pipeline_execution(
@@ -758,15 +801,13 @@ def continue_pipeline_draft(
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        _write_json(
-            state_path,
-            {
-                **state,
-                "status": "failed",
-                "current_step": "execution_failed",
-                "can_continue": True,
-                "last_error": error,
-            },
+        _update_workflow_state(
+            package_dir,
+            status="failed",
+            current_step="execution_failed",
+            can_continue=True,
+            details={"message": "실행 중 오류가 발생했습니다."},
+            last_error=error,
         )
         terminal.record(run_id=job_id, actor="pipeline", status="failed", details={"error": error})
         raise
@@ -946,6 +987,19 @@ def _complete_pipeline_execution(
     action_plan_path: Path,
     approval_log_path: Path,
 ) -> PipelineResult:
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="capture",
+        can_continue=False,
+        request=effective_request,
+        capture_browser=capture_browser,
+        environment=environment,
+        details={
+            "actor": "capture",
+            "message": "브라우저 캡처를 실행합니다." if capture_browser else "브라우저 없이 placeholder 캡처를 생성합니다.",
+        },
+    )
     terminal.record(
         run_id=job_id,
         actor="capture",
@@ -990,6 +1044,13 @@ def _complete_pipeline_execution(
     media_plan = _media_plan_for_outputs(effective_request, plan, capture_result.get("action_log", []))
     media_plan_path = _write_media_plan(media_plan, dirs.package)
     subtitles_path = _render_subtitles(media_plan, dirs.package)
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="tts",
+        can_continue=False,
+        details={"actor": "tts", "message": "자막과 한국어 내레이션을 생성합니다."},
+    )
     terminal.record(
         run_id=job_id,
         actor="tts",
@@ -1020,6 +1081,13 @@ def _complete_pipeline_execution(
     )
     replay_result: dict[str, Any] | None = None
     if capture_browser and _should_replay_demonstration(effective_request, capture_result.get("action_log", [])):
+        _update_workflow_state(
+            dirs.package,
+            status="running",
+            current_step="replay",
+            can_continue=False,
+            details={"actor": "replay", "message": "직접 시연 기록을 내레이션 타이밍에 맞춰 재녹화합니다."},
+        )
         terminal.record(
             run_id=job_id,
             actor="replay",
@@ -1086,6 +1154,13 @@ def _complete_pipeline_execution(
             },
         )
 
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="masking",
+        can_continue=False,
+        details={"actor": "masking", "message": "캡처 이미지와 로그에서 민감 정보를 마스킹합니다."},
+    )
     terminal.record(
         run_id=job_id,
         actor="masking",
@@ -1108,6 +1183,13 @@ def _complete_pipeline_execution(
     video_path = capture_result["video"]
     if not video_path.exists():
         video_path = _render_placeholder_video(dirs.package)
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="preview",
+        can_continue=False,
+        details={"actor": "preview", "message": "미리보기와 텍스트 매뉴얼을 생성합니다."},
+    )
     html_path = _render_preview(
         effective_request,
         media_plan,
@@ -1119,6 +1201,13 @@ def _complete_pipeline_execution(
     )
     markdown_path = _render_markdown(effective_request, media_plan, dirs, capture_result["masked_names"], settings)
     pdf_path = _render_pdf_placeholder(effective_request, dirs)
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="render",
+        can_continue=False,
+        details={"actor": "render", "message": "HyperFrames 또는 fallback 영상 렌더를 실행합니다."},
+    )
     terminal.record(
         run_id=job_id,
         actor="render",
@@ -1152,6 +1241,13 @@ def _complete_pipeline_execution(
             "used_fallback": video_render.used_fallback,
             "video_name": video_render.video_path.name,
         },
+    )
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="opencode",
+        can_continue=False,
+        details={"actor": "opencode", "message": "선택적 OpenCode 후처리 단계를 실행합니다."},
     )
     terminal.record(
         run_id=job_id,
@@ -1210,6 +1306,13 @@ def _complete_pipeline_execution(
         rehearsal=artifact_rehearsal,
         artifacts=artifacts,
     )
+    _update_workflow_state(
+        dirs.package,
+        status="running",
+        current_step="manifest",
+        can_continue=False,
+        details={"actor": "manifest", "message": "산출물 매니페스트와 감사 로그를 확정합니다."},
+    )
     terminal.record(run_id=job_id, actor="manifest", status="started")
     _record_stage(audit, terminal, actor="manifest", status="ok", artifacts=[manifest_path])
     _write_json(manifest_path, _manifest(result, degradations=audit.degradations(), environment=environment))
@@ -1224,14 +1327,19 @@ def _complete_pipeline_execution(
         },
         artifacts=[manifest_path, video_render.video_path],
     )
-    _write_json(
-        dirs.package / "workflow_state.json",
-        {
-            "status": "completed",
-            "current_step": "completed",
-            "can_continue": False,
-            "request": redact_sensitive(effective_request.model_dump()),
-            "capture_browser": capture_browser,
+    _update_workflow_state(
+        dirs.package,
+        status="completed",
+        current_step="completed",
+        can_continue=False,
+        request=effective_request,
+        capture_browser=capture_browser,
+        environment=environment,
+        details={
+            "actor": "pipeline",
+            "message": "산출물 패키지 생성이 완료되었습니다.",
+            "degradation_count": len(audit.degradations()),
+            "video_name": video_render.video_path.name,
         },
     )
     return result

@@ -19,6 +19,36 @@ $HfCache = Join-Path $Runtime "hf-cache"
 
 New-Item -ItemType Directory -Force -Path $Dist, $Runtime, $Wheels, $Browsers, $NpmCache, $HfCache | Out-Null
 
+function Test-IsInsidePath {
+    param(
+        [string]$Path,
+        [string]$Parent
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $fullParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    return $fullPath.Equals($fullParent, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $fullPath.StartsWith($fullParent + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $fullPath.StartsWith($fullParent + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-ExcludedSource {
+    param([System.IO.FileSystemInfo]$Item)
+    $excludedNames = @(".git", ".pytest_cache", "output", "dist", "runtime", "__pycache__")
+    $excludedPatterns = @(".pytest_tmp*")
+    if ($excludedNames -contains $Item.Name) {
+        return $true
+    }
+    foreach ($pattern in $excludedPatterns) {
+        if ($Item.Name -like $pattern) {
+            return $true
+        }
+    }
+    if (Test-IsInsidePath -Path $Dist -Parent $Item.FullName) {
+        return $true
+    }
+    return $false
+}
+
 function Get-Sha256 {
     param([string]$Path)
     $stream = [System.IO.File]::OpenRead($Path)
@@ -36,8 +66,7 @@ function Get-Sha256 {
 }
 
 Write-Host "Copying source files"
-$exclude = @(".git", ".pytest_cache", ".pytest_tmp", ".playwright-mcp", "output", "dist", "runtime")
-Get-ChildItem -Force $Root | Where-Object { $exclude -notcontains $_.Name } | ForEach-Object {
+Get-ChildItem -Force $Root | Where-Object { -not (Test-ExcludedSource $_) } | ForEach-Object {
     $target = Join-Path $Dist $_.Name
     if ($_.PSIsContainer) {
         Copy-Item -Recurse -Force $_.FullName $target

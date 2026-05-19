@@ -23,10 +23,12 @@ const sampleInputValues = [
 ];
 let currentDraft = null;
 let currentArtifactEditor = null;
+let workflowPollTimer = null;
 
 loadConfigStatus();
 
 sampleButton?.addEventListener("click", () => {
+  clearWorkflowPoll();
   form.elements.request.value = "MES에서 LOT 조회 방법 영상 만들기";
   form.elements.url.value = `${window.location.origin}/sample`;
   form.elements.role.value = "작업자";
@@ -54,6 +56,7 @@ inputValues?.addEventListener("click", (event) => {
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  clearWorkflowPoll();
   currentDraft = null;
   setBusy(true, "계획 생성 중...");
   setWorkflowStep(0);
@@ -162,6 +165,7 @@ async function continueWorkflow(jobId, button) {
   setPipelineProgress(2);
   setStatus("Running");
   setArtifactLoading(continueMessage(currentDraft));
+  startWorkflowPolling(workflowStateUrlForDraft(currentDraft));
 
   try {
     const response = await fetch(`/api/pipeline/continue/${encodeURIComponent(jobId)}`, {
@@ -173,17 +177,118 @@ async function continueWorkflow(jobId, button) {
 
     const result = await response.json();
     currentDraft = null;
+    clearWorkflowPoll();
     setWorkflowStep(5);
     setPipelineProgress(5);
     setStatus("Completed");
     renderArtifacts(result);
   } catch (error) {
+    clearWorkflowPoll();
     setButtonLoading(button, false);
     setStatus("Failed");
     renderPlanReview(currentDraft, error.message || "승인 후 실행 중 오류가 발생했습니다.");
   } finally {
     setBusy(false);
   }
+}
+
+function workflowStateUrlForDraft(draft) {
+  return draft?.supporting_artifacts?.workflow_state || draft?.artifacts?.workflow_state_url || "";
+}
+
+function startWorkflowPolling(url) {
+  clearWorkflowPoll();
+  if (!url) return;
+  pollWorkflowState(url);
+  workflowPollTimer = window.setInterval(() => pollWorkflowState(url), 1200);
+}
+
+function clearWorkflowPoll() {
+  if (!workflowPollTimer) return;
+  window.clearInterval(workflowPollTimer);
+  workflowPollTimer = null;
+}
+
+async function pollWorkflowState(url) {
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return;
+    const state = await response.json();
+    applyWorkflowState(state);
+    if (state.status === "completed" || state.status === "failed") {
+      clearWorkflowPoll();
+    }
+  } catch (_error) {
+    // The continue request still owns the final error handling.
+  }
+}
+
+function applyWorkflowState(state) {
+  if (!state) return;
+  const workflowIndex = workflowStepIndexForState(state);
+  const pipelineIndex = pipelineProgressIndexForState(state);
+  setWorkflowStep(workflowIndex);
+  setPipelineProgress(pipelineIndex);
+  setStatus(workflowStatusLabel(state));
+  const message = state.details?.message || workflowMessageForState(state);
+  if (artifactStatus && message) artifactStatus.textContent = message;
+}
+
+function workflowStepIndexForState(state) {
+  const step = String(state.current_step || "");
+  if (step === "plan_review") return 1;
+  if (["rehearsal", "mcp", "capture", "replay", "masking"].includes(step)) return 2;
+  if (step === "tts") return 3;
+  if (step === "preview") return 4;
+  if (["render", "opencode", "manifest", "completed"].includes(step)) return 5;
+  if (step === "execution_failed") return 2;
+  return state.status === "completed" ? 5 : 0;
+}
+
+function pipelineProgressIndexForState(state) {
+  const step = String(state.current_step || "");
+  if (step === "plan_review" || step === "rehearsal" || step === "mcp") return 1;
+  if (step === "capture" || step === "replay") return 2;
+  if (step === "masking") return 3;
+  if (step === "tts") return 4;
+  if (["preview", "render", "opencode", "manifest", "completed"].includes(step)) return 5;
+  if (step === "execution_failed") return 2;
+  return state.status === "completed" ? 5 : 0;
+}
+
+function workflowStatusLabel(state) {
+  if (state.status === "completed") return "Completed";
+  if (state.status === "failed") return "Failed";
+  const step = String(state.current_step || "");
+  const labels = {
+    plan_review: "Plan review",
+    capture: "Capture",
+    replay: "Replay",
+    masking: "Masking",
+    tts: "TTS",
+    preview: "Preview",
+    render: "Rendering",
+    opencode: "OpenCode",
+    manifest: "Packaging",
+  };
+  return labels[step] || "Running";
+}
+
+function workflowMessageForState(state) {
+  const step = String(state.current_step || "");
+  const messages = {
+    capture: "브라우저 캡처를 실행 중입니다.",
+    replay: "시연 기록을 내레이션 타이밍에 맞춰 재녹화 중입니다.",
+    masking: "캡처와 로그의 민감 정보를 마스킹 중입니다.",
+    tts: "자막과 한국어 내레이션을 생성 중입니다.",
+    preview: "미리보기와 텍스트 매뉴얼을 생성 중입니다.",
+    render: "영상 렌더를 실행 중입니다.",
+    opencode: "선택적 OpenCode 후처리를 실행 중입니다.",
+    manifest: "산출물 패키지를 확정 중입니다.",
+    completed: "산출물 패키지 생성이 완료되었습니다.",
+    execution_failed: "실행 중 오류가 발생했습니다.",
+  };
+  return messages[step] || "";
 }
 
 async function rerenderPackage(jobId, button) {

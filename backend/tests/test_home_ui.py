@@ -63,6 +63,12 @@ def test_static_app_exposes_review_artifact_links():
     assert 'document.querySelectorAll(".step-list .step")' in body
     assert "setWorkflowStep(1)" in body
     assert "setWorkflowStep(5)" in body
+    assert "startWorkflowPolling" in body
+    assert "pollWorkflowState" in body
+    assert "applyWorkflowState" in body
+    assert "workflowStepIndexForState" in body
+    assert "workflow_state_url" in body
+    assert "clearWorkflowPoll" in body
     assert "is-complete" in body
     assert "openArtifactEditor" in body
     assert "saveArtifactEditor" in body
