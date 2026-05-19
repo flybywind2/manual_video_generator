@@ -48,15 +48,62 @@
 ## 파이프라인
 
 ```mermaid
-flowchart LR
-    A["관리자 시나리오 입력"] --> B["절차 계획 생성"]
-    B --> C["리허설 로그 생성"]
-    C --> D["Playwright 캡처/녹화"]
-    D --> E["마스킹"]
-    B --> F["TTS 오디오 생성"]
-    E --> G["HTML Preview"]
+flowchart TB
+    A["사용자 요청 입력<br/>시나리오, 대상 URL, 역할, 완료 조건, 입력값"] --> B["/api/pipeline/draft"]
+    B --> C["입력값 추출<br/>request.json, input_extraction.json"]
+    C --> D{"Planner 선택"}
+    D -->|기본| E["Deterministic planner<br/>semantic action plan 생성"]
+    D -->|MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true| F["Internal LLM planner<br/>RAG/Reranker context 선택 사용"]
+    E --> G["ActionPlan 확정<br/>action_plan.json"]
     F --> G
-    G --> H["WebM / Markdown / PDF / JSON 패키지"]
+    G --> H{"로그인 필요 여부"}
+    H -->|로그인 전 접근 가능| I["playwright-mcp 리허설<br/>manifest 또는 live stdio JSON-RPC"]
+    H -->|로그인 필요| J["MCP live 리허설 지연<br/>deferred_until_login=true"]
+    I --> K["ApprovalGate<br/>approval_log.json"]
+    J --> K
+    K --> L["계획 검수 대기<br/>workflow_state: plan_review"]
+    L --> M["사용자 승인<br/>/api/pipeline/continue/{job_id}"]
+    M --> N{"실행 방식"}
+    N -->|직접 시연| O["사용자가 브라우저에서 조작<br/>시연 완료 버튼"]
+    N -->|AI 자동 실행| P["Browser Agent + Playwright<br/>화면 분석, 클릭, 입력, 캡처"]
+    O --> Q["시연 이벤트 분석<br/>음성 타이밍 기준 replay 녹화"]
+    P --> R["capture_action_log.json<br/>WebM, screenshots, final frame"]
+    Q --> R
+    R --> S["Masking<br/>입력값/민감정보 블러, masking_log.json"]
+    R --> T["Media plan + subtitles<br/>media_plan.json, subtitles.vtt"]
+    T --> U["TTS<br/>Supertonic 또는 MeloTTS, fallback silent wav"]
+    S --> V["Preview + Manual<br/>preview.html, manual.md, manual.pdf"]
+    U --> W["HyperFrames render<br/>MP4 또는 WebM fallback"]
+    V --> W
+    W --> X["OpenCode optional pass<br/>opencode_prompt.md, opencode_agent.json"]
+    X --> Y["Package manifest + audit log<br/>package_manifest.json, audit_log.jsonl"]
+    Y --> Z["산출물 링크 표시<br/>영상은 관리자가 별도 저장소에서 관리"]
+```
+
+실행 중에는 백엔드가 `workflow_state.json`을 단계별로 갱신하고, UI는 이 파일을 폴링해 좌측 Workflow와 Pipeline 진행 상태를 갱신합니다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> input: 요청 입력
+    input --> planning: draft 생성
+    planning --> plan_review: 계획 검수 대기
+    plan_review --> capture: 사용자 승인
+    capture --> replay: 직접 시연 replay 필요
+    capture --> masking: 일반 캡처 완료
+    replay --> masking
+    masking --> tts
+    tts --> preview
+    preview --> render
+    render --> opencode
+    opencode --> manifest
+    manifest --> completed
+    capture --> execution_failed: 브라우저/로그인/캡처 실패
+    replay --> execution_failed: replay 실패
+    tts --> render: TTS degraded fallback
+    render --> completed: HyperFrames fallback
+    execution_failed --> plan_review: 재시도 가능
+    completed --> rerender: 텍스트 산출물 편집 후 재렌더링
+    rerender --> completed
 ```
 
 현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
