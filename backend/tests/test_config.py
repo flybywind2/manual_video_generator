@@ -228,6 +228,27 @@ def test_process_environment_overrides_env_file_values(tmp_path: Path):
     assert settings.enable_opencode is True
 
 
+def test_safe_status_reports_login_selector_auto_detection_when_llm_configured():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "qwen3.5",
+            "MANUAL_AGENT_LOGIN_MODE": "credentials",
+            "MANUAL_AGENT_LOGIN_USERNAME": "user01",
+            "MANUAL_AGENT_LOGIN_PASSWORD": "plain-password",
+        }
+    )
+
+    status = settings.safe_status()
+
+    assert status["login"]["credentials_configured"] is False
+    assert status["login"]["selector_auto_detection_supported"] is True
+    assert status["login"]["credentials_usable"] is True
+    assert "plain-password" not in repr(status)
+    assert "user01" not in repr(status)
+
+
 def test_load_settings_reads_manual_agent_env_file_pointer(tmp_path: Path):
     env_file = tmp_path / "runtime.env"
     env_file.write_text(

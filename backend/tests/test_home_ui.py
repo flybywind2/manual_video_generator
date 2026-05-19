@@ -93,6 +93,8 @@ def test_static_app_exposes_review_artifact_links():
     assert "loading-spinner" in body
     assert "aria-busy" in body
     assert "작업이 진행 중입니다" in body
+    assert "selector_auto_detection_supported" in body
+    assert "LLM selector" in body
 
 
 def test_home_screen_includes_text_artifact_editor_modal():

@@ -1048,8 +1048,11 @@ function loginStatusRow(status) {
     return { label: "Login Default", state: "ready", text: "Manual", detail: "브라우저에서 직접 로그인" };
   }
   if (status.login.mode === "credentials") {
-    return status.login.credentials_configured
-      ? { label: "Login Default", state: "ready", text: "Ready", detail: "credentials" }
+    if (status.login.credentials_configured) {
+      return { label: "Login Default", state: "ready", text: "Ready", detail: "credentials" };
+    }
+    return status.login.selector_auto_detection_supported
+      ? { label: "Login Default", state: "ready", text: "LLM selector", detail: "ID/PW selector auto" }
       : { label: "Login Default", state: "missing", text: "Missing", detail: "credentials missing" };
   }
   return { label: "Login Default", state: "disabled", text: "None", detail: status.login.mode || "none" };

@@ -199,12 +199,22 @@ class AppSettings:
     enable_terminal_logs: bool
 
     def safe_status(self) -> dict[str, object]:
+        login_status = dict(self.login.safe_status())
+        selector_auto_detection_supported = (
+            self.login.mode == "credentials"
+            and bool(self.login.username)
+            and bool(self.login.password)
+            and self.llm.is_configured
+            and not self.login.credentials_configured
+        )
+        login_status["selector_auto_detection_supported"] = selector_auto_detection_supported
+        login_status["credentials_usable"] = self.login.credentials_configured or selector_auto_detection_supported
         return {
             "llm": self.llm.safe_status(),
             "vlm": self.vlm.safe_status(),
             "rag": self.rag.safe_status(),
             "reranker": self.reranker.safe_status(),
-            "login": self.login.safe_status(),
+            "login": login_status,
             "runtime": {
                 "output_dir": self.output_dir,
                 "enable_internal_planner": self.enable_internal_planner,

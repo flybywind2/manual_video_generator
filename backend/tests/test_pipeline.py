@@ -1299,6 +1299,137 @@ def test_handle_login_uses_env_credentials_and_redacts_action_log():
     assert "user01" not in rendered_log
 
 
+def test_handle_login_uses_llm_to_find_missing_credential_selectors(tmp_path):
+    calls = []
+    llm_payloads = []
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            assert "manualLoginSelectorCandidates" in script
+            return [
+                {
+                    "selector": 'input[name="account"]',
+                    "tag": "input",
+                    "type": "text",
+                    "name": "account",
+                    "id": "",
+                    "placeholder": "아이디",
+                    "label": "사번 또는 ID",
+                    "aria_label": "",
+                    "text": "",
+                    "visible": True,
+                },
+                {
+                    "selector": "#loginPassword",
+                    "tag": "input",
+                    "type": "password",
+                    "name": "",
+                    "id": "loginPassword",
+                    "placeholder": "비밀번호",
+                    "label": "Password",
+                    "aria_label": "",
+                    "text": "",
+                    "visible": True,
+                },
+                {
+                    "selector": 'button[type="submit"]',
+                    "tag": "button",
+                    "type": "submit",
+                    "name": "",
+                    "id": "",
+                    "placeholder": "",
+                    "label": "",
+                    "aria_label": "",
+                    "text": "로그인",
+                    "visible": True,
+                },
+            ]
+
+        def fill(self, selector, value):
+            calls.append(("fill", selector, value))
+
+        def click(self, selector):
+            calls.append(("click", selector))
+
+        def wait_for_load_state(self, state, timeout):
+            calls.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            calls.append(("wait_for_function", timeout))
+
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "qwen3.5",
+            "MANUAL_AGENT_ENABLE_TERMINAL_LOGS": "true",
+        }
+    )
+    request = PipelineInput(
+        request_text="사내 시스템 로그인 후 조회",
+        target_url="http://internal.example.local/login",
+        role="사용자",
+        completion_condition="홈 화면",
+        login_mode="credentials",
+    )
+    login = {
+        "mode": "credentials",
+        "username_selector": "",
+        "password_selector": "",
+        "submit_selector": "",
+        "success_selector": "",
+        "username": "user01",
+        "password": "plain-password",
+        "credentials_timeout_ms": 30000,
+        "manual_timeout_ms": 120000,
+    }
+
+    def fake_post(url, headers, payload, timeout):
+        llm_payloads.append(payload)
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        assert "plain-password" not in serialized_payload
+        assert "user01" not in serialized_payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "username_selector": 'input[name="account"]',
+                                "password_selector": "#loginPassword",
+                                "submit_selector": 'button[type="submit"]',
+                                "confidence": 0.91,
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    log = _handle_login(
+        FakePage(),
+        login,
+        request=request,
+        settings=settings,
+        package_dir=tmp_path,
+        http_post=fake_post,
+    )
+
+    assert ("fill", 'input[name="account"]', "user01") in calls
+    assert ("fill", "#loginPassword", "plain-password") in calls
+    assert ("click", 'button[type="submit"]') in calls
+    assert log["status"] == "ok"
+    assert log["selector_source"] == "llm"
+    assert log["selector_resolution"]["status"] == "ok"
+    assert log["selector_resolution"]["confidence"] == 0.91
+    assert llm_payloads
+    llm_log = (tmp_path / "llm_responses.jsonl").read_text(encoding="utf-8")
+    assert "login_selector" in llm_log
+    assert "plain-password" not in llm_log
+    assert "user01" not in llm_log
+
+
 def test_manual_login_waits_for_success_selector_without_credentials():
     calls = []
 

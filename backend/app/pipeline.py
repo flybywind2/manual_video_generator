@@ -18,13 +18,14 @@ from pydantic import BaseModel, Field
 from backend.app.adapters.browser_agent import decide_browser_agent_action
 from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.opencode import run_opencode_agent
-from backend.app.adapters.planner import build_plan
+from backend.app.adapters.planner import build_plan, post_json
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.audit import AuditLog
 from backend.app.config import load_settings
 from backend.app.env_bootstrap import apply_runtime_environment, runtime_fingerprint
+from backend.app.llm_logging import record_llm_response
 from backend.app.policies import ApprovalGate
 from backend.app.redaction import redact_sensitive
 from backend.app.terminal_logging import TerminalRunLogger
@@ -1401,7 +1402,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
             }
             auth_result = {"storage_state": None, "action_log": []}
             if login["mode"] == "credentials":
-                auth_result = _authenticate_before_recording(browser, request, login)
+                auth_result = _authenticate_before_recording(browser, request, login, settings=settings, package_dir=dirs.package)
                 _raise_if_login_failed(auth_result)
             if auth_result.get("storage_state"):
                 context_options["storage_state"] = auth_result["storage_state"]
@@ -1593,14 +1594,21 @@ def _resolve_login_options(request: PipelineInput, settings: Any) -> dict[str, A
     }
 
 
-def _authenticate_before_recording(browser: Any, request: PipelineInput, login: dict[str, Any]) -> dict[str, Any]:
+def _authenticate_before_recording(
+    browser: Any,
+    request: PipelineInput,
+    login: dict[str, Any],
+    *,
+    settings: Any | None = None,
+    package_dir: Path | None = None,
+) -> dict[str, Any]:
     context = browser.new_context(viewport={"width": 1280, "height": 800})
     action_log: list[dict[str, Any]] = []
     storage_state: dict[str, Any] | None = None
     try:
         page = context.new_page()
         _prepare_capture_page(page, request.target_url)
-        login_log = _handle_login(page, login)
+        login_log = _handle_login(page, login, request=request, settings=settings, package_dir=package_dir)
         action_log.append(login_log)
         if login_log.get("status") == "ok":
             storage_state = context.storage_state()
@@ -2520,12 +2528,28 @@ def _action_text_candidates(action: dict[str, Any]) -> list[str]:
     return [value] if value else []
 
 
-def _handle_login(page: Any, login: dict[str, Any], signal_page: Any | None = None) -> dict[str, Any]:
+def _handle_login(
+    page: Any,
+    login: dict[str, Any],
+    signal_page: Any | None = None,
+    *,
+    request: PipelineInput | None = None,
+    settings: Any | None = None,
+    package_dir: Path | None = None,
+    http_post: Any | None = None,
+) -> dict[str, Any]:
     mode = str(login.get("mode") or "none")
     if mode == "manual":
         return _wait_for_manual_login(page, login, signal_page=signal_page)
     if mode == "credentials":
-        return _submit_login_credentials(page, login)
+        return _submit_login_credentials(
+            page,
+            login,
+            request=request,
+            settings=settings,
+            package_dir=package_dir,
+            http_post=http_post,
+        )
     return {"type": "login", "mode": mode, "status": "skipped"}
 
 
@@ -2993,13 +3017,39 @@ def _remove_manual_login_signal(page: Any) -> None:
         pass
 
 
-def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+def _submit_login_credentials(
+    page: Any,
+    login: dict[str, Any],
+    *,
+    request: PipelineInput | None = None,
+    settings: Any | None = None,
+    package_dir: Path | None = None,
+    http_post: Any | None = None,
+) -> dict[str, Any]:
     username_selector = str(login.get("username_selector") or "").strip()
     password_selector = str(login.get("password_selector") or "").strip()
     submit_selector = str(login.get("submit_selector") or "").strip()
     success_selector = str(login.get("success_selector") or "").strip()
     username = str(login.get("username") or "")
     password = str(login.get("password") or "")
+    selector_resolution: dict[str, Any] | None = None
+    selector_source = "configured"
+    if username and password and (not username_selector or not password_selector):
+        selector_resolution = _resolve_login_selectors_with_llm(
+            page,
+            request,
+            settings,
+            login,
+            package_dir=package_dir,
+            http_post=http_post,
+        )
+        if selector_resolution.get("status") == "ok":
+            selector_source = "llm"
+            username_selector = username_selector or str(selector_resolution.get("username_selector") or "").strip()
+            password_selector = password_selector or str(selector_resolution.get("password_selector") or "").strip()
+            submit_selector = submit_selector or str(selector_resolution.get("submit_selector") or "").strip()
+        elif selector_resolution.get("status") != "skipped":
+            selector_source = "llm-failed"
     log = {
         "type": "login",
         "mode": "credentials",
@@ -3010,7 +3060,10 @@ def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any
         "success_selector_set": bool(success_selector),
         "username_set": bool(username),
         "password_set": bool(password),
+        "selector_source": selector_source,
     }
+    if selector_resolution is not None:
+        log["selector_resolution"] = redact_sensitive(selector_resolution)
     if not all([username_selector, password_selector, username, password]):
         log["status"] = "failed"
         log["reason"] = "missing_credentials_or_selectors"
@@ -3032,6 +3085,218 @@ def _submit_login_credentials(page: Any, login: dict[str, Any]) -> dict[str, Any
         log["status"] = "failed"
         log["error"] = f"{type(exc).__name__}: {exc}"
     return log
+
+
+def _resolve_login_selectors_with_llm(
+    page: Any,
+    request: PipelineInput | None,
+    settings: Any | None,
+    login: dict[str, Any],
+    *,
+    package_dir: Path | None = None,
+    http_post: Any | None = None,
+) -> dict[str, Any]:
+    if request is None:
+        return {"status": "skipped", "reason": "request_unavailable"}
+    if settings is None or not getattr(getattr(settings, "llm", None), "is_configured", False):
+        return {"status": "skipped", "reason": "llm_not_configured"}
+
+    candidates = _login_selector_candidates(page)
+    if not candidates:
+        return {"status": "failed", "reason": "no_login_candidates"}
+
+    post = post_json if http_post is None else http_post
+    url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
+    headers = settings.llm.chat_headers()
+    payload = {
+        "model": settings.llm.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "너는 사내 웹 로그인 화면의 CSS selector를 고르는 브라우저 자동화 보조자다. "
+                    "사용자 ID 입력칸, 비밀번호 입력칸, 로그인 버튼 selector만 찾는다. "
+                    "반드시 JSON만 반환한다. JSON schema: "
+                    "{\"username_selector\":\"...\",\"password_selector\":\"...\",\"submit_selector\":\"...\",\"confidence\":0.0}. "
+                    "후보 목록에 있는 selector만 사용하고, 비밀번호/ID 값은 절대 요구하거나 추정하지 않는다."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "target_url": request.target_url,
+                        "request_text": request.request_text,
+                        "completion_condition": request.completion_condition,
+                        "configured": {
+                            "username_selector_set": bool(login.get("username_selector")),
+                            "password_selector_set": bool(login.get("password_selector")),
+                            "submit_selector_set": bool(login.get("submit_selector")),
+                            "success_selector_set": bool(login.get("success_selector")),
+                            "username_value_set": bool(login.get("username")),
+                            "password_value_set": bool(login.get("password")),
+                        },
+                        "candidates": candidates,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0.0,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    try:
+        response = post(url, headers, payload, settings.llm_timeout_seconds)
+        content = response["choices"][0]["message"]["content"]
+        record_llm_response(
+            component="login_selector",
+            model=settings.llm.model,
+            response=response,
+            content=content,
+            terminal_enabled=settings.enable_terminal_logs,
+            package_dir=package_dir,
+        )
+        selectors = _parse_login_selector_response(content)
+        if not selectors["username_selector"] or not selectors["password_selector"]:
+            return {
+                "status": "failed",
+                "reason": "missing_required_selectors",
+                "candidate_count": len(candidates),
+            }
+        return {
+            "status": "ok",
+            "source": getattr(settings.llm, "source_label", "llm"),
+            "candidate_count": len(candidates),
+            **selectors,
+        }
+    except Exception as exc:  # noqa: BLE001 - caller can still fail with missing selectors.
+        return {
+            "status": "failed",
+            "reason": "llm_selector_resolution_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "candidate_count": len(candidates),
+        }
+
+
+def _parse_login_selector_response(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("login selector response must be a JSON object")
+    return {
+        "username_selector": _clean_css_selector(data.get("username_selector") or data.get("user_selector")),
+        "password_selector": _clean_css_selector(data.get("password_selector")),
+        "submit_selector": _clean_css_selector(data.get("submit_selector") or data.get("login_button_selector")),
+        "confidence": _selector_confidence(data.get("confidence")),
+    }
+
+
+def _clean_css_selector(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text or "<" in text or ">" in text:
+        return ""
+    return text[:240]
+
+
+def _selector_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(confidence, 1.0))
+
+
+def _login_selector_candidates(page: Any) -> list[dict[str, Any]]:
+    try:
+        candidates = page.evaluate(
+            """
+            () => {
+              const manualLoginSelectorCandidates = true;
+              const trim = (value, limit = 120) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+              const cssString = (value) => String(value || '').replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\"');
+              const visible = (el) => {
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const labelFor = (el) => {
+                const labels = Array.from(el.labels || []).map((label) => trim(label.innerText)).filter(Boolean);
+                if (labels.length) return labels.join(' ');
+                if (el.id) {
+                  const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                  if (label) return trim(label.innerText);
+                }
+                return '';
+              };
+              const visibleTextFor = (el) => {
+                const tag = el.tagName.toUpperCase();
+                if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return '';
+                return trim(el.innerText || el.value || '');
+              };
+              const selectorFor = (el) => {
+                const tag = el.tagName.toLowerCase();
+                if (el.id) return `#${CSS.escape(el.id)}`;
+                if (el.name) return `${tag}[name="${cssString(el.name)}"]`;
+                const type = el.getAttribute('type');
+                if (tag === 'input' && type) return `input[type="${cssString(type)}"]`;
+                if ((tag === 'button' || el.getAttribute('role') === 'button') && type) return `${tag}[type="${cssString(type)}"]`;
+                if (tag === 'button') return 'button';
+                return tag;
+              };
+              return Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], input[type="submit"]'))
+                .slice(0, 80)
+                .map((el) => ({
+                  selector: selectorFor(el),
+                  tag: el.tagName.toLowerCase(),
+                  type: trim(el.getAttribute('type') || ''),
+                  name: trim(el.getAttribute('name') || ''),
+                  id: trim(el.id || ''),
+                  placeholder: trim(el.getAttribute('placeholder') || ''),
+                  label: labelFor(el),
+                  aria_label: trim(el.getAttribute('aria-label') || ''),
+                  autocomplete: trim(el.getAttribute('autocomplete') || ''),
+                  text: visibleTextFor(el),
+                  visible: visible(el),
+                }))
+                .filter((item) => item.selector && item.visible);
+            }
+            """
+        )
+    except Exception:
+        return []
+    if not isinstance(candidates, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        selector = _clean_css_selector(item.get("selector"))
+        if not selector:
+            continue
+        cleaned.append(
+            {
+                "selector": selector,
+                "tag": str(item.get("tag") or "")[:24],
+                "type": str(item.get("type") or "")[:32],
+                "name": str(item.get("name") or "")[:80],
+                "id": str(item.get("id") or "")[:80],
+                "placeholder": str(item.get("placeholder") or "")[:120],
+                "label": str(item.get("label") or "")[:120],
+                "aria_label": str(item.get("aria_label") or "")[:120],
+                "autocomplete": str(item.get("autocomplete") or "")[:60],
+                "text": str(item.get("text") or "")[:120],
+                "visible": bool(item.get("visible")),
+            }
+        )
+    return cleaned
 
 
 def _first_plan_step(plan: dict[str, Any]) -> dict[str, Any]:
