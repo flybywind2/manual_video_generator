@@ -15,8 +15,17 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "새 영상 작업" in body
     assert "파이프라인 실행" in body
     assert "AI Center Pipeline" in body
-    assert "MeloTTS" in body
+    assert "TTS Provider" in body
+    assert "MeloTTS" not in body
     assert ".env 설정 상태" in body
+    assert 'id="work"' in body
+    assert 'id="artifacts"' in body
+    assert 'id="security"' in body
+    assert 'id="settings"' in body
+    assert 'href="#work"' in body
+    assert 'href="#artifacts"' in body
+    assert 'href="#security"' in body
+    assert 'href="#settings"' in body
     assert 'id="input-values"' in body
     assert 'name="login_mode"' in body
     assert '<option value="" selected>설정값 사용</option>' in body
@@ -109,6 +118,9 @@ def test_static_app_exposes_review_artifact_links():
     assert "작업이 진행 중입니다" in body
     assert "selector_auto_detection_supported" in body
     assert "LLM selector" in body
+    assert "navLinks" in body
+    assert "setActiveNav" in body
+    assert "scrollIntoView" in body
 
 
 def test_home_screen_includes_text_artifact_editor_modal():

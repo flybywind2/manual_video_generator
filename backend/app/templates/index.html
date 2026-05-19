@@ -18,7 +18,7 @@
           <span>AI Center · Manual Video Agent</span>
         </a>
         <nav class="nav-links" aria-label="Primary">
-          <a class="is-active" href="/">작업</a>
+          <a class="is-active" href="#work">작업</a>
           <a href="#artifacts">산출물</a>
           <a href="#security">보안</a>
           <a href="#settings">설정</a>
@@ -70,7 +70,7 @@
             </div>
           </section>
 
-          <section class="primary-grid">
+          <section class="primary-grid" id="work">
             <article class="work-panel" aria-labelledby="new-job-title">
               <div class="panel-header">
                 <div>
@@ -193,8 +193,8 @@
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>MeloTTS</strong>
-                    <small>한국어 내레이션 생성</small>
+                    <strong>TTS Provider</strong>
+                    <small>설정된 음성 엔진으로 내레이션 생성</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
@@ -224,6 +224,31 @@
               <p id="artifact-status">아직 실행된 작업이 없습니다.</p>
             </div>
             <div class="artifact-links" id="artifact-links"></div>
+          </section>
+
+          <section class="security-panel" id="security" aria-labelledby="security-title">
+            <div>
+              <h2 id="security-title">보안·검수 기준</h2>
+              <p>운영계 직접 조작 전 승인, 로그인 경계, 마스킹, selector trace를 분리해 확인합니다.</p>
+            </div>
+            <div class="security-grid">
+              <article>
+                <strong>승인 게이트</strong>
+                <span>위험 액션은 approval log와 계획 검수 이후에만 실행합니다.</span>
+              </article>
+              <article>
+                <strong>로그인 경계</strong>
+                <span>비밀번호와 SSO 토큰은 UI/API 산출물에 저장하지 않습니다.</span>
+              </article>
+              <article>
+                <strong>마스킹</strong>
+                <span>입력값과 민감 키워드를 캡처, 로그, 문서 생성 전에 redaction합니다.</span>
+              </article>
+              <article>
+                <strong>진단 로그</strong>
+                <span>support_log와 selector_trace로 사내 테스트 실패 지점을 전달합니다.</span>
+              </article>
+            </div>
           </section>
 
           <section class="config-panel" id="settings" aria-live="polite">

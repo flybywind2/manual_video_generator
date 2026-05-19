@@ -1,5 +1,6 @@
 const form = document.querySelector("#job-form");
 const sampleButton = document.querySelector("#load-sample");
+const navLinks = Array.from(document.querySelectorAll(".nav-links a[href^='#']"));
 const panelState = document.querySelector(".panel-state");
 const workflowSteps = Array.from(document.querySelectorAll(".step-list .step"));
 const pipelineNodes = Array.from(document.querySelectorAll(".pipeline-node"));
@@ -113,6 +114,17 @@ let currentArtifactEditor = null;
 let workflowPollTimer = null;
 
 loadConfigStatus();
+
+navLinks.forEach((link) => {
+  link.addEventListener("click", (event) => {
+    const targetId = link.getAttribute("href")?.slice(1);
+    const target = targetId ? document.getElementById(targetId) : null;
+    if (!target) return;
+    event.preventDefault();
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveNav(link.getAttribute("href") || "");
+  });
+});
 
 sampleButton?.addEventListener("click", () => {
   clearWorkflowPoll();
@@ -294,6 +306,12 @@ function clearWorkflowPoll() {
   if (!workflowPollTimer) return;
   window.clearInterval(workflowPollTimer);
   workflowPollTimer = null;
+}
+
+function setActiveNav(href) {
+  navLinks.forEach((link) => {
+    link.classList.toggle("is-active", link.getAttribute("href") === href);
+  });
 }
 
 async function pollWorkflowState(url) {

@@ -377,6 +377,7 @@ a {
 .work-panel,
 .pipeline-panel,
 .timeline-band,
+.security-panel,
 .config-panel {
   border: 1px solid var(--hairline);
   border-radius: 8px;
@@ -823,6 +824,59 @@ a {
   grid-template-columns: minmax(260px, 0.7fr) minmax(0, 1.3fr);
   gap: 20px;
   padding: 22px 24px;
+}
+
+.security-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.62fr) minmax(0, 1.38fr);
+  gap: 20px;
+  padding: 22px 24px;
+}
+
+.security-panel h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 21px;
+  line-height: 28px;
+}
+
+.security-panel p {
+  margin: 6px 0 0;
+  color: var(--body);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.security-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.security-grid article {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+
+.security-grid strong,
+.security-grid span {
+  display: block;
+}
+
+.security-grid strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.security-grid span {
+  margin-top: 5px;
+  color: var(--body);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .config-panel h2 {
@@ -1580,6 +1634,8 @@ a {
     justify-content: flex-start;
   }
 
+  .security-panel,
+  .security-grid,
   .config-panel,
   .config-grid {
     grid-template-columns: 1fr;
