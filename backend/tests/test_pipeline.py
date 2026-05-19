@@ -223,6 +223,10 @@ def test_pipeline_writes_support_log_for_internal_test_feedback(tmp_path):
     assert support_log.exists()
     assert "# Manual Video Agent Support Log" in content
     assert result.job_id in content
+    assert "## 타이핑용 요약" in content
+    assert "short_code:" in content
+    assert "상태:" in content
+    assert "단계:" in content
     assert "## 사용자 전달 메모" in content
     assert "workflow_state.json" in content
     assert "package_manifest.json" in content

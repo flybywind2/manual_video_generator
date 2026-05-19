@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -2742,10 +2743,23 @@ def _write_support_log(package_dir: Path, *, job_id: str, status: str, error: st
     fallback_events = manifest.get("fallback_events") if isinstance(manifest.get("fallback_events"), list) else []
     degradations = manifest.get("degradations") if isinstance(manifest.get("degradations"), list) else []
     last_error = error or str(state.get("last_error") or "")
+    short_code = _support_short_code(job_id, status, state.get("current_step", ""), last_error)
+    typing_summary = _support_typing_summary(
+        job_id=job_id,
+        short_code=short_code,
+        status=status,
+        current_step=str(state.get("current_step") or ""),
+        last_error=last_error,
+        degradations=[*_as_list(degradations), *_as_list(fallback_events)],
+    )
     lines = [
         "# Manual Video Agent Support Log",
         "",
         "사내 테스트 중 안 되는 부분을 전달할 때 이 파일과 아래 권장 첨부 파일을 함께 전달하세요.",
+        "",
+        "## 타이핑용 요약",
+        "",
+        *typing_summary,
         "",
         "## 사용자 전달 메모",
         "",
@@ -2797,6 +2811,64 @@ def _support_log_request_lines(state: dict[str, Any], request: dict[str, Any]) -
         f"- completion_condition: {safe_payload.get('completion_condition', '')}",
         f"- input_values: `{json.dumps(safe_payload.get('input_values') or {}, ensure_ascii=False, default=str)}`",
     ]
+
+
+def _support_short_code(job_id: str, status: str, current_step: Any, last_error: str) -> str:
+    raw = f"{job_id}|{status}|{current_step}|{last_error}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8].upper()
+
+
+def _support_typing_summary(
+    *,
+    job_id: str,
+    short_code: str,
+    status: str,
+    current_step: str,
+    last_error: str,
+    degradations: list[Any],
+) -> list[str]:
+    short_job = _short_job_id(job_id)
+    reason = _first_degrade_reason(degradations)
+    lines = [
+        f"- short_code: `{short_code}`",
+        f"- job: `{short_job}`",
+        f"- 상태: {status}",
+        f"- 단계: {current_step or 'unknown'}",
+    ]
+    if reason:
+        lines.append(f"- 원인: {reason}")
+    if last_error:
+        lines.append(f"- 오류: {_compact_for_typing(last_error, 90)}")
+    else:
+        lines.append("- 오류: 없음")
+    lines.append("- 전달: 위 5~6줄만 먼저 알려주고, 가능하면 support_log.md 파일을 첨부")
+    return lines
+
+
+def _short_job_id(job_id: str) -> str:
+    parts = str(job_id or "").split("_")
+    if len(parts) >= 4:
+        return f"{parts[-2]}_{parts[-1]}"
+    return str(job_id or "")[-18:]
+
+
+def _first_degrade_reason(items: list[Any]) -> str:
+    for item in items:
+        if isinstance(item, dict):
+            reason = str(item.get("reason") or item.get("degrade_reason") or "")
+            actor = str(item.get("actor") or "")
+            if reason and actor:
+                return f"{actor}:{reason}"
+            if reason:
+                return reason
+    return ""
+
+
+def _compact_for_typing(value: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _support_log_attachment_lines(package_dir: Path) -> list[str]:

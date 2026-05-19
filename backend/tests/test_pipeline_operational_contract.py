@@ -40,6 +40,8 @@ def test_continue_restores_retryable_workflow_state_when_execution_fails(tmp_pat
     assert support_log.exists()
     support_text = support_log.read_text(encoding="utf-8")
     assert "RuntimeError: render failed" in support_text
+    assert "short_code:" in support_text
+    assert "오류: RuntimeError: render failed" in support_text
     assert "workflow_state.json" in support_text
 
 

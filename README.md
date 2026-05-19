@@ -415,7 +415,7 @@ output/jobs/<job_id>/
 
 `package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, LLM 응답 preview 로그, audit log, planner trace, selector trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
 
-사내 테스트 중 실패하거나 기대와 다르게 동작하면 `support_log.md`를 우선 전달합니다. 이 파일은 사용자가 메모할 수 있는 항목, job id, 현재 workflow step, last_error, 요청 요약, degraded/fallback, 최근 audit, 첨부 권장 파일 목록을 한 파일로 정리합니다. 실패한 `continue` 실행에서도 `workflow_state.json`과 함께 자동 생성됩니다.
+사내 테스트 중 실패하거나 기대와 다르게 동작하면 `support_log.md`를 우선 전달합니다. 이 파일은 사용자가 메모할 수 있는 항목, job id, 현재 workflow step, last_error, 요청 요약, degraded/fallback, 최근 audit, 첨부 권장 파일 목록을 한 파일로 정리합니다. 실패한 `continue` 실행에서도 `workflow_state.json`과 함께 자동 생성됩니다. 파일을 첨부하거나 복사할 수 없는 환경에서는 `support_log.md` 상단의 `타이핑용 요약` 섹션만 먼저 전달합니다. 이 섹션은 `short_code`, 짧은 job id, 상태, 단계, 원인/오류만 5~6줄로 정리합니다.
 
 `degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
 
