@@ -166,6 +166,8 @@ def _record_stage(
     terminal_details: dict[str, Any] | None = None,
     **event: Any,
 ) -> dict[str, Any]:
+    if terminal_details is not None and "details" not in event:
+        event["details"] = terminal_details
     audit_event = audit.record(**event)
     terminal.record_audit_event(audit_event, details=terminal_details)
     return audit_event
@@ -992,7 +994,15 @@ def rerender_pipeline_package(
         rehearsal=result.rehearsal,
         artifacts=artifacts,
     )
-    _write_json(manifest_path, _manifest(rerendered, degradations=audit.degradations(), environment=environment))
+    _write_json(
+        manifest_path,
+        _manifest(
+            rerendered,
+            degradations=audit.degradations(),
+            fallback_events=audit.fallback_events(),
+            environment=environment,
+        ),
+    )
     _update_workflow_state_after_rerender(package_dir)
     terminal.record(
         run_id=job_id,
@@ -1182,6 +1192,11 @@ def _complete_pipeline_execution(
             "device": settings.tts_device,
             "language": settings.tts_language,
             "audio_count": len(tts_result.audio_paths),
+            "entry_errors": [
+                {"step_id": str(entry.get("step_id") or ""), "error": str(entry.get("error") or "")}
+                for entry in tts_result.entries
+                if entry.get("error")
+            ][:5],
         },
     )
     replay_result: dict[str, Any] | None = None
@@ -1338,6 +1353,7 @@ def _complete_pipeline_execution(
             "renderer": settings.video_renderer,
             "used_fallback": video_render.used_fallback,
             "video_name": video_render.video_path.name,
+            "metadata": _read_small_json(video_render.metadata_path),
         },
     )
     _update_workflow_state(
@@ -1413,7 +1429,15 @@ def _complete_pipeline_execution(
     )
     terminal.record(run_id=job_id, actor="manifest", status="started")
     _record_stage(audit, terminal, actor="manifest", status="ok", artifacts=[manifest_path])
-    _write_json(manifest_path, _manifest(result, degradations=audit.degradations(), environment=environment))
+    _write_json(
+        manifest_path,
+        _manifest(
+            result,
+            degradations=audit.degradations(),
+            fallback_events=audit.fallback_events(),
+            environment=environment,
+        ),
+    )
     terminal.record(
         run_id=job_id,
         actor="pipeline",
@@ -4709,6 +4733,7 @@ def _manifest(
     result: PipelineResult,
     *,
     degradations: list[dict[str, str]] | None = None,
+    fallback_events: list[dict[str, Any]] | None = None,
     environment: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     package_dir = result.package_dir
@@ -4739,6 +4764,7 @@ def _manifest(
         "package_dir": str(result.package_dir),
         "environment": environment or {},
         "degradations": degradations or [],
+        "fallback_events": fallback_events or [],
         "artifacts": {
             "html_preview": str(result.artifacts.html_preview),
             "markdown_manual": str(result.artifacts.markdown_manual),
@@ -4830,6 +4856,29 @@ def _optional_path(path: Path | None) -> str | None:
     if path is None or not path.exists():
         return None
     return str(path)
+
+
+def _read_small_json(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    allowed_keys = {
+        "status",
+        "reason",
+        "error",
+        "renderer",
+        "used_fallback",
+        "returncode",
+        "stderr",
+        "audio",
+        "skills_status",
+    }
+    return {key: data[key] for key in allowed_keys if key in data}
 
 
 def _write_json(path: Path, data: Any) -> None:

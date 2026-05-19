@@ -45,6 +45,8 @@ def extract_input_values(
         )
         source = settings.llm.source_label if settings.llm.is_configured else "local-deterministic"
     except Exception as exc:  # noqa: BLE001 - local extraction keeps the pipeline usable.
+        if getattr(settings, "strict_mode", False):
+            raise
         extracted_values = _extract_locally(request)
         source = "local-deterministic-fallback"
         status = "degraded"

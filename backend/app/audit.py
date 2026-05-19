@@ -60,6 +60,25 @@ class AuditLog:
             if event.get("status") == "degraded" and event.get("degrade_reason")
         ]
 
+    def fallback_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for event in self.events:
+            reason = str(event.get("degrade_reason") or "")
+            status = str(event.get("status") or "")
+            if status != "degraded" or not reason:
+                continue
+            events.append(
+                {
+                    "timestamp": str(event.get("timestamp") or ""),
+                    "actor": str(event.get("actor") or ""),
+                    "status": status,
+                    "reason": reason,
+                    "details": event.get("details") or {},
+                    "artifacts": event.get("artifacts") or [],
+                }
+            )
+        return events
+
 
 def stable_hash(value: Any) -> str:
     if value is None:

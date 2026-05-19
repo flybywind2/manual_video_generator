@@ -22,6 +22,8 @@ def run_capture(
         try:
             capture_result = capture_func(request, plan, dirs, settings)
         except Exception as exc:  # noqa: BLE001 - browser startup/login failures should stay inspectable.
+            if getattr(settings, "strict_mode", False):
+                raise
             capture_result = failure_fallback_func(request, dirs, exc)
         capture_status = str(capture_result.get("status") or "ok")
         capture_degrade_reason = str(capture_result.get("degrade_reason") or "")

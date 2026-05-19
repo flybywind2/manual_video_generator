@@ -570,6 +570,10 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert all("status" in event for event in events)
     assert manifest["degradations"]
     assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
+    assert manifest["fallback_events"]
+    tts_fallback = next(item for item in manifest["fallback_events"] if item["reason"] == "tts_silent_fallback")
+    assert tts_fallback["actor"] == "tts"
+    assert tts_fallback["artifacts"]
     assert manifest["environment"]["python_version"]
     assert "playwright_browsers_path" in manifest["environment"]
 
@@ -595,6 +599,29 @@ def test_package_manifest_records_opencode_failure_as_degradation(tmp_path, monk
 
     assert opencode_metadata["status"] == "failed"
     assert any(item["actor"] == "opencode" and item["reason"] == "opencode_failed" for item in manifest["degradations"])
+    assert any(item["actor"] == "opencode" and item["details"]["enabled"] is True for item in manifest["fallback_events"])
+
+
+def test_strict_mode_raises_instead_of_capture_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_STRICT_MODE", "true")
+
+    def fail_capture(*_args, **_kwargs):
+        raise RuntimeError("browser launch failed")
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", fail_capture)
+
+    with pytest.raises(RuntimeError, match="browser launch failed"):
+        run_pipeline(
+            PipelineInput(
+                request_text="사내 포털 권한 신청 방법 영상 만들기",
+                target_url="http://internal.example.local/portal",
+                role="신청자",
+                completion_condition="신청 화면 확인",
+                input_values={"사용자ID": "U100"},
+            ),
+            base_dir=tmp_path,
+            capture_browser=True,
+        )
 
 
 def test_audit_log_records_runtime_tool_usage_events(tmp_path):

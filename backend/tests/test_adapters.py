@@ -3,6 +3,8 @@ import subprocess
 import wave
 from pathlib import Path
 
+import pytest
+
 from backend.app.adapters.browser_agent import decide_browser_agent_action
 from backend.app.adapters.extension_bridge import ExtensionBridgeClient
 from backend.app.adapters.input_extractor import extract_input_values
@@ -95,6 +97,33 @@ def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Pa
     assert "plain" not in llm_log_text
     assert "123456" not in terminal_log_text
     assert "plain" not in terminal_log_text
+
+
+def test_input_extractor_strict_mode_raises_llm_errors(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사용자 U100 권한 조회",
+        target_url="http://internal.example.local",
+        role="관리자",
+        completion_condition="권한 화면",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_STRICT_MODE": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fail_post(url, headers, payload, timeout_seconds):
+        raise RuntimeError("LLM timeout")
+
+    with pytest.raises(RuntimeError, match="LLM timeout"):
+        extract_input_values(request, settings, package_dir=tmp_path, http_post=fail_post)
 
 
 def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path: Path):
@@ -791,6 +820,35 @@ def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_inva
     trace = json.loads((tmp_path / "planner_trace.json").read_text(encoding="utf-8"))
     assert trace["planner"] == "internal-llm"
     assert trace["error"] == plan["planner_error"]
+
+
+def test_internal_planner_strict_mode_raises_llm_errors(tmp_path: Path):
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회 방법 영상 만들기",
+        target_url="http://127.0.0.1:8000/sample",
+        role="작업자",
+        completion_condition="상세 화면",
+        input_values={"LOT": "LOT-001"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_STRICT_MODE": "true",
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fail_post(url, headers, payload, timeout_seconds):
+        raise RuntimeError("planner timeout")
+
+    with pytest.raises(RuntimeError, match="planner timeout"):
+        build_plan(request, settings, package_dir=tmp_path, http_post=fail_post)
 
 
 def test_deterministic_planner_does_not_emit_mes_sample_selectors():

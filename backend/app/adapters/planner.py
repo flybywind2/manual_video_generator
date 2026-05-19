@@ -44,6 +44,8 @@ def build_plan(
         _write_trace(package_dir, trace)
         return plan
     except Exception as exc:  # noqa: BLE001 - fallback must keep the operator flow alive.
+        if getattr(settings, "strict_mode", False):
+            raise
         fallback = deterministic_plan(request, settings.safe_status())
         fallback["source"] = "local-deterministic-planner-fallback"
         fallback["planner_error"] = f"{type(exc).__name__}: {exc}"

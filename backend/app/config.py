@@ -209,6 +209,7 @@ class AppSettings:
     request_timeout_seconds: float
     demonstration_timeout_seconds: float
     enable_terminal_logs: bool
+    strict_mode: bool
 
     def safe_status(self) -> dict[str, object]:
         login_status = dict(self.login.safe_status())
@@ -266,6 +267,7 @@ class AppSettings:
                 "request_timeout_seconds": self.request_timeout_seconds,
                 "demonstration_timeout_seconds": self.demonstration_timeout_seconds,
                 "enable_terminal_logs": self.enable_terminal_logs,
+                "strict_mode": self.strict_mode,
                 "doctor_check_names": [
                     "python",
                     "node",
@@ -390,6 +392,7 @@ def load_settings(
         request_timeout_seconds=_get_float(env, "REQUEST_TIMEOUT_SECONDS", 30.0),
         demonstration_timeout_seconds=_get_float(env, "DEMONSTRATION_TIMEOUT_SECONDS", 600.0),
         enable_terminal_logs=_get_bool(env, "ENABLE_TERMINAL_LOGS", False),
+        strict_mode=_get_bool(env, "STRICT_MODE", False),
     )
 
 

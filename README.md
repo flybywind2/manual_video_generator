@@ -110,6 +110,8 @@ stateDiagram-v2
 
 요청문이 짧거나 모호해도 `input_extraction.json`에는 `scenario_brief`가 함께 생성됩니다. 이 브리프는 `task_type`, `success_criteria`, `required_inputs`, `safe_click_intents`, `forbidden_click_intents`, `autonomy_guidance`를 포함하며 planner와 browser agent 프롬프트에 전달됩니다. 예를 들어 챗봇 요청은 질문 입력, 전송/Enter, 답변 대기 중심으로 증강하고 `Web Search`, 모델 선택, 도구 토글 같은 선택형 UI는 금지 의도로 유지합니다.
 
+fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=true`를 켭니다. strict mode는 입력값 추출, planner, 브라우저 캡처처럼 fallback을 자주 타는 단계에서 첫 예외를 그대로 발생시켜 문제 지점을 숨기지 않습니다. 일반 모드에서도 `package_manifest.json`의 `fallback_events`에는 강등된 actor, reason, 관련 artifact, 요약 details가 남습니다.
+
 개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
 
 사내 PC에서 Codex를 사용할 수 없고 OpenCode만 허용되는 배포 기준은 [OpenCode Only 사내 배포 메모](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 따릅니다.

@@ -24,6 +24,7 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_CDP_ENDPOINT=" in env_example
     assert "MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT=" in env_example
     assert "MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN=" in env_example
+    assert "MANUAL_AGENT_STRICT_MODE=" in env_example
     assert "--codex" not in env_example
 
 
@@ -32,6 +33,7 @@ def test_default_runtime_config_is_opencode_only_friendly():
 
     assert "--codex" not in settings.hyperframes_skills_command
     assert settings.opencode_command.startswith("opencode run")
+    assert settings.strict_mode is False
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -97,6 +99,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=900",
                 "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=720",
                 "MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true",
+                "MANUAL_AGENT_STRICT_MODE=true",
             ]
         ),
         encoding="utf-8",
@@ -158,6 +161,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.opencode_timeout_seconds == 900
     assert settings.demonstration_timeout_seconds == 720
     assert settings.enable_terminal_logs is True
+    assert settings.strict_mode is True
     assert settings.llm.is_configured is True
     headers = settings.llm.default_headers()
     assert headers["x-dep-ticket"] == "credential:TICKET-123"
