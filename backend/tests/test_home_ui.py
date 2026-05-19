@@ -76,6 +76,15 @@ def test_static_app_exposes_review_artifact_links():
     assert "artifactEditorFriendly" in body
     assert "renderPlanArtifact" in body
     assert "renderGenericJsonValue" in body
+    assert "renderEditableJsonEditor" in body
+    assert "syncFriendlyEditorToRaw" in body
+    assert "setJsonPathValue" in body
+    assert "data-action=\"edit-json-value\"" in body
+    assert "data-action=\"rename-json-key\"" in body
+    assert "data-action=\"add-json-item\"" in body
+    assert "data-action=\"remove-json-item\"" in body
+    assert "필드 추가" in body
+    assert "항목 추가" in body
     assert "원본 편집" in body
     assert "쉬운 보기" in body
 

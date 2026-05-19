@@ -111,7 +111,8 @@ artifactLinks?.addEventListener("click", async (event) => {
 });
 
 artifactEditorModal?.addEventListener("click", async (event) => {
-  const action = event.target?.closest("[data-action]")?.dataset?.action;
+  const control = event.target?.closest("[data-action]");
+  const action = control?.dataset?.action;
   if (action === "close-artifact-editor") {
     closeArtifactEditor();
   }
@@ -124,7 +125,16 @@ artifactEditorModal?.addEventListener("click", async (event) => {
   if (action === "save-artifact-editor") {
     await saveArtifactEditor();
   }
+  if (action === "add-json-item") {
+    addJsonItem(parseJsonPath(control.dataset.jsonPath));
+  }
+  if (action === "remove-json-item") {
+    removeJsonItem(parseJsonPath(control.dataset.jsonPath));
+  }
 });
+
+artifactEditorFriendly?.addEventListener("input", handleFriendlyJsonEdit);
+artifactEditorFriendly?.addEventListener("change", handleFriendlyJsonEdit);
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && artifactEditorModal && !artifactEditorModal.hidden) {
@@ -484,12 +494,18 @@ function renderFriendlyArtifact(parsed, label) {
   }
   const data = parsed.data;
   const summary = renderArtifactSummary(data, parsed.name);
-  const body = renderKnownArtifact(parsed.name, data) || renderGenericJsonValue(data, "전체 내용", 0);
+  const overview = renderKnownArtifact(parsed.name, data);
+  const editor = renderEditableJsonEditor(data, parsed.kind);
   artifactEditorFriendly.innerHTML = `
     <div class="friendly-artifact">
       ${summary}
+      ${overview ? `<div class="friendly-section">${overview}</div>` : ""}
       <div class="friendly-section">
-        ${body}
+        <div class="friendly-edit-heading">
+          <h3>직접 편집</h3>
+          <span>값을 바꾸면 원본 편집 내용도 같이 갱신됩니다. 저장 버튼을 눌러 파일에 반영합니다.</span>
+        </div>
+        ${editor}
       </div>
     </div>
   `;
@@ -634,8 +650,235 @@ function renderGenericJsonValue(value, label = "값", depth = 0) {
   return `<div class="friendly-leaf"><span>${escapeHtml(formatJsonLabel(label))}</span><strong>${escapeHtml(formatJsonValue(value))}</strong></div>`;
 }
 
+function renderEditableJsonEditor(value, kind = "json") {
+  return `<div class="friendly-edit-editor" data-json-kind="${escapeHtml(kind)}">${renderEditableJsonValue(value, [], "전체 내용", 0)}</div>`;
+}
+
+function renderEditableJsonValue(value, path = [], label = "값", depth = 0) {
+  const pathAttr = escapeHtml(jsonPathAttr(path));
+  const formattedLabel = escapeHtml(formatJsonLabel(label));
+  if (Array.isArray(value)) {
+    return `
+      <details class="friendly-edit-node" ${depth < 2 ? "open" : ""}>
+        <summary>
+          <span>${formattedLabel}</span>
+          <strong>${value.length}개 항목</strong>
+          <button class="friendly-mini-button" type="button" data-action="add-json-item" data-json-path="${pathAttr}">항목 추가</button>
+        </summary>
+        <div class="friendly-edit-children">
+          ${value.map((item, index) => `
+            <div class="friendly-edit-item">
+              <div class="friendly-edit-item-bar">
+                <span>${index + 1}번 항목</span>
+                <button class="friendly-mini-button danger" type="button" data-action="remove-json-item" data-json-path="${escapeHtml(jsonPathAttr([...path, index]))}">삭제</button>
+              </div>
+              ${renderEditableJsonValue(item, [...path, index], `${index + 1}`, depth + 1)}
+            </div>
+          `).join("")}
+        </div>
+      </details>
+    `;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    return `
+      <details class="friendly-edit-node" ${depth < 2 ? "open" : ""}>
+        <summary>
+          <span>${formattedLabel}</span>
+          <strong>${entries.length}개 필드</strong>
+          <button class="friendly-mini-button" type="button" data-action="add-json-item" data-json-path="${pathAttr}">필드 추가</button>
+        </summary>
+        <div class="friendly-edit-children">
+          ${entries.map(([key, item]) => `
+            <div class="friendly-edit-item">
+              <div class="friendly-edit-item-bar">
+                <label>
+                  <span>필드</span>
+                  <input class="friendly-key-input" data-action="rename-json-key" data-parent-path="${pathAttr}" data-json-key="${escapeHtml(key)}" value="${escapeHtml(key)}" />
+                </label>
+                <button class="friendly-mini-button danger" type="button" data-action="remove-json-item" data-json-path="${escapeHtml(jsonPathAttr([...path, key]))}">삭제</button>
+              </div>
+              ${renderEditableJsonValue(item, [...path, key], key, depth + 1)}
+            </div>
+          `).join("")}
+        </div>
+      </details>
+    `;
+  }
+  return renderEditablePrimitive(value, path, label);
+}
+
+function renderEditablePrimitive(value, path, label) {
+  const pathAttr = escapeHtml(jsonPathAttr(path));
+  const labelText = escapeHtml(formatJsonLabel(label));
+  if (typeof value === "boolean") {
+    return `
+      <label class="friendly-edit-field">
+        <span>${labelText}</span>
+        <select data-action="edit-json-value" data-json-path="${pathAttr}" data-json-type="boolean">
+          <option value="true" ${value ? "selected" : ""}>예</option>
+          <option value="false" ${!value ? "selected" : ""}>아니오</option>
+        </select>
+      </label>
+    `;
+  }
+  if (typeof value === "number") {
+    return `
+      <label class="friendly-edit-field">
+        <span>${labelText}</span>
+        <input type="number" data-action="edit-json-value" data-json-path="${pathAttr}" data-json-type="number" value="${escapeHtml(value)}" />
+      </label>
+    `;
+  }
+  if (value === null) {
+    return `
+      <label class="friendly-edit-field">
+        <span>${labelText}</span>
+        <input data-action="edit-json-value" data-json-path="${pathAttr}" data-json-type="null" value="null" />
+      </label>
+    `;
+  }
+  return `
+    <label class="friendly-edit-field">
+      <span>${labelText}</span>
+      <textarea rows="2" data-action="edit-json-value" data-json-path="${pathAttr}" data-json-type="string">${escapeHtml(value ?? "")}</textarea>
+    </label>
+  `;
+}
+
+function handleFriendlyJsonEdit(event) {
+  const control = event.target?.closest("[data-action]");
+  if (!control || !currentArtifactEditor?.contentType || currentArtifactEditor.contentType.kind === "plain") return;
+  const action = control.dataset.action;
+  if (action === "edit-json-value") {
+    const path = parseJsonPath(control.dataset.jsonPath);
+    const nextValue = coerceJsonInputValue(control.value, control.dataset.jsonType);
+    const data = setJsonPathValue(currentArtifactEditor.contentType.data, path, nextValue);
+    currentArtifactEditor.contentType.data = data;
+    syncFriendlyEditorToRaw("쉬운 보기 변경사항이 원본 편집에 반영되었습니다. 저장을 누르면 파일에 반영됩니다.");
+  }
+  if (action === "rename-json-key" && event.type === "change") {
+    renameJsonKey(parseJsonPath(control.dataset.parentPath), control.dataset.jsonKey || "", control.value);
+  }
+}
+
+function addJsonItem(path) {
+  if (!currentArtifactEditor?.contentType || currentArtifactEditor.contentType.kind === "plain") return;
+  const target = getJsonPathValue(currentArtifactEditor.contentType.data, path);
+  if (Array.isArray(target)) {
+    target.push(defaultJsonValueForArray(target));
+  } else if (target && typeof target === "object") {
+    target[nextJsonFieldName(target)] = "";
+  }
+  syncFriendlyEditorToRaw("항목을 추가했습니다. 저장을 누르면 파일에 반영됩니다.", { rerender: true });
+}
+
+function removeJsonItem(path) {
+  if (!currentArtifactEditor?.contentType || currentArtifactEditor.contentType.kind === "plain") return;
+  if (!path.length) return;
+  const parent = getJsonPathValue(currentArtifactEditor.contentType.data, path.slice(0, -1));
+  const key = path[path.length - 1];
+  if (Array.isArray(parent) && Number.isInteger(key)) {
+    parent.splice(key, 1);
+  } else if (parent && typeof parent === "object") {
+    delete parent[key];
+  }
+  syncFriendlyEditorToRaw("항목을 삭제했습니다. 저장을 누르면 파일에 반영됩니다.", { rerender: true });
+}
+
+function renameJsonKey(parentPath, oldKey, nextKey) {
+  if (!currentArtifactEditor?.contentType || currentArtifactEditor.contentType.kind === "plain") return;
+  const parent = getJsonPathValue(currentArtifactEditor.contentType.data, parentPath);
+  const trimmed = String(nextKey || "").trim();
+  if (!parent || typeof parent !== "object" || Array.isArray(parent) || !oldKey || !trimmed) {
+    syncFriendlyEditorToRaw("필드 이름을 변경하지 못했습니다.", { rerender: true });
+    return;
+  }
+  if (oldKey === trimmed) return;
+  const finalKey = Object.prototype.hasOwnProperty.call(parent, trimmed) ? nextJsonFieldName(parent, trimmed) : trimmed;
+  parent[finalKey] = parent[oldKey];
+  delete parent[oldKey];
+  syncFriendlyEditorToRaw("필드 이름을 변경했습니다. 저장을 누르면 파일에 반영됩니다.", { rerender: true });
+}
+
+function syncFriendlyEditorToRaw(message = "", options = {}) {
+  if (!currentArtifactEditor?.contentType || !artifactEditorText) return;
+  const parsed = currentArtifactEditor.contentType;
+  if (parsed.kind === "json") {
+    artifactEditorText.value = `${JSON.stringify(parsed.data, null, 2)}\n`;
+  } else if (parsed.kind === "jsonl" && Array.isArray(parsed.data)) {
+    artifactEditorText.value = `${parsed.data.map((row) => JSON.stringify(row)).join("\n")}\n`;
+  }
+  if (message && artifactEditorStatus) artifactEditorStatus.textContent = message;
+  if (options.rerender) renderFriendlyArtifact(parsed, currentArtifactEditor.label);
+}
+
+function refreshFriendlyEditorFromRaw() {
+  if (!currentArtifactEditor || !artifactEditorText) return;
+  const parsed = parseArtifactContent(currentArtifactEditor.contentType?.name || currentArtifactEditor.url, artifactEditorText.value);
+  currentArtifactEditor.contentType = parsed;
+  renderFriendlyArtifact(parsed, currentArtifactEditor.label);
+}
+
+function getJsonPathValue(root, path) {
+  return path.reduce((value, key) => (value == null ? undefined : value[key]), root);
+}
+
+function setJsonPathValue(root, path, nextValue) {
+  if (!path.length) return nextValue;
+  const parent = getJsonPathValue(root, path.slice(0, -1));
+  if (parent == null) return root;
+  parent[path[path.length - 1]] = nextValue;
+  return root;
+}
+
+function parseJsonPath(value) {
+  if (!value) return [];
+  try {
+    return JSON.parse(decodeURIComponent(value));
+  } catch {
+    return [];
+  }
+}
+
+function jsonPathAttr(path) {
+  return encodeURIComponent(JSON.stringify(path));
+}
+
+function coerceJsonInputValue(value, type) {
+  if (type === "boolean") return value === "true";
+  if (type === "number") {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  }
+  if (type === "null") return value === "null" || value === "" ? null : value;
+  return value;
+}
+
+function defaultJsonValueForArray(items) {
+  const sample = items.find((item) => item !== null && item !== undefined);
+  if (Array.isArray(sample)) return [];
+  if (sample && typeof sample === "object") return {};
+  if (typeof sample === "number") return 0;
+  if (typeof sample === "boolean") return false;
+  return "";
+}
+
+function nextJsonFieldName(target, base = "new_field") {
+  const normalized = String(base || "new_field").trim() || "new_field";
+  if (!Object.prototype.hasOwnProperty.call(target, normalized)) return normalized;
+  let index = 2;
+  while (Object.prototype.hasOwnProperty.call(target, `${normalized}_${index}`)) {
+    index += 1;
+  }
+  return `${normalized}_${index}`;
+}
+
 function showArtifactEditorMode(mode) {
   const isRaw = mode === "raw";
+  if (!isRaw && currentArtifactEditor?.contentType?.kind !== "plain") {
+    refreshFriendlyEditorFromRaw();
+  }
   if (artifactEditorFriendly) artifactEditorFriendly.hidden = isRaw;
   if (artifactEditorText) {
     artifactEditorText.hidden = !isRaw;
