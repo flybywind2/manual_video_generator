@@ -42,6 +42,7 @@ class PipelineInput(BaseModel):
     role: str
     completion_condition: str
     input_values: dict[str, str] = Field(default_factory=dict)
+    agent_brief: dict[str, Any] = Field(default_factory=dict)
     execution_mode: str = "ai"
     login_mode: str = ""
     login_success_selector: str = ""
@@ -460,7 +461,12 @@ def run_pipeline(
         },
     )
     input_extraction = extract_input_values(request, settings, package_dir=dirs.package)
-    effective_request = request.model_copy(update={"input_values": input_extraction["effective_input_values"]})
+    effective_request = request.model_copy(
+        update={
+            "input_values": input_extraction["effective_input_values"],
+            "agent_brief": input_extraction.get("scenario_brief", {}),
+        }
+    )
     request_payload = redact_sensitive(effective_request.model_dump())
     _record_stage(
         audit,
@@ -625,7 +631,12 @@ def create_pipeline_draft(
         },
     )
     input_extraction = extract_input_values(request, settings, package_dir=dirs.package)
-    effective_request = request.model_copy(update={"input_values": input_extraction["effective_input_values"]})
+    effective_request = request.model_copy(
+        update={
+            "input_values": input_extraction["effective_input_values"],
+            "agent_brief": input_extraction.get("scenario_brief", {}),
+        }
+    )
     request_payload = redact_sensitive(effective_request.model_dump())
     _record_stage(
         audit,

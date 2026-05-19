@@ -60,11 +60,16 @@ def decide_browser_agent_action(
                 "role": "system",
                 "content": (
                     "You are a browser automation agent for an internal system manual video. "
-                    "Inspect the current Playwright page observation and choose exactly one next safe read-only action. "
+                    "Inspect the current Playwright page observation, the augmented agent brief, and the recent history. "
+                    "Choose exactly one next safe action that moves the user objective forward. "
                     "Each turn will be executed as observe -> act -> verify, so choose an action that can be verified from the next page state. "
                     "Return JSON only. Allowed types: fill_by_label, click_by_text, press_key, wait, capture_step, finish. "
-                    "Use fill_by_label only with provided input_values. Use click_by_text only for navigation/search/detail/read actions. "
+                    "Use fill_by_label only with provided input_values; if the visible field label differs from the input key, map the closest field to the value. "
+                    "Use click_by_text only for navigation/search/detail/read/send actions listed in safe_click_intents or clearly required by the objective. "
                     "Use press_key only for Enter after a chat/search input has already been filled and needs submission. "
+                    "If the previous action failed, do not repeat the same label/text; pick another visible candidate or finish with a clear reason. "
+                    "Capture meaningful milestones after data entry, after search/send, and before finish. "
+                    "Finish only after success_criteria is likely satisfied or a login/blocker prevents progress. "
                     "Never click optional feature toggles, tool switches, model/provider selectors, or web search/browsing controls. "
                     "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
                 ),
@@ -79,8 +84,10 @@ def decide_browser_agent_action(
                         "role": request.role,
                         "completion_condition": request.completion_condition,
                         "input_values": request.input_values,
+                        "agent_brief": getattr(request, "agent_brief", {}) or {},
                         "observation": observation,
                         "history": history[-8:],
+                        "recent_failures": [item for item in history[-8:] if item.get("status") in {"failed", "blocked", "degraded"}],
                         "output_schema": {
                             "type": "fill_by_label|click_by_text|press_key|wait|capture_step|finish",
                             "label": "field label for fill_by_label",
@@ -125,7 +132,7 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
     if action_type == "fill_by_label":
         label = str(data.get("label") or data.get("name") or "").strip()
         value_key = str(data.get("value_key") or label).strip()
-        value = request.input_values.get(value_key, request.input_values.get(label, data.get("value", "")))
+        value = _resolve_fill_value(data, request, value_key=value_key, label=label)
         if not label or value is None or str(value) == "":
             return {"status": "failed", "type": "finish", "reason": "missing_fill_label_or_value"}
         action.update({"label": label, "value": str(value), "value_key": value_key})
@@ -154,6 +161,28 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
     elif action_type == "wait":
         action["timeout_ms"] = _positive_int(data.get("timeout_ms", data.get("timeout", 1000)), default=1000)
     return action
+
+
+def _resolve_fill_value(data: dict[str, Any], request: Any, *, value_key: str, label: str) -> Any:
+    input_values = getattr(request, "input_values", {}) or {}
+    if value_key in input_values:
+        return input_values[value_key]
+    if label in input_values:
+        return input_values[label]
+    normalized_label = _compact_text(label)
+    for key, value in input_values.items():
+        normalized_key = _compact_text(str(key))
+        if normalized_key and (normalized_key in normalized_label or normalized_label in normalized_key):
+            return value
+    if "value" in data:
+        return data.get("value")
+    if len(input_values) == 1:
+        return next(iter(input_values.values()))
+    return ""
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"\s+", "", value).lower()
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:

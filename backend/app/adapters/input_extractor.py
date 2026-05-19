@@ -24,6 +24,7 @@ def extract_input_values(
     explicit_values = _filter_values(getattr(request, "input_values", {}) or {})
     if not settings.enable_input_extractor:
         result = _result(
+            request=request,
             status="skipped",
             source="disabled",
             extracted_values={},
@@ -50,6 +51,7 @@ def extract_input_values(
         reason = f"{type(exc).__name__}: {exc}"
 
     result = _result(
+        request=request,
         status=status,
         source=source,
         extracted_values=_filter_values(extracted_values),
@@ -146,6 +148,7 @@ def _extract_locally(request: Any) -> dict[str, str]:
 
 def _result(
     *,
+    request: Any,
     status: str,
     source: str,
     extracted_values: dict[str, str],
@@ -153,6 +156,7 @@ def _result(
     reason: str,
 ) -> dict[str, Any]:
     effective_values = {**extracted_values, **explicit_values}
+    scenario_brief = _build_scenario_brief(request, effective_values)
     return {
         "status": status,
         "source": source,
@@ -160,9 +164,101 @@ def _result(
         "extracted_input_values": extracted_values,
         "explicit_input_keys": sorted(explicit_values),
         "effective_input_values": effective_values,
+        "scenario_brief": scenario_brief,
         "extracted_count": len(extracted_values),
         "effective_count": len(effective_values),
     }
+
+
+def _build_scenario_brief(request: Any, effective_values: dict[str, str]) -> dict[str, Any]:
+    request_text = str(getattr(request, "request_text", "") or "")
+    completion_condition = str(getattr(request, "completion_condition", "") or "")
+    combined = f"{request_text} {completion_condition}".lower()
+    task_type = _infer_task_type(combined)
+    safe_click_intents = _infer_safe_click_intents(combined, task_type)
+    forbidden_click_intents = [
+        "Web Search",
+        "웹 검색",
+        "검색 토글",
+        "모델 선택",
+        "도구 선택",
+        "설정",
+        "삭제",
+        "저장",
+        "등록",
+        "수정",
+        "승인",
+        "반려",
+        "제출",
+    ]
+    success_criteria = [item for item in [completion_condition.strip(), _inferred_success_criterion(task_type)] if item]
+    return {
+        "task_type": task_type,
+        "objective": _redact_sensitive_free_text(request_text.strip()),
+        "role": str(getattr(request, "role", "") or "").strip(),
+        "success_criteria": list(dict.fromkeys(success_criteria)),
+        "required_inputs": sorted(effective_values),
+        "safe_click_intents": safe_click_intents,
+        "forbidden_click_intents": forbidden_click_intents,
+        "autonomy_guidance": _autonomy_guidance(task_type),
+    }
+
+
+def _infer_task_type(text: str) -> str:
+    if any(keyword in text for keyword in ("chatbot", "chat bot", "챗봇", "채팅", "prompt", "프롬프트", "질문")):
+        return "chat_prompt"
+    if any(keyword in text for keyword in ("조회", "검색", "search", "lookup")):
+        return "lookup"
+    if any(keyword in text for keyword in ("상세", "detail", "details")):
+        return "detail_review"
+    return "guided_navigation"
+
+
+def _infer_safe_click_intents(text: str, task_type: str) -> list[str]:
+    intents: list[str] = []
+    if task_type == "chat_prompt":
+        intents.extend(["전송", "Send", "Enter"])
+    if "조회" in text or "검색" in text or task_type == "lookup":
+        intents.extend(["조회", "검색", "Search"])
+    if "상세" in text or task_type == "detail_review":
+        intents.extend(["상세", "상세 보기", "Detail", "Details"])
+    if not intents:
+        intents.extend(["다음", "확인", "Next"])
+    return list(dict.fromkeys(intents))
+
+
+def _inferred_success_criterion(task_type: str) -> str:
+    if task_type == "chat_prompt":
+        return "입력한 질문에 대한 답변 영역이나 응답 텍스트가 화면에 보이면 완료"
+    if task_type == "lookup":
+        return "조회 결과, 목록, 상세 버튼, 또는 결과 건수가 화면에 보이면 완료"
+    if task_type == "detail_review":
+        return "상세 화면의 제목, 주요 필드, 또는 상세 내용이 화면에 보이면 완료"
+    return "요청한 업무 화면의 핵심 정보가 보이면 완료"
+
+
+def _autonomy_guidance(task_type: str) -> str:
+    if task_type == "chat_prompt":
+        return "질문 입력칸을 찾아 프롬프트를 입력하고 전송 또는 Enter로 제출한 뒤 답변이 나타날 때까지 기다린다."
+    if task_type == "lookup":
+        return "업무 입력값을 가장 관련 있는 검색/조회 필드에 입력하고 조회 또는 검색 버튼을 누른 뒤 결과 화면을 확인한다."
+    if task_type == "detail_review":
+        return "목록 또는 결과 화면에서 상세 보기 성격의 안전한 링크나 버튼을 선택하고 상세 내용이 나타나는지 확인한다."
+    return "화면의 제목, 입력 필드, 버튼 텍스트를 기준으로 다음 안전한 읽기 중심 행동을 선택한다."
+
+
+def _redact_sensitive_free_text(value: str) -> str:
+    redacted = re.sub(
+        r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|otp|pin)\s+([^\s,;]+)",
+        lambda match: f"{match.group(1)} <redacted>",
+        value,
+    )
+    redacted = re.sub(
+        r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|authorization|otp|pin)\s*[:=]\s*([^\s,;]+)",
+        lambda match: f"{match.group(1)}=<redacted>",
+        redacted,
+    )
+    return redacted
 
 
 def _filter_values(values: dict[str, Any]) -> dict[str, str]:

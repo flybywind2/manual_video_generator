@@ -235,7 +235,11 @@ def _call_llm_planner(
                 "content": (
                     "너는 사내 시스템 사용 매뉴얼 영상 제작용 action plan을 생성한다. "
                     "반드시 JSON만 반환한다. JSON schema: "
-                    "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,selector?,target?,value?,requires_approval?}]}. "
+                    "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,target?,label?,value?,value_key?,texts?,requires_approval?}]}. "
+                    "사용자 요청이 짧거나 모호하면 agent_brief의 task_type, success_criteria, safe_click_intents를 사용해 필요한 단계를 보강한다. "
+                    "브라우저 화면마다 달라지는 CSS selector보다 fill_by_label, click_by_text, press_key, capture_step 같은 의미 기반 action을 우선한다. "
+                    "입력값은 input_values의 key를 value_key로 참조하고, 화면의 실제 필드명은 label에 넣는다. "
+                    "조회/검색/전송 뒤에는 capture_step을 넣고, 완료 조건 확인 단계도 포함한다. "
                     "웹 검색, web search, 모델 선택, 도구 선택, 기능 토글 같은 선택형 UI는 클릭하지 않는다."
                 ),
             },
@@ -248,6 +252,7 @@ def _call_llm_planner(
                         "role": request.role,
                         "completion_condition": request.completion_condition,
                         "input_values": request.input_values,
+                        "agent_brief": getattr(request, "agent_brief", {}) or {},
                         "rag_context": context_docs,
                     },
                     ensure_ascii=False,

@@ -191,6 +191,9 @@ def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
     assert request_payload["input_values"]["LOT"] == "LOT-001"
     assert request_payload["input_values"]["라인"] == "A3"
     assert extraction["effective_input_values"] == {"LOT": "LOT-001", "라인": "A3"}
+    assert request_payload["agent_brief"]["task_type"] == "lookup"
+    assert "조회" in request_payload["agent_brief"]["safe_click_intents"]
+    assert extraction["scenario_brief"]["required_inputs"] == ["LOT", "라인"]
     assert any(action["type"] == "fill_by_label" and action["label"] == "LOT" for action in action_plan["actions"])
     assert any(action["type"] == "fill_by_label" and action["label"] == "라인" for action in action_plan["actions"])
     assert result.artifacts.input_extraction.exists()

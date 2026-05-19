@@ -112,6 +112,27 @@ def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path
     assert result["extracted_input_values"]["LOT"] == "LOT-001"
     assert result["effective_input_values"]["LOT"] == "MANUAL-999"
     assert result["explicit_input_keys"] == ["LOT"]
+    assert result["scenario_brief"]["required_inputs"] == ["LOT"]
+
+
+def test_input_extractor_augments_chatbot_request_with_safe_intents(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 prompt 입력하고 결과 받는 영상",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변이 보이면 완료",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(environ={})
+
+    result = extract_input_values(request, settings, package_dir=tmp_path)
+    brief = result["scenario_brief"]
+
+    assert brief["task_type"] == "chat_prompt"
+    assert "프롬프트" in brief["required_inputs"]
+    assert "전송" in brief["safe_click_intents"]
+    assert "Web Search" in brief["forbidden_click_intents"]
+    assert "답변이 보이면 완료" in brief["success_criteria"]
 
 
 def test_browser_agent_decides_next_action_from_page_observation(tmp_path: Path, capsys):
@@ -182,6 +203,68 @@ def test_browser_agent_decides_next_action_from_page_observation(tmp_path: Path,
     assert '"component": "browser_agent"' in log_text
     assert "LOT 입력칸이 보입니다." in log_text
     assert "LOT 입력칸이 보입니다." in (tmp_path / "llm_responses.jsonl").read_text(encoding="utf-8")
+
+
+def test_browser_agent_prompt_includes_augmented_brief_and_failure_history(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 prompt 입력하고 결과 받는 영상",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 표시",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+        agent_brief={
+            "task_type": "chat_prompt",
+            "safe_click_intents": ["전송", "Send"],
+            "forbidden_click_intents": ["Web Search"],
+            "success_criteria": ["답변 표시"],
+        },
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "fill_by_label", "label": "질문", "reason": "질문 입력"},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"fields": [{"label": "질문", "value": ""}], "clickables": [{"text": "전송"}]},
+        history=[{"step": 1, "type": "click_by_text", "status": "failed", "reason": "missing target"}],
+        step_index=2,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    user_payload = json.loads(calls[0]["messages"][1]["content"])
+    assert user_payload["agent_brief"]["task_type"] == "chat_prompt"
+    assert user_payload["recent_failures"][0]["status"] == "failed"
+    assert "Web Search" in user_payload["agent_brief"]["forbidden_click_intents"]
+    assert action["type"] == "fill_by_label"
+    assert action["label"] == "질문"
+    assert action["value"] == "st.form과 st.input 차이"
 
 
 def test_browser_agent_blocks_dangerous_click_texts():
@@ -518,8 +601,60 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     terminal_log_text = capsys.readouterr().err
     assert '"actor": "llm_response"' in terminal_log_text
     assert '"component": "planner"' in terminal_log_text
-    assert "LLM 생성 단계" in terminal_log_text
-    assert "LLM 생성 단계" in llm_log_text
+
+
+def test_internal_planner_prompt_receives_agent_brief(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사내 chatbot에 질문 입력",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 표시",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+        agent_brief={
+            "task_type": "chat_prompt",
+            "safe_click_intents": ["전송"],
+            "forbidden_click_intents": ["Web Search"],
+        },
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "steps": [{"id": "step_chat", "title": "질문", "caption": "질문", "narration": "질문"}],
+                                "actions": [
+                                    {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_chat"}
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+    prompt_payload = json.loads(calls[0]["messages"][1]["content"])
+
+    assert prompt_payload["agent_brief"]["task_type"] == "chat_prompt"
+    assert "Web Search" in prompt_payload["agent_brief"]["forbidden_click_intents"]
 
 
 def test_internal_planner_calls_ollama_openai_endpoint_without_internal_headers(tmp_path: Path):

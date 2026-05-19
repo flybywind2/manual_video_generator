@@ -50,7 +50,7 @@
 ```mermaid
 flowchart TB
     A["사용자 요청 입력<br/>시나리오, 대상 URL, 역할, 완료 조건, 입력값"] --> B["/api/pipeline/draft"]
-    B --> C["입력값 추출<br/>request.json, input_extraction.json"]
+    B --> C["요청 증강 + 입력값 추출<br/>scenario_brief, request.json, input_extraction.json"]
     C --> D{"Planner 선택"}
     D -->|기본| E["Deterministic planner<br/>semantic action plan 생성"]
     D -->|MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true| F["Internal LLM planner<br/>RAG/Reranker context 선택 사용"]
@@ -107,6 +107,8 @@ stateDiagram-v2
 ```
 
 현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
+
+요청문이 짧거나 모호해도 `input_extraction.json`에는 `scenario_brief`가 함께 생성됩니다. 이 브리프는 `task_type`, `success_criteria`, `required_inputs`, `safe_click_intents`, `forbidden_click_intents`, `autonomy_guidance`를 포함하며 planner와 browser agent 프롬프트에 전달됩니다. 예를 들어 챗봇 요청은 질문 입력, 전송/Enter, 답변 대기 중심으로 증강하고 `Web Search`, 모델 선택, 도구 토글 같은 선택형 UI는 금지 의도로 유지합니다.
 
 개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
 
