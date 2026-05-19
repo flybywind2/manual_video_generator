@@ -548,6 +548,7 @@ function renderArtifacts(result, message = "") {
     ["MCP Calls", supporting.playwright_mcp_calls || result.artifacts.mcp_calls_url],
     ["MCP 실행 로그", supporting.playwright_mcp_execution || result.artifacts.mcp_execution_url],
     ["Selector Trace", supporting.selector_trace || result.artifacts.selector_trace_url],
+    ["Support Log", supporting.support_log || result.artifacts.support_log_url],
     ["마스킹 로그", result.artifacts.masking_log_url],
     ["TTS 메타데이터", result.artifacts.tts_metadata_url],
     ["렌더링 메타데이터", result.artifacts.video_render_metadata_url],

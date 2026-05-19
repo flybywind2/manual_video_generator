@@ -390,6 +390,8 @@ output/jobs/<job_id>/
   approval_log.json
   audit_log.jsonl
   capture_action_log.json
+  selector_trace.json
+  support_log.md
   planner_trace.json
   rehearsal_log.json
   playwright_mcp_calls.json
@@ -411,7 +413,9 @@ output/jobs/<job_id>/
 
 `MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
 
-`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, LLM 응답 preview 로그, audit log, planner trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
+`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, LLM 응답 preview 로그, audit log, planner trace, selector trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
+
+사내 테스트 중 실패하거나 기대와 다르게 동작하면 `support_log.md`를 우선 전달합니다. 이 파일은 사용자가 메모할 수 있는 항목, job id, 현재 workflow step, last_error, 요청 요약, degraded/fallback, 최근 audit, 첨부 권장 파일 목록을 한 파일로 정리합니다. 실패한 `continue` 실행에서도 `workflow_state.json`과 함께 자동 생성됩니다.
 
 `degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
 

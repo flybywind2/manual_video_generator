@@ -36,6 +36,11 @@ def test_continue_restores_retryable_workflow_state_when_execution_fails(tmp_pat
     assert state["current_step"] == "execution_failed"
     assert state["can_continue"] is True
     assert "RuntimeError: render failed" in state["last_error"]
+    support_log = draft.package_dir / "support_log.md"
+    assert support_log.exists()
+    support_text = support_log.read_text(encoding="utf-8")
+    assert "RuntimeError: render failed" in support_text
+    assert "workflow_state.json" in support_text
 
 
 def test_continue_is_idempotent_after_workflow_completed(tmp_path: Path, monkeypatch):
@@ -215,6 +220,7 @@ def test_workflow_package_contract_shape_is_stable_for_sample_continue(tmp_path:
     assert state["status"] == "completed"
     assert state["current_step"] == "completed"
     assert set(manifest).issuperset({"job_id", "status", "environment", "degradations", "artifacts", "supporting_artifacts", "artifact_dependencies"})
+    assert Path(manifest["supporting_artifacts"]["support_log"]).exists()
     assert {"capture", "tts", "masking", "render", "manifest"}.issubset({event["actor"] for event in events})
 
 

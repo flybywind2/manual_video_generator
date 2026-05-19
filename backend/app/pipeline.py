@@ -70,6 +70,7 @@ class ArtifactPaths(BaseModel):
     skills_metadata: Path | None = None
     opencode_metadata: Path | None = None
     selector_trace: Path | None = None
+    support_log: Path | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -766,6 +767,7 @@ def create_pipeline_draft(
         details={"package_dir": str(dirs.package), "action_count": len(artifact_plan.get("actions") or [])},
         artifacts=[action_plan_path, approval_log_path, dirs.package / "rehearsal_log.json"],
     )
+    _write_support_log(dirs.package, job_id=job_id, status=WorkflowStatus.AWAITING_PLAN_REVIEW)
     return PipelineDraftResult(
         job_id=job_id,
         status=WorkflowStatus.AWAITING_PLAN_REVIEW,
@@ -852,6 +854,7 @@ def continue_pipeline_draft(
             details=failed_details,
             last_error=error,
         )
+        _write_support_log(package_dir, job_id=job_id, status=WorkflowStatus.FAILED, error=error)
         terminal.record(run_id=job_id, actor="pipeline", status="failed", details={"error": error})
         raise
 
@@ -974,6 +977,7 @@ def rerender_pipeline_package(
     )
 
     selector_trace_path = _write_selector_trace(dirs.package, _capture_action_entries_from_artifact(result.artifacts.capture_action_log))
+    support_log_path = _write_support_log(dirs.package, job_id=job_id, status=WorkflowStatus.COMPLETED)
     artifacts = ArtifactPaths(
         html_preview=html_path,
         markdown_manual=result.artifacts.markdown_manual,
@@ -995,6 +999,7 @@ def rerender_pipeline_package(
         video_render_metadata=video_render.metadata_path,
         skills_metadata=video_render.skills_metadata_path,
         opencode_metadata=result.artifacts.opencode_metadata,
+        support_log=support_log_path,
     )
     rerendered = PipelineResult(
         job_id=job_id,
@@ -1013,6 +1018,7 @@ def rerender_pipeline_package(
             environment=environment,
         ),
     )
+    _write_support_log(package_dir, job_id=job_id, status=WorkflowStatus.COMPLETED)
     _update_workflow_state_after_rerender(package_dir)
     terminal.record(
         run_id=job_id,
@@ -1401,6 +1407,7 @@ def _complete_pipeline_execution(
     )
 
     selector_trace_path = _write_selector_trace(dirs.package, capture_result.get("action_log", []))
+    support_log_path = _write_support_log(dirs.package, job_id=job_id, status=WorkflowStatus.COMPLETED)
     manifest_path = dirs.package / "package_manifest.json"
     artifacts = ArtifactPaths(
         html_preview=html_path,
@@ -1423,6 +1430,7 @@ def _complete_pipeline_execution(
         video_render_metadata=video_render.metadata_path,
         skills_metadata=video_render.skills_metadata_path,
         opencode_metadata=opencode_result.metadata_path,
+        support_log=support_log_path,
     )
     result = PipelineResult(
         job_id=job_id,
@@ -1450,6 +1458,7 @@ def _complete_pipeline_execution(
             environment=environment,
         ),
     )
+    _write_support_log(dirs.package, job_id=job_id, status=WorkflowStatus.COMPLETED)
     terminal.record(
         run_id=job_id,
         actor="pipeline",
@@ -1503,6 +1512,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
             "selector_trace_url": f"{rel_base}/selector_trace.json" if result.artifacts.selector_trace else None,
+            "support_log_url": f"{rel_base}/support_log.md" if result.artifacts.support_log else None,
             "subtitles_url": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
             "media_plan_url": f"{rel_base}/media_plan.json"
             if result.artifacts.media_plan and result.artifacts.media_plan.exists()
@@ -1553,6 +1563,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
             "capture_action_log_url": None,
             "subtitles_url": None,
             "media_plan_url": None,
+            "support_log_url": f"{rel_base}/support_log.md",
         },
         "supporting_artifacts": {
             "request": f"{rel_base}/request.json",
@@ -1564,6 +1575,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
             "approval_log": f"{rel_base}/approval_log.json",
             "audit_log": f"{rel_base}/audit_log.jsonl",
             "workflow_state": f"{rel_base}/workflow_state.json",
+            "support_log": f"{rel_base}/support_log.md",
         },
     }
 
@@ -1584,6 +1596,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "artifact_edit_log": f"{rel_base}/artifact_edit_log.jsonl" if artifact_edit_log.exists() else None,
         "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
         "selector_trace": f"{rel_base}/selector_trace.json" if result.artifacts.selector_trace else None,
+        "support_log": f"{rel_base}/support_log.md" if result.artifacts.support_log else None,
         "subtitles": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
         "media_plan": f"{rel_base}/media_plan.json" if result.artifacts.media_plan and result.artifacts.media_plan.exists() else None,
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
@@ -1635,6 +1648,7 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
             final_frame=Path(artifacts["final_frame"]) if artifacts.get("final_frame") else None,
             capture_action_log=Path(artifacts["capture_action_log"]) if artifacts.get("capture_action_log") else None,
             selector_trace=Path(artifacts["selector_trace"]) if artifacts.get("selector_trace") else None,
+            support_log=Path(artifacts["support_log"]) if artifacts.get("support_log") else None,
             subtitles=Path(artifacts["subtitles"]) if artifacts.get("subtitles") else None,
             media_plan=media_plan if media_plan.exists() else None,
             tts_audio=[Path(path) for path in artifacts.get("tts_audio", [])],
@@ -2716,6 +2730,143 @@ def _capture_action_entries_from_artifact(path: Path | None) -> list[dict[str, A
     if not isinstance(entries, list):
         return []
     return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _write_support_log(package_dir: Path, *, job_id: str, status: str, error: str = "") -> Path:
+    package_dir.mkdir(parents=True, exist_ok=True)
+    path = package_dir / "support_log.md"
+    state = _read_json_object(package_dir / "workflow_state.json")
+    manifest = _read_json_object(package_dir / "package_manifest.json")
+    request = _read_json_object(package_dir / "request.json")
+    audit_tail = _read_jsonl_tail(package_dir / "audit_log.jsonl", limit=12)
+    fallback_events = manifest.get("fallback_events") if isinstance(manifest.get("fallback_events"), list) else []
+    degradations = manifest.get("degradations") if isinstance(manifest.get("degradations"), list) else []
+    last_error = error or str(state.get("last_error") or "")
+    lines = [
+        "# Manual Video Agent Support Log",
+        "",
+        "사내 테스트 중 안 되는 부분을 전달할 때 이 파일과 아래 권장 첨부 파일을 함께 전달하세요.",
+        "",
+        "## 사용자 전달 메모",
+        "",
+        "- 어떤 화면에서 멈췄나요:",
+        "- 기대한 동작:",
+        "- 실제 동작:",
+        "- 재현 절차:",
+        "- 사내 PC/브라우저 특이사항:",
+        "",
+        "## 실행 요약",
+        "",
+        f"- job_id: `{job_id}`",
+        f"- status: `{status}`",
+        f"- current_step: `{state.get('current_step', '')}`",
+        f"- updated_at: `{state.get('updated_at', '')}`",
+        f"- execution_mode: `{(state.get('request') or request).get('execution_mode', '') if isinstance((state.get('request') or request), dict) else ''}`",
+        f"- capture_browser: `{state.get('capture_browser', '')}`",
+        f"- last_error: `{last_error}`" if last_error else "- last_error: 없음",
+        "",
+        "## 요청 요약",
+        "",
+        *_support_log_request_lines(state, request),
+        "",
+        "## Degraded/Fallback",
+        "",
+        *_support_log_list_lines([*_as_list(degradations), *_as_list(fallback_events)], empty="기록된 degraded/fallback 없음"),
+        "",
+        "## 최근 Audit",
+        "",
+        *_support_log_list_lines(audit_tail, empty="audit_log.jsonl 기록 없음"),
+        "",
+        "## 첨부 권장 파일",
+        "",
+        *_support_log_attachment_lines(package_dir),
+    ]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def _support_log_request_lines(state: dict[str, Any], request: dict[str, Any]) -> list[str]:
+    payload = state.get("request") if isinstance(state.get("request"), dict) else request
+    if not isinstance(payload, dict) or not payload:
+        return ["- 요청 정보 없음"]
+    safe_payload = redact_sensitive(payload)
+    return [
+        f"- request_text: {safe_payload.get('request_text', '')}",
+        f"- target_url: `{safe_payload.get('target_url', '')}`",
+        f"- role: {safe_payload.get('role', '')}",
+        f"- completion_condition: {safe_payload.get('completion_condition', '')}",
+        f"- input_values: `{json.dumps(safe_payload.get('input_values') or {}, ensure_ascii=False, default=str)}`",
+    ]
+
+
+def _support_log_attachment_lines(package_dir: Path) -> list[str]:
+    names = [
+        "support_log.md",
+        "workflow_state.json",
+        "package_manifest.json",
+        "audit_log.jsonl",
+        "llm_responses.jsonl",
+        "planner_trace.json",
+        "input_extraction.json",
+        "rehearsal_log.json",
+        "playwright_mcp_calls.json",
+        "playwright_mcp_execution.json",
+        "browser_agent_trace.json",
+        "capture_action_log.json",
+        "selector_trace.json",
+        "video_render.json",
+        "manual_video_agent_usage.webm",
+        "manual_video_agent_usage.mp4",
+        "final_frame.png",
+    ]
+    lines = []
+    for name in names:
+        file_path = package_dir / name
+        if file_path.exists():
+            lines.append(f"- `{name}`")
+    return lines or ["- 첨부 가능한 파일 없음"]
+
+
+def _support_log_list_lines(items: list[Any], *, empty: str) -> list[str]:
+    if not items:
+        return [f"- {empty}"]
+    lines = []
+    for item in items[:20]:
+        if isinstance(item, dict):
+            actor = item.get("actor") or item.get("timestamp") or item.get("status") or "item"
+            detail = json.dumps(redact_sensitive(item), ensure_ascii=False, default=str)
+            lines.append(f"- `{actor}` {detail}")
+        else:
+            lines.append(f"- {item}")
+    return lines
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_jsonl_tail(path: Path, *, limit: int) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines()[-limit:]:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _selector_values_from_log_entry(entry: dict[str, Any]) -> list[tuple[str, str]]:
@@ -4904,6 +5055,7 @@ def _manifest(
         "artifact_edit_log": _optional_path(package_dir / "artifact_edit_log.jsonl"),
         "capture_action_log": _optional_path(result.artifacts.capture_action_log),
         "selector_trace": _optional_path(result.artifacts.selector_trace),
+        "support_log": _optional_path(result.artifacts.support_log),
         "subtitles": _optional_path(result.artifacts.subtitles),
         "media_plan": _optional_path(result.artifacts.media_plan),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
@@ -4935,6 +5087,7 @@ def _manifest(
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
             "selector_trace": str(result.artifacts.selector_trace) if result.artifacts.selector_trace else None,
+            "support_log": str(result.artifacts.support_log) if result.artifacts.support_log else None,
             "subtitles": str(result.artifacts.subtitles) if result.artifacts.subtitles else None,
             "media_plan": str(result.artifacts.media_plan) if result.artifacts.media_plan else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],

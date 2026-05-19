@@ -183,6 +183,17 @@ def test_static_app_exposes_selector_trace_artifact_and_friendly_view():
     assert "renderSelectorTraceArtifact" in body
 
 
+def test_static_app_exposes_support_log_artifact_link():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Support Log" in body
+    assert "support_log" in body
+
+
 def test_sample_screen_includes_login_modal_and_iframe_variants():
     client = TestClient(app)
 

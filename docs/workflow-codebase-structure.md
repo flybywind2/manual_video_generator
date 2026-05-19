@@ -302,6 +302,8 @@ flowchart TB
 - `approval_log.json`
 - `rehearsal_log.json`
 - `capture_action_log.json`
+- `selector_trace.json`
+- `support_log.md`
 - `media_plan.json`
 - `subtitles.vtt`
 - `tts/tts_metadata.json`

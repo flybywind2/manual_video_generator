@@ -158,6 +158,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
         "opencode_prompt",
         "opencode_metadata",
         "audit_log",
+        "support_log",
         "capture_action_log",
         "selector_trace",
         "subtitles",
@@ -200,6 +201,32 @@ def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
     assert any(action["type"] == "fill_by_label" and action["label"] == "라인" for action in action_plan["actions"])
     assert result.artifacts.input_extraction.exists()
     assert (result.package_dir / "selector_trace.json").exists()
+
+
+def test_pipeline_writes_support_log_for_internal_test_feedback(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="사내 시스템 테스트",
+            target_url="http://127.0.0.1:8000/sample",
+            role="테스터",
+            completion_condition="결과 확인",
+            input_values={"검색어": "ABC"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    support_log = result.package_dir / "support_log.md"
+    content = support_log.read_text(encoding="utf-8")
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+
+    assert support_log.exists()
+    assert "# Manual Video Agent Support Log" in content
+    assert result.job_id in content
+    assert "## 사용자 전달 메모" in content
+    assert "workflow_state.json" in content
+    assert "package_manifest.json" in content
+    assert manifest["supporting_artifacts"]["support_log"] == str(support_log)
 
 
 def test_run_pipeline_falls_back_to_placeholder_when_browser_capture_raises(tmp_path, monkeypatch):
