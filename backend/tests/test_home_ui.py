@@ -87,6 +87,12 @@ def test_static_app_exposes_review_artifact_links():
     assert "항목 추가" in body
     assert "원본 편집" in body
     assert "쉬운 보기" in body
+    assert "loadingSpinnerHtml" in body
+    assert "setButtonLoading" in body
+    assert "setArtifactLoading" in body
+    assert "loading-spinner" in body
+    assert "aria-busy" in body
+    assert "작업이 진행 중입니다" in body
 
 
 def test_home_screen_includes_text_artifact_editor_modal():
@@ -134,3 +140,16 @@ def test_static_app_supports_editable_input_value_rows():
     assert "remove-input-value" in body
     assert "input-value-key" in body
     assert "input-value-value" in body
+
+
+def test_static_styles_define_loading_spinner():
+    client = TestClient(app)
+
+    response = client.get("/static/styles.css")
+
+    assert response.status_code == 200
+    body = response.text
+    assert ".loading-spinner" in body
+    assert "@keyframes loading-spin" in body
+    assert ".artifact-loading" in body
+    assert ".button.is-loading" in body

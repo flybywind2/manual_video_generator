@@ -59,7 +59,7 @@ form?.addEventListener("submit", async (event) => {
   setWorkflowStep(0);
   setPipelineProgress(0);
   setStatus("Planning");
-  setArtifactMessage(planningMessage());
+  setArtifactLoading(planningMessage());
 
   try {
     const response = await fetch("/api/pipeline/draft", {
@@ -156,12 +156,12 @@ function createPipelinePayload() {
 }
 
 async function continueWorkflow(jobId, button) {
-  button.disabled = true;
+  setButtonLoading(button, true, "실행 중...");
   setBusy(true, "실행 중...");
   setWorkflowStep(2);
   setPipelineProgress(2);
   setStatus("Running");
-  setArtifactMessage(continueMessage(currentDraft));
+  setArtifactLoading(continueMessage(currentDraft));
 
   try {
     const response = await fetch(`/api/pipeline/continue/${encodeURIComponent(jobId)}`, {
@@ -178,7 +178,7 @@ async function continueWorkflow(jobId, button) {
     setStatus("Completed");
     renderArtifacts(result);
   } catch (error) {
-    button.disabled = false;
+    setButtonLoading(button, false);
     setStatus("Failed");
     renderPlanReview(currentDraft, error.message || "승인 후 실행 중 오류가 발생했습니다.");
   } finally {
@@ -188,12 +188,12 @@ async function continueWorkflow(jobId, button) {
 
 async function rerenderPackage(jobId, button) {
   if (!jobId) return;
-  button.disabled = true;
+  setButtonLoading(button, true, "재렌더링 중...");
   setBusy(true, "재렌더링 중...");
   setWorkflowStep(5);
   setPipelineProgress(5);
   setStatus("Rerendering");
-  artifactStatus.textContent = `작업 ${jobId} 패키지 기반으로 TTS, 미리보기, 영상 렌더를 다시 생성합니다.`;
+  setArtifactLoading(`작업 ${jobId} 패키지 기반으로 TTS, 미리보기, 영상 렌더를 다시 생성합니다.`);
   try {
     const response = await fetch(`/api/pipeline/rerender/${encodeURIComponent(jobId)}`, {
       method: "POST",
@@ -205,7 +205,7 @@ async function rerenderPackage(jobId, button) {
     setStatus("Completed");
     renderArtifacts(result, "패키지 기반 재렌더링이 완료되었습니다.");
   } catch (error) {
-    button.disabled = false;
+    setButtonLoading(button, false);
     setStatus("Failed");
     artifactStatus.textContent = error.message || "재렌더링 중 오류가 발생했습니다.";
   } finally {
@@ -275,9 +275,30 @@ function addInputValueRow(key = "", value = "") {
 
 function setBusy(isBusy, label = "") {
   if (!submitButton) return;
-  submitButton.disabled = isBusy;
-  submitButton.querySelector(".play-icon").style.display = isBusy ? "none" : "inline-block";
-  submitButton.lastChild.textContent = isBusy ? ` ${label || "실행 중..."}` : " 파이프라인 실행";
+  setButtonLoading(submitButton, isBusy, label || "실행 중...");
+}
+
+function loadingSpinnerHtml(label = "작업이 진행 중입니다") {
+  return `
+    <span class="loading-spinner" aria-hidden="true"></span>
+    <span class="loading-label">${escapeHtml(label)}</span>
+  `;
+}
+
+function setButtonLoading(button, isLoading, label = "작업이 진행 중입니다") {
+  if (!button) return;
+  if (!button.dataset.defaultHtml) {
+    button.dataset.defaultHtml = button.innerHTML;
+  }
+  button.classList.toggle("is-loading", isLoading);
+  button.disabled = isLoading;
+  if (isLoading) {
+    button.setAttribute("aria-busy", "true");
+    button.innerHTML = loadingSpinnerHtml(label);
+    return;
+  }
+  button.removeAttribute("aria-busy");
+  button.innerHTML = button.dataset.defaultHtml;
 }
 
 function setStatus(status) {
@@ -301,6 +322,18 @@ function setWorkflowStep(activeIndex) {
 function setArtifactMessage(message) {
   artifactStatus.textContent = message;
   artifactLinks.innerHTML = "";
+  artifactLinks?.removeAttribute("aria-busy");
+}
+
+function setArtifactLoading(message = "작업이 진행 중입니다") {
+  if (artifactStatus) artifactStatus.textContent = message;
+  if (!artifactLinks) return;
+  artifactLinks.setAttribute("aria-busy", "true");
+  artifactLinks.innerHTML = `
+    <div class="artifact-loading" role="status" aria-live="polite">
+      ${loadingSpinnerHtml(message)}
+    </div>
+  `;
 }
 
 function renderPlanReview(draft, errorMessage = "") {
@@ -311,6 +344,7 @@ function renderPlanReview(draft, errorMessage = "") {
 
   const supporting = draft.supporting_artifacts || {};
   const artifacts = draft.artifacts || {};
+  artifactLinks?.removeAttribute("aria-busy");
   const links = [
     ["Action JSON", artifacts.action_plan_url],
     ["승인 로그", artifacts.approval_log_url],
@@ -340,6 +374,7 @@ function renderPlanReview(draft, errorMessage = "") {
 
 function renderArtifacts(result, message = "") {
   artifactStatus.textContent = message || `작업 ${result.job_id} 패키지가 생성되었습니다.`;
+  artifactLinks?.removeAttribute("aria-busy");
   const supporting = result.supporting_artifacts || {};
   const links = [
     ["HTML 미리보기", result.artifacts.html_preview_url],
@@ -405,7 +440,11 @@ async function openArtifactEditor(url, label = "텍스트 산출물") {
   artifactEditorModal.hidden = false;
   artifactEditorText.value = "";
   artifactEditorText.disabled = true;
-  artifactEditorFriendly.innerHTML = `<div class="artifact-empty-state">산출물을 불러오는 중입니다.</div>`;
+  artifactEditorFriendly.innerHTML = `
+    <div class="artifact-empty-state artifact-loading" role="status">
+      ${loadingSpinnerHtml("산출물을 불러오는 중입니다.")}
+    </div>
+  `;
   showArtifactEditorMode("friendly");
   artifactEditorStatus.textContent = "불러오는 중...";
   artifactEditorPath.textContent = url;
@@ -435,7 +474,7 @@ async function openArtifactEditor(url, label = "텍스트 산출물") {
 
 async function saveArtifactEditor() {
   if (!currentArtifactEditor || !artifactEditorText || !artifactEditorStatus || !artifactEditorSaveButton) return;
-  artifactEditorSaveButton.disabled = true;
+  setButtonLoading(artifactEditorSaveButton, true, "저장 중...");
   artifactEditorStatus.textContent = "저장 중...";
   try {
     const response = await fetch(currentArtifactEditor.apiUrl, {
@@ -451,7 +490,7 @@ async function saveArtifactEditor() {
   } catch (error) {
     artifactEditorStatus.textContent = error.message || "저장 중 오류가 발생했습니다.";
   } finally {
-    artifactEditorSaveButton.disabled = false;
+    setButtonLoading(artifactEditorSaveButton, false);
   }
 }
 

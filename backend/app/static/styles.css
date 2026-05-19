@@ -637,6 +637,11 @@ a {
   transform: none;
 }
 
+.button.is-loading {
+  gap: 10px;
+  cursor: wait;
+}
+
 .button:hover {
   transform: translateY(-1px);
 }
@@ -660,6 +665,31 @@ a {
   border-top: 6px solid transparent;
   border-bottom: 6px solid transparent;
   border-left: 9px solid currentColor;
+}
+
+.loading-spinner {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  border: 2px solid rgba(36, 91, 255, 0.18);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  animation: loading-spin 760ms linear infinite;
+}
+
+.button.primary .loading-spinner {
+  border-color: rgba(255, 255, 255, 0.36);
+  border-top-color: #fff;
+}
+
+.loading-label {
+  min-width: 0;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pipeline-list {
@@ -885,6 +915,20 @@ a {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.artifact-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid rgba(36, 91, 255, 0.2);
+  border-radius: 999px;
+  background: var(--canvas-tint);
+  color: var(--ai-indigo);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .artifact-action-row,
@@ -1387,6 +1431,10 @@ a {
   color: var(--body);
   font-size: 14px;
   line-height: 22px;
+}
+
+.artifact-empty-state.artifact-loading {
+  display: inline-flex;
 }
 
 .artifact-empty-state strong {
