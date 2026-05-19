@@ -21,6 +21,93 @@ const sampleInputValues = [
   { key: "LOT", value: "LOT-001" },
   { key: "라인", value: "A3" },
 ];
+const WorkflowStep = Object.freeze({
+  PLAN_REVIEW: "plan_review",
+  CAPTURE: "capture",
+  MCP_REHEARSAL_AFTER_LOGIN: "mcp_rehearsal_after_login",
+  REPLAY: "replay",
+  MASKING: "masking",
+  TTS: "tts",
+  PREVIEW: "preview",
+  RENDER: "render",
+  OPENCODE: "opencode",
+  MANIFEST: "manifest",
+  COMPLETED: "completed",
+  EXECUTION_FAILED: "execution_failed",
+});
+const workflowUiState = Object.freeze({
+  [WorkflowStep.PLAN_REVIEW]: {
+    workflowIndex: 1,
+    pipelineIndex: 1,
+    label: "Plan review",
+  },
+  [WorkflowStep.CAPTURE]: {
+    workflowIndex: 2,
+    pipelineIndex: 2,
+    label: "Capture",
+    message: "브라우저 캡처를 실행 중입니다.",
+  },
+  [WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN]: {
+    workflowIndex: 2,
+    pipelineIndex: 1,
+    label: "MCP rehearsal",
+    message: "로그인 이후 지연된 Playwright MCP 리허설을 실행 중입니다.",
+  },
+  [WorkflowStep.REPLAY]: {
+    workflowIndex: 2,
+    pipelineIndex: 2,
+    label: "Replay",
+    message: "시연 기록을 내레이션 타이밍에 맞춰 재녹화 중입니다.",
+  },
+  [WorkflowStep.MASKING]: {
+    workflowIndex: 2,
+    pipelineIndex: 3,
+    label: "Masking",
+    message: "캡처와 로그의 민감 정보를 마스킹 중입니다.",
+  },
+  [WorkflowStep.TTS]: {
+    workflowIndex: 3,
+    pipelineIndex: 4,
+    label: "TTS",
+    message: "자막과 한국어 내레이션을 생성 중입니다.",
+  },
+  [WorkflowStep.PREVIEW]: {
+    workflowIndex: 4,
+    pipelineIndex: 5,
+    label: "Preview",
+    message: "미리보기와 텍스트 매뉴얼을 생성 중입니다.",
+  },
+  [WorkflowStep.RENDER]: {
+    workflowIndex: 5,
+    pipelineIndex: 5,
+    label: "Rendering",
+    message: "영상 렌더를 실행 중입니다.",
+  },
+  [WorkflowStep.OPENCODE]: {
+    workflowIndex: 5,
+    pipelineIndex: 5,
+    label: "OpenCode",
+    message: "선택적 OpenCode 후처리를 실행 중입니다.",
+  },
+  [WorkflowStep.MANIFEST]: {
+    workflowIndex: 5,
+    pipelineIndex: 5,
+    label: "Packaging",
+    message: "산출물 패키지를 확정 중입니다.",
+  },
+  [WorkflowStep.COMPLETED]: {
+    workflowIndex: 5,
+    pipelineIndex: 5,
+    label: "Completed",
+    message: "산출물 패키지 생성이 완료되었습니다.",
+  },
+  [WorkflowStep.EXECUTION_FAILED]: {
+    workflowIndex: 2,
+    pipelineIndex: 2,
+    label: "Failed",
+    message: "실행 중 오류가 발생했습니다.",
+  },
+});
 let currentDraft = null;
 let currentArtifactEditor = null;
 let workflowPollTimer = null;
@@ -236,23 +323,13 @@ function applyWorkflowState(state) {
 
 function workflowStepIndexForState(state) {
   const step = String(state.current_step || "");
-  if (step === "plan_review") return 1;
-  if (["rehearsal", "mcp", "capture", "replay", "masking"].includes(step)) return 2;
-  if (step === "tts") return 3;
-  if (step === "preview") return 4;
-  if (["render", "opencode", "manifest", "completed"].includes(step)) return 5;
-  if (step === "execution_failed") return 2;
+  if (workflowUiState[step]) return workflowUiState[step].workflowIndex;
   return state.status === "completed" ? 5 : 0;
 }
 
 function pipelineProgressIndexForState(state) {
   const step = String(state.current_step || "");
-  if (step === "plan_review" || step === "rehearsal" || step === "mcp") return 1;
-  if (step === "capture" || step === "replay") return 2;
-  if (step === "masking") return 3;
-  if (step === "tts") return 4;
-  if (["preview", "render", "opencode", "manifest", "completed"].includes(step)) return 5;
-  if (step === "execution_failed") return 2;
+  if (workflowUiState[step]) return workflowUiState[step].pipelineIndex;
   return state.status === "completed" ? 5 : 0;
 }
 
@@ -260,35 +337,12 @@ function workflowStatusLabel(state) {
   if (state.status === "completed") return "Completed";
   if (state.status === "failed") return "Failed";
   const step = String(state.current_step || "");
-  const labels = {
-    plan_review: "Plan review",
-    capture: "Capture",
-    replay: "Replay",
-    masking: "Masking",
-    tts: "TTS",
-    preview: "Preview",
-    render: "Rendering",
-    opencode: "OpenCode",
-    manifest: "Packaging",
-  };
-  return labels[step] || "Running";
+  return workflowUiState[step]?.label || "Running";
 }
 
 function workflowMessageForState(state) {
   const step = String(state.current_step || "");
-  const messages = {
-    capture: "브라우저 캡처를 실행 중입니다.",
-    replay: "시연 기록을 내레이션 타이밍에 맞춰 재녹화 중입니다.",
-    masking: "캡처와 로그의 민감 정보를 마스킹 중입니다.",
-    tts: "자막과 한국어 내레이션을 생성 중입니다.",
-    preview: "미리보기와 텍스트 매뉴얼을 생성 중입니다.",
-    render: "영상 렌더를 실행 중입니다.",
-    opencode: "선택적 OpenCode 후처리를 실행 중입니다.",
-    manifest: "산출물 패키지를 확정 중입니다.",
-    completed: "산출물 패키지 생성이 완료되었습니다.",
-    execution_failed: "실행 중 오류가 발생했습니다.",
-  };
-  return messages[step] || "";
+  return workflowUiState[step]?.message || "";
 }
 
 async function rerenderPackage(jobId, button) {
@@ -506,10 +560,45 @@ function renderArtifacts(result, message = "") {
     <div class="artifact-action-row">
       <button class="button secondary" type="button" data-action="rerender-package" data-job-id="${escapeHtml(result.job_id)}">패키지 기반 재렌더링</button>
     </div>
+    ${renderDegradationPanel(result.degradations || [])}
     <div class="artifact-link-grid">
       ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
     </div>
   `;
+}
+
+function renderDegradationPanel(degradations) {
+  if (!Array.isArray(degradations) || !degradations.length) return "";
+  return `
+    <section class="degradation-panel" aria-label="Degraded 상태">
+      <h3>확인 필요</h3>
+      <div>
+        ${degradations.map((item) => {
+          const reason = degradationReasonInfo(item.reason);
+          return `
+            <article>
+              <strong>${escapeHtml(reason.label)}</strong>
+              <p>${escapeHtml(reason.action)}</p>
+              <small>${escapeHtml(item.actor || "")} · ${escapeHtml(item.reason || "")}</small>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function degradationReasonInfo(reason) {
+  const labels = {
+    browser_capture_disabled: ["브라우저 캡처 비활성화", "실제 화면 녹화 없이 placeholder 기반으로 패키지를 만들었습니다."],
+    tts_silent_fallback: ["TTS fallback", "음성 엔진을 사용할 수 없어 무음 wav가 들어갔습니다. TTS 설정과 모델 캐시를 확인하세요."],
+    hyperframes_fallback_video: ["HyperFrames fallback", "MP4 렌더 대신 WebM 또는 fallback 영상을 사용했습니다. FFmpeg/HyperFrames 설정을 확인하세요."],
+    opencode_failed: ["OpenCode 실패", "선택적 OpenCode 후처리가 실패했습니다. 패키지 자체는 계속 검수할 수 있습니다."],
+    login_required: ["로그인 필요", "로그인 화면이 감지되어 자동 실행이 중단되었습니다. 직접 로그인 또는 .env credentials를 설정하세요."],
+    demonstration_replay_failed: ["시연 replay 실패", "직접 시연 원본은 보존됐지만 음성 타이밍 기준 재녹화가 실패했습니다."],
+  };
+  const [label, action] = labels[reason] || ["Degraded 상태", "패키지 매니페스트와 관련 로그에서 상세 원인을 확인하세요."];
+  return { label, action };
 }
 
 function artifactAnchor(label, url) {
@@ -740,10 +829,16 @@ function renderManifestArtifact(data) {
         ${renderKeyValueList(data.supporting_artifacts || {})}
       </section>
     </div>
+    ${data.artifact_dependencies ? `
+      <section class="friendly-block">
+        <h3>재렌더링 영향</h3>
+        ${renderKeyValueList(data.artifact_dependencies)}
+      </section>
+    ` : ""}
     ${Array.isArray(data.degradations) && data.degradations.length ? `
       <section class="friendly-block">
         <h3>Degraded 항목</h3>
-        ${renderEntryCards(data.degradations, "Degrade")}
+        ${renderEntryCards(data.degradations.map((item) => ({ ...item, reason: degradationReasonInfo(item.reason).label, action: degradationReasonInfo(item.reason).action })), "Degrade")}
       </section>
     ` : ""}
   `;

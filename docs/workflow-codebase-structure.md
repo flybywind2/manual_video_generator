@@ -39,7 +39,8 @@ flowchart TB
 |---|---|---|
 | Web/API | `backend/app/main.py` | FastAPI endpoints, artifact routing, text artifact edit API |
 | UI | `backend/app/templates/index.html`, `backend/app/static/app.js`, `backend/app/static/styles.css` | 요청 입력, 계획 검수, 실행/재렌더 버튼, workflow polling, artifact editor |
-| Orchestrator | `backend/app/pipeline.py` | workflow state, package dirs, planner/rehearsal/capture/TTS/render/opencode orchestration |
+| Orchestrator | `backend/app/pipeline.py`, `backend/app/workflow.py` | workflow state, package dirs, planner/rehearsal/capture/TTS/render/opencode orchestration |
+| Runners/Builders | `backend/app/browser_runner.py`, `backend/app/package_builder.py`, `backend/app/artifact_dependencies.py` | browser capture/replay decision boundary, media/preview/manual grouping, rerender dependency graph |
 | Configuration | `backend/app/config.py`, `backend/app/env_bootstrap.py`, `.env.example` | `.env` parsing, safe config status, runtime path bootstrap |
 | Adapters | `backend/app/adapters/*.py` | LLM/input extraction, browser agent, MCP, TTS, HyperFrames, OpenCode |
 | Safety/Audit | `backend/app/policies.py`, `backend/app/action_safety.py`, `backend/app/audit.py`, `backend/app/redaction.py`, `backend/app/llm_logging.py`, `backend/app/terminal_logging.py` | risk classification, approval, redaction, audit events, terminal/LLM logs |
@@ -142,6 +143,7 @@ flowchart TB
 - Core orchestration: `_complete_pipeline_execution()`
 - Workflow state:
   - `capture`
+  - `mcp_rehearsal_after_login`
   - `replay`
   - `masking`
   - `tts`
@@ -225,6 +227,7 @@ flowchart TB
 - Current behavior:
   - `preview.html`, `manual.md`, `manual.pdf` placeholder를 만든다.
   - 텍스트 산출물은 모달에서 쉬운 보기/원본 편집이 가능하다.
+  - 텍스트 편집 시 `artifact_edit_log.jsonl`에 before/after hash를 남긴다.
 
 ### 15. Render
 
@@ -277,7 +280,7 @@ flowchart TB
 필수 필드:
 
 - `status`: `awaiting_plan_review`, `running`, `completed`, `failed`
-- `current_step`: `plan_review`, `capture`, `replay`, `masking`, `tts`, `preview`, `render`, `opencode`, `manifest`, `completed`, `execution_failed`
+- `current_step`: `plan_review`, `capture`, `mcp_rehearsal_after_login`, `replay`, `masking`, `tts`, `preview`, `render`, `opencode`, `manifest`, `completed`, `execution_failed`
 - `can_continue`: boolean
 - `request`: redacted request payload
 - `capture_browser`: boolean
@@ -303,6 +306,7 @@ flowchart TB
 - `video_render.json`
 - `preview.html`
 - `manual.md`
+- `artifact_edit_log.jsonl` when text artifacts are edited
 
 ### Degraded Contract
 
@@ -332,10 +336,10 @@ flowchart TB
 
 ## Structural Gaps
 
-1. `backend/app/pipeline.py` owns too much: HTTP-independent orchestration, Playwright capture internals, replay, masking, rendering glue, manifest construction.
-2. Workflow state exists, but stage definitions are string literals spread across backend and frontend.
-3. Browser Agent and Direct Playwright capture share action semantics but not a formal action execution interface.
-4. MCP live rehearsal is well isolated as an adapter, but login-deferred live rehearsal is not a first-class post-login step in the visible workflow.
-5. Masking is still closer to post-processing than a full redaction pipeline across DOM, URL, logs, screenshots, VTT, manual, and render composition.
-6. Text edit/rerender works, but the dependency graph between edited artifact and regenerated outputs is implicit.
-7. Runtime script coverage exists, but no single command verifies docs, tests, package contract, and live local smoke together.
+1. `backend/app/pipeline.py` still contains low-level Playwright helper implementations, but capture/replay decision handling now has a `BrowserRunner` boundary.
+2. Workflow state backend constants are centralized in `backend/app/workflow.py`; frontend maps the same contract in one `workflowUiState` object.
+3. Browser Agent and Direct Playwright capture still share action semantics informally; a future deeper extraction can move low-level Playwright action execution out of `pipeline.py`.
+4. Login-deferred MCP live rehearsal is now visible as `mcp_rehearsal_after_login`.
+5. `RedactionPipeline` exists for text/JSON paths, but OCR-based frame redaction remains a future hardening area.
+6. Text edit/rerender dependency graph is now recorded in `artifact_dependencies`.
+7. `scripts/smoke.ps1 -LiveBrowser` provides local server + Playwright capture smoke; CI/nightly scheduling is still environment-specific.

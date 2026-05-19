@@ -1,3 +1,6 @@
+import hashlib
+import json
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -68,7 +71,9 @@ def update_text_artifact(artifact_path: str, payload: TextArtifactUpdate) -> dic
     if len(encoded) > MAX_TEXT_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="text artifact is too large")
     _validate_text_artifact_content(target, payload.content)
+    before = target.read_bytes()
     target.write_text(payload.content, encoding="utf-8")
+    _append_artifact_edit_log(target, before=before, after=encoded)
     return {
         "path": artifact_path,
         "name": target.name,
@@ -126,6 +131,29 @@ def _validate_text_artifact_content(target: Path, content: str) -> None:
                 json.loads(line)
             except json.JSONDecodeError as exc:
                 raise HTTPException(status_code=422, detail=f"invalid JSONL at line {line_number}: {exc.msg}") from exc
+
+
+def _append_artifact_edit_log(target: Path, *, before: bytes, after: bytes) -> None:
+    package_dir = _package_dir_for_artifact(target)
+    if package_dir is None:
+        return
+    event = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "artifact": str(target.relative_to(package_dir)),
+        "before_sha256": hashlib.sha256(before).hexdigest(),
+        "after_sha256": hashlib.sha256(after).hexdigest(),
+        "bytes": len(after),
+    }
+    with (package_dir / "artifact_edit_log.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _package_dir_for_artifact(target: Path) -> Path | None:
+    parts = target.resolve().parts
+    for index, part in enumerate(parts):
+        if part == "jobs" and index + 1 < len(parts):
+            return Path(*parts[: index + 2])
+    return None
 
 
 @app.post("/api/pipeline/run")

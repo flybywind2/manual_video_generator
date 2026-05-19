@@ -329,3 +329,10 @@ def test_config_status_api_reads_manual_agent_env_file_pointer(tmp_path: Path, m
     body = response.json()
     assert body["llm"]["model"] == "api-pointer-model"
     assert body["runtime"]["enable_opencode"] is True
+
+
+def test_config_status_exposes_doctor_check_names_for_runtime_alignment():
+    status = load_settings().safe_status()
+
+    names = set(status["runtime"]["doctor_check_names"])
+    assert {"python", "node", "ffmpeg", "playwright_browsers", "hf_cache", "app_config"}.issubset(names)

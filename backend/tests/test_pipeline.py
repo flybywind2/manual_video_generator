@@ -167,6 +167,9 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
     for key in expected:
         assert supporting[key], key
         assert Path(supporting[key]).exists(), key
+    assert "artifact_dependencies" in manifest
+    assert "manual.md" in manifest["artifact_dependencies"]
+    assert "subtitles.vtt" in manifest["artifact_dependencies"]
 
 
 def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
@@ -437,7 +440,13 @@ def test_text_artifact_api_allows_editing_generated_markdown(tmp_path, monkeypat
     assert read_response.json()["editable"] is True
     assert "MES에서 LOT 조회" in read_response.json()["content"]
     assert save_response.status_code == 200
+    assert save_response.json()["saved"] is True
     assert result.artifacts.markdown_manual.read_text(encoding="utf-8") == "# 수정된 매뉴얼\n\n사용자 편집본"
+    edit_log = result.package_dir / "artifact_edit_log.jsonl"
+    assert edit_log.exists()
+    edit_event = json.loads(edit_log.read_text(encoding="utf-8").splitlines()[-1])
+    assert edit_event["artifact"] == "manual.md"
+    assert edit_event["before_sha256"] != edit_event["after_sha256"]
 
 
 def test_text_artifact_api_rejects_non_text_and_path_traversal(tmp_path, monkeypatch):
@@ -769,6 +778,26 @@ def test_generated_request_artifact_redacts_sensitive_input_values(tmp_path):
     assert "sk-secret" not in request_text
     assert "plain-password" not in audit_text
     assert "sk-secret" not in audit_text
+
+
+def test_redaction_pipeline_scrubs_sensitive_values_from_manual_and_subtitles(tmp_path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="비밀번호로 로그인 후 조회",
+            target_url="http://example.local",
+            role="작업자",
+            completion_condition="password=super-secret 토큰이 보이지 않음",
+            input_values={"password": "super-secret", "LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    manual = result.artifacts.markdown_manual.read_text(encoding="utf-8")
+    subtitles = result.artifacts.subtitles.read_text(encoding="utf-8")
+    assert "super-secret" not in manual
+    assert "super-secret" not in subtitles
+    assert "LOT-001" in manual
 
 
 def test_placeholder_capture_names_are_not_mes_specific(tmp_path):

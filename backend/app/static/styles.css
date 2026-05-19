@@ -943,6 +943,47 @@ a {
   flex-basis: 100%;
 }
 
+.degradation-panel {
+  flex-basis: 100%;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(180, 35, 24, 0.18);
+  border-radius: 8px;
+  background: #fff7f4;
+  text-align: left;
+}
+
+.degradation-panel h3 {
+  margin: 0;
+  color: #b42318;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.degradation-panel > div {
+  display: grid;
+  gap: 8px;
+}
+
+.degradation-panel article {
+  display: grid;
+  gap: 3px;
+}
+
+.degradation-panel strong {
+  color: var(--ink-strong);
+  font-size: 13px;
+}
+
+.degradation-panel p,
+.degradation-panel small {
+  margin: 0;
+  color: var(--body);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .artifact-links a,
 .artifact-link {
   padding: 7px 10px;

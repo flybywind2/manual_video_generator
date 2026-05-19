@@ -69,6 +69,12 @@ def test_static_app_exposes_review_artifact_links():
     assert "workflowStepIndexForState" in body
     assert "workflow_state_url" in body
     assert "clearWorkflowPoll" in body
+    assert "WorkflowStep" in body
+    assert "workflowUiState" in body
+    assert "mcp_rehearsal_after_login" in body
+    assert "renderDegradationPanel" in body
+    assert "degradationReasonInfo" in body
+    assert "재렌더링 영향" in body
     assert "is-complete" in body
     assert "openArtifactEditor" in body
     assert "saveArtifactEditor" in body
@@ -161,3 +167,18 @@ def test_static_styles_define_loading_spinner():
     assert "@keyframes loading-spin" in body
     assert ".artifact-loading" in body
     assert ".button.is-loading" in body
+
+
+def test_sample_screen_includes_login_modal_and_iframe_variants():
+    client = TestClient(app)
+
+    response = client.get("/sample")
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'variant") === "login"' in body
+    assert 'variant") === "modal"' in body
+    assert 'variant") === "iframe"' in body
+    assert 'data-action="login"' in body
+    assert 'data-action="close-modal"' in body
+    assert "sample embedded help" in body

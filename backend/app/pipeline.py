@@ -22,13 +22,17 @@ from backend.app.adapters.planner import build_plan, post_json
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.tts import synthesize_tts
 from backend.app.adapters.video import render_final_video
+from backend.app.artifact_dependencies import build_artifact_dependencies
 from backend.app.audit import AuditLog
+from backend.app.browser_runner import run_capture, run_demonstration_replay
 from backend.app.config import load_settings
 from backend.app.env_bootstrap import apply_runtime_environment, runtime_fingerprint
 from backend.app.llm_logging import record_llm_response
+from backend.app.package_builder import build_media_assets, build_preview_manual_assets
 from backend.app.policies import ApprovalGate
-from backend.app.redaction import redact_sensitive
+from backend.app.redaction import RedactionPipeline, redact_sensitive
 from backend.app.terminal_logging import TerminalRunLogger
+from backend.app.workflow import WORKFLOW_STEPS, WorkflowStatus, WorkflowStep
 
 
 class PipelineInput(BaseModel):
@@ -132,6 +136,8 @@ def _update_workflow_state(
     if status is not None:
         state["status"] = status
     if current_step is not None:
+        if current_step not in WORKFLOW_STEPS:
+            raise ValueError(f"unknown workflow step: {current_step}")
         state["current_step"] = current_step
     if can_continue is not None:
         state["can_continue"] = can_continue
@@ -385,6 +391,14 @@ def _has_login_or_auth_hint(request: PipelineInput) -> bool:
             r"(^|[/_.?&=#:\-\s])(login|log-in|signin|sign-in|sso|auth|authenticate|인증|로그인)([/_.?&=#:\-\s]|$)",
             text,
         )
+    )
+
+
+def _should_run_post_login_mcp_rehearsal(rehearsal: dict[str, Any], settings: Any) -> bool:
+    return (
+        str(settings.playwright_mcp_mode or "").lower() == "live"
+        and str(rehearsal.get("status") or "") == "deferred-until-authenticated"
+        and bool(settings.playwright_mcp_command)
     )
 
 
@@ -716,8 +730,8 @@ def create_pipeline_draft(
     _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
     _update_workflow_state(
         dirs.package,
-        status="awaiting_plan_review",
-        current_step="plan_review",
+        status=WorkflowStatus.AWAITING_PLAN_REVIEW,
+        current_step=WorkflowStep.PLAN_REVIEW,
         can_continue=True,
         request=request_payload,
         capture_browser=capture_browser,
@@ -726,14 +740,14 @@ def create_pipeline_draft(
     terminal.record(
         run_id=job_id,
         actor="pipeline",
-        status="awaiting_plan_review",
+        status=WorkflowStatus.AWAITING_PLAN_REVIEW,
         details={"package_dir": str(dirs.package), "action_count": len(artifact_plan.get("actions") or [])},
         artifacts=[action_plan_path, approval_log_path, dirs.package / "rehearsal_log.json"],
     )
     return PipelineDraftResult(
         job_id=job_id,
-        status="awaiting_plan_review",
-        current_step="plan_review",
+        status=WorkflowStatus.AWAITING_PLAN_REVIEW,
+        current_step=WorkflowStep.PLAN_REVIEW,
         can_continue=True,
         execution_mode=_execution_mode(effective_request),
         package_dir=dirs.package,
@@ -761,7 +775,7 @@ def continue_pipeline_draft(
     if not state_path.exists():
         raise FileNotFoundError(f"workflow draft not found: {job_id}")
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    if state.get("status") == "completed":
+    if state.get("status") == WorkflowStatus.COMPLETED:
         manifest_path = package_dir / "package_manifest.json"
         if manifest_path.exists():
             return _pipeline_result_from_manifest(manifest_path)
@@ -778,8 +792,8 @@ def continue_pipeline_draft(
     terminal.record(run_id=job_id, actor="pipeline", status="continue-started", details={"package_dir": str(package_dir)})
     _update_workflow_state(
         package_dir,
-        status="running",
-        current_step="capture",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.CAPTURE,
         can_continue=False,
         details={"message": "캡처와 브라우저 실행을 준비합니다."},
     )
@@ -801,12 +815,19 @@ def continue_pipeline_draft(
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
+        failed_details: dict[str, Any] = {"message": "실행 중 오류가 발생했습니다."}
+        if "login required" in str(exc).lower():
+            failed_details = {
+                "actor": "capture",
+                "message": "로그인 화면이 감지되어 자동 실행을 중단했습니다. 직접 로그인 또는 .env credentials 설정 후 다시 실행하세요.",
+                "degrade_reason": "login_required",
+            }
         _update_workflow_state(
             package_dir,
-            status="failed",
-            current_step="execution_failed",
+            status=WorkflowStatus.FAILED,
+            current_step=WorkflowStep.EXECUTION_FAILED,
             can_continue=True,
-            details={"message": "실행 중 오류가 발생했습니다."},
+            details=failed_details,
             last_error=error,
         )
         terminal.record(run_id=job_id, actor="pipeline", status="failed", details={"error": error})
@@ -840,7 +861,7 @@ def rerender_pipeline_package(
     media_plan, media_plan_source = _load_package_media_plan(result)
     subtitles_path = result.artifacts.subtitles or (package_dir / "subtitles.vtt")
     if media_plan_source != "subtitles" or not subtitles_path.exists():
-        subtitles_path = _render_subtitles(media_plan, package_dir)
+        subtitles_path = _render_subtitles(media_plan, package_dir, redaction=RedactionPipeline(sensitive_values=request.input_values))
     media_plan_path = _write_media_plan(media_plan, package_dir)
     masked_names = _masked_names_from_package(result)
     source_video = _source_video_for_rerender(result)
@@ -953,7 +974,7 @@ def rerender_pipeline_package(
     )
     rerendered = PipelineResult(
         job_id=job_id,
-        status="completed",
+        status=WorkflowStatus.COMPLETED,
         package_dir=package_dir,
         plan=result.plan,
         rehearsal=result.rehearsal,
@@ -964,7 +985,7 @@ def rerender_pipeline_package(
     terminal.record(
         run_id=job_id,
         actor="rerender",
-        status="completed",
+        status=WorkflowStatus.COMPLETED,
         details={"video_name": video_render.video_path.name, "package_dir": str(package_dir)},
         artifacts=[manifest_path, video_render.video_path],
     )
@@ -989,8 +1010,8 @@ def _complete_pipeline_execution(
 ) -> PipelineResult:
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="capture",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.CAPTURE,
         can_continue=False,
         request=effective_request,
         capture_browser=capture_browser,
@@ -1009,17 +1030,16 @@ def _complete_pipeline_execution(
             "browser_agent_enabled": settings.enable_browser_agent,
         },
     )
-    if capture_browser:
-        try:
-            capture_result = _capture_with_playwright(effective_request, plan, dirs, settings)
-        except Exception as exc:  # noqa: BLE001 - keep the package inspectable when browser startup/login fails.
-            capture_result = _create_capture_failure_fallback(effective_request, dirs, exc)
-        capture_status = str(capture_result.get("status") or "ok")
-        capture_degrade_reason = str(capture_result.get("degrade_reason") or "")
-    else:
-        capture_result = _create_placeholder_captures(effective_request, dirs)
-        capture_status = "degraded"
-        capture_degrade_reason = "browser_capture_disabled"
+    capture_result, capture_status, capture_degrade_reason = run_capture(
+        capture_browser=capture_browser,
+        request=effective_request,
+        plan=plan,
+        dirs=dirs,
+        settings=settings,
+        capture_func=_capture_with_playwright,
+        placeholder_func=_create_placeholder_captures,
+        failure_fallback_func=_create_capture_failure_fallback,
+    )
     _record_stage(
         audit,
         terminal,
@@ -1040,14 +1060,87 @@ def _complete_pipeline_execution(
             "action_count": len(capture_result.get("action_log") or []),
         },
     )
+    if capture_degrade_reason == "login_required":
+        _update_workflow_state(
+            dirs.package,
+            status=WorkflowStatus.FAILED,
+            current_step=WorkflowStep.EXECUTION_FAILED,
+            can_continue=True,
+            details={
+                "actor": "capture",
+                "message": "로그인 화면이 감지되어 자동 실행을 중단했습니다. 직접 로그인 또는 .env credentials 설정 후 다시 실행하세요.",
+                "degrade_reason": capture_degrade_reason,
+            },
+            last_error="RuntimeError: login required before browser capture can continue",
+        )
+        raise RuntimeError("login required before browser capture can continue")
 
-    media_plan = _media_plan_for_outputs(effective_request, plan, capture_result.get("action_log", []))
-    media_plan_path = _write_media_plan(media_plan, dirs.package)
-    subtitles_path = _render_subtitles(media_plan, dirs.package)
+    if _should_run_post_login_mcp_rehearsal(artifact_rehearsal, settings):
+        _update_workflow_state(
+            dirs.package,
+            status=WorkflowStatus.RUNNING,
+            current_step=WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
+            can_continue=False,
+            details={"actor": "rehearsal", "message": "로그인 이후 지연된 Playwright MCP live 리허설을 실행합니다."},
+        )
+        terminal.record(
+            run_id=job_id,
+            actor="rehearsal",
+            status="post-login-started",
+            details={
+                "playwright_mcp_mode": settings.playwright_mcp_mode,
+                "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+            },
+        )
+        post_login_rehearsal = rehearse_plan(plan, settings, dirs.package, allow_live=True)
+        artifact_post_login_rehearsal = redact_sensitive(post_login_rehearsal)
+        artifact_rehearsal = {
+            **artifact_rehearsal,
+            "post_login_rehearsal": artifact_post_login_rehearsal,
+            "post_login_status": artifact_post_login_rehearsal.get("status"),
+        }
+        _write_json(dirs.package / "rehearsal_log.json", artifact_rehearsal)
+        _record_stage(
+            audit,
+            terminal,
+            actor="rehearsal",
+            step_id=WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
+            status=_rehearsal_audit_status(post_login_rehearsal),
+            input_data=artifact_plan,
+            output_data=artifact_post_login_rehearsal,
+            degrade_reason=_rehearsal_degrade_reason(post_login_rehearsal),
+            artifacts=[
+                dirs.package / "playwright_mcp_calls.json",
+                *([Path(str(post_login_rehearsal.get("execution_path")))] if post_login_rehearsal.get("execution_path") else []),
+            ],
+            terminal_details={
+                "playwright_mcp_mode": settings.playwright_mcp_mode,
+                "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
+                "post_login": True,
+                "status": str(post_login_rehearsal.get("status") or ""),
+            },
+        )
+
+    media_assets = build_media_assets(
+        request=effective_request,
+        plan=plan,
+        action_log=capture_result.get("action_log", []),
+        package_dir=dirs.package,
+        media_plan_func=_media_plan_for_outputs,
+        write_media_plan_func=_write_media_plan,
+        render_subtitles_func=lambda media_plan, package_dir: _render_subtitles(
+            media_plan,
+            package_dir,
+            redaction=RedactionPipeline(sensitive_values=effective_request.input_values),
+        ),
+    )
+    media_plan = media_assets.media_plan
+    media_plan_path = media_assets.media_plan_path
+    subtitles_path = media_assets.subtitles_path
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="tts",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.TTS,
         can_continue=False,
         details={"actor": "tts", "message": "자막과 한국어 내레이션을 생성합니다."},
     )
@@ -1083,8 +1176,8 @@ def _complete_pipeline_execution(
     if capture_browser and _should_replay_demonstration(effective_request, capture_result.get("action_log", [])):
         _update_workflow_state(
             dirs.package,
-            status="running",
-            current_step="replay",
+            status=WorkflowStatus.RUNNING,
+            current_step=WorkflowStep.REPLAY,
             can_continue=False,
             details={"actor": "replay", "message": "직접 시연 기록을 내레이션 타이밍에 맞춰 재녹화합니다."},
         )
@@ -1097,32 +1190,20 @@ def _complete_pipeline_execution(
                 "audio_count": len(tts_result.audio_paths),
             },
         )
-        try:
-            replay_result = _replay_demonstration_with_playwright(
-                effective_request,
-                media_plan,
-                capture_result.get("action_log", []),
-                dirs,
-                settings,
-                tts_audio=tts_result.audio_paths,
-                storage_state=capture_result.get("storage_state"),
-                run_id=job_id,
-                terminal=terminal,
-            )
-        except Exception as exc:  # noqa: BLE001 - keep original demonstration package inspectable.
-            replay_result = {
-                "status": "degraded",
-                "degrade_reason": "demonstration_replay_failed",
-                "action_log": [
-                    {
-                        "type": "demonstration_replay",
-                        "status": "failed",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                ],
-            }
-        _apply_replay_result(capture_result, replay_result)
-        _write_capture_action_log(capture_result)
+        replay_result = run_demonstration_replay(
+            enabled=True,
+            request=effective_request,
+            media_plan=media_plan,
+            capture_result=capture_result,
+            dirs=dirs,
+            settings=settings,
+            tts_audio=tts_result.audio_paths,
+            run_id=job_id,
+            terminal=terminal,
+            replay_func=_replay_demonstration_with_playwright,
+            apply_replay_func=_apply_replay_result,
+            write_capture_log_func=_write_capture_action_log,
+        )
         _record_stage(
             audit,
             terminal,
@@ -1156,8 +1237,8 @@ def _complete_pipeline_execution(
 
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="masking",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.MASKING,
         can_continue=False,
         details={"actor": "masking", "message": "캡처 이미지와 로그에서 민감 정보를 마스킹합니다."},
     )
@@ -1185,26 +1266,31 @@ def _complete_pipeline_execution(
         video_path = _render_placeholder_video(dirs.package)
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="preview",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.PREVIEW,
         can_continue=False,
         details={"actor": "preview", "message": "미리보기와 텍스트 매뉴얼을 생성합니다."},
     )
-    html_path = _render_preview(
-        effective_request,
-        media_plan,
-        dirs,
-        capture_result["masked_names"],
-        tts_result.audio_paths,
+    preview_assets = build_preview_manual_assets(
+        request=effective_request,
+        media_plan=media_plan,
+        dirs=dirs,
+        masked_names=capture_result["masked_names"],
+        tts_audio=tts_result.audio_paths,
         source_video=video_path,
         subtitles_path=subtitles_path,
+        settings=settings,
+        render_preview_func=_render_preview,
+        render_markdown_func=_render_markdown,
+        render_pdf_func=_render_pdf_placeholder,
     )
-    markdown_path = _render_markdown(effective_request, media_plan, dirs, capture_result["masked_names"], settings)
-    pdf_path = _render_pdf_placeholder(effective_request, dirs)
+    html_path = preview_assets.html_path
+    markdown_path = preview_assets.markdown_path
+    pdf_path = preview_assets.pdf_path
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="render",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.RENDER,
         can_continue=False,
         details={"actor": "render", "message": "HyperFrames 또는 fallback 영상 렌더를 실행합니다."},
     )
@@ -1244,8 +1330,8 @@ def _complete_pipeline_execution(
     )
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="opencode",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.OPENCODE,
         can_continue=False,
         details={"actor": "opencode", "message": "선택적 OpenCode 후처리 단계를 실행합니다."},
     )
@@ -1300,7 +1386,7 @@ def _complete_pipeline_execution(
     )
     result = PipelineResult(
         job_id=job_id,
-        status="completed",
+        status=WorkflowStatus.COMPLETED,
         package_dir=dirs.package,
         plan=artifact_plan,
         rehearsal=artifact_rehearsal,
@@ -1308,8 +1394,8 @@ def _complete_pipeline_execution(
     )
     _update_workflow_state(
         dirs.package,
-        status="running",
-        current_step="manifest",
+        status=WorkflowStatus.RUNNING,
+        current_step=WorkflowStep.MANIFEST,
         can_continue=False,
         details={"actor": "manifest", "message": "산출물 매니페스트와 감사 로그를 확정합니다."},
     )
@@ -1319,7 +1405,7 @@ def _complete_pipeline_execution(
     terminal.record(
         run_id=job_id,
         actor="pipeline",
-        status="completed",
+        status=WorkflowStatus.COMPLETED,
         details={
             "package_dir": str(dirs.package),
             "degradation_count": len(audit.degradations()),
@@ -1329,8 +1415,8 @@ def _complete_pipeline_execution(
     )
     _update_workflow_state(
         dirs.package,
-        status="completed",
-        current_step="completed",
+        status=WorkflowStatus.COMPLETED,
+        current_step=WorkflowStep.COMPLETED,
         can_continue=False,
         request=effective_request,
         capture_browser=capture_browser,
@@ -1436,6 +1522,7 @@ def draft_response(result: PipelineDraftResult) -> dict[str, Any]:
 def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str, str | None]:
     mcp_execution = result.package_dir / "playwright_mcp_execution.json"
     llm_responses = result.package_dir / "llm_responses.jsonl"
+    artifact_edit_log = result.package_dir / "artifact_edit_log.jsonl"
     return {
         "request": f"{rel_base}/request.json",
         "input_extraction": f"{rel_base}/input_extraction.json",
@@ -1445,6 +1532,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "playwright_mcp_calls": f"{rel_base}/playwright_mcp_calls.json",
         "playwright_mcp_execution": f"{rel_base}/playwright_mcp_execution.json" if mcp_execution.exists() else None,
         "audit_log": f"{rel_base}/audit_log.jsonl",
+        "artifact_edit_log": f"{rel_base}/artifact_edit_log.jsonl" if artifact_edit_log.exists() else None,
         "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
         "subtitles": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
         "media_plan": f"{rel_base}/media_plan.json" if result.artifacts.media_plan and result.artifacts.media_plan.exists() else None,
@@ -3827,8 +3915,8 @@ def _update_workflow_state_after_rerender(package_dir: Path) -> None:
         state = {}
     state.update(
         {
-            "status": "completed",
-            "current_step": "completed",
+            "status": WorkflowStatus.COMPLETED,
+            "current_step": WorkflowStep.COMPLETED,
             "can_continue": False,
             "last_rerendered_at": datetime.now().isoformat(timespec="seconds"),
         }
@@ -3912,7 +4000,7 @@ def _compact_text(value: str, *, limit: int = 120) -> str:
     return compacted[:limit]
 
 
-def _render_subtitles(plan: dict[str, Any], package_dir: Path) -> Path:
+def _render_subtitles(plan: dict[str, Any], package_dir: Path, redaction: RedactionPipeline | None = None) -> Path:
     package_dir.mkdir(parents=True, exist_ok=True)
     path = package_dir / "subtitles.vtt"
     steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
@@ -3925,6 +4013,9 @@ def _render_subtitles(plan: dict[str, Any], package_dir: Path) -> Path:
         end = start + cue_duration_seconds
         title = str(step.get("title") or f"Step {index + 1}")
         caption = str(step.get("caption") or step.get("narration") or "")
+        if redaction is not None:
+            title = redaction.redact_text(title)
+            caption = redaction.redact_text(caption)
         text = title if not caption or caption == title else f"{title}\n{caption}"
         lines.extend(
             [
@@ -4063,12 +4154,13 @@ def _render_preview(
 
 
 def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: PipelineDirs, masked_names: list[str], settings: Any) -> Path:
+    redaction = RedactionPipeline(sensitive_values=request.input_values)
     lines = [
-        f"# {request.request_text}",
+        f"# {redaction.redact_text(request.request_text)}",
         "",
-        f"- 대상 URL: `{request.target_url}`",
-        f"- 계정 역할: `{request.role}`",
-        f"- 완료 조건: {request.completion_condition}",
+        f"- 대상 URL: `{redaction.redact_text(request.target_url)}`",
+        f"- 계정 역할: `{redaction.redact_text(request.role)}`",
+        f"- 완료 조건: {redaction.redact_text(request.completion_condition)}",
         "",
     ]
     if str(getattr(settings, "tts_provider", "") or "").lower() in {"supertonic", "supertonic-3"}:
@@ -4089,9 +4181,9 @@ def _render_markdown(request: PipelineInput, plan: dict[str, Any], dirs: Pipelin
         image_name = masked_names[index - 1] if index - 1 < len(masked_names) else (masked_names[-1] if masked_names else "")
         lines.extend(
             [
-                f"### {index}. {step['title']}",
+                f"### {index}. {redaction.redact_text(str(step['title']))}",
                 "",
-                step["caption"],
+                redaction.redact_text(str(step["caption"])),
                 "",
             ]
         )
@@ -4330,6 +4422,7 @@ def _manifest(
         "playwright_mcp_calls": str(package_dir / "playwright_mcp_calls.json"),
         "playwright_mcp_execution": _optional_path(package_dir / "playwright_mcp_execution.json"),
         "audit_log": str(result.artifacts.audit_log),
+        "artifact_edit_log": _optional_path(package_dir / "artifact_edit_log.jsonl"),
         "capture_action_log": _optional_path(result.artifacts.capture_action_log),
         "subtitles": _optional_path(result.artifacts.subtitles),
         "media_plan": _optional_path(result.artifacts.media_plan),
@@ -4369,6 +4462,7 @@ def _manifest(
             "opencode_metadata": str(result.artifacts.opencode_metadata) if result.artifacts.opencode_metadata else None,
         },
         "supporting_artifacts": supporting_artifacts,
+        "artifact_dependencies": build_artifact_dependencies(package_dir=package_dir, artifacts=result.artifacts),
     }
 
 

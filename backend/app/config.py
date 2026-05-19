@@ -248,6 +248,20 @@ class AppSettings:
                 "request_timeout_seconds": self.request_timeout_seconds,
                 "demonstration_timeout_seconds": self.demonstration_timeout_seconds,
                 "enable_terminal_logs": self.enable_terminal_logs,
+                "doctor_check_names": [
+                    "python",
+                    "node",
+                    "npm",
+                    "npx",
+                    "ffmpeg",
+                    "playwright_browsers",
+                    "corp_ca",
+                    "hf_cache",
+                    "onedrive_path",
+                    "path_length",
+                    "long_paths",
+                    "app_config",
+                ],
             },
         }
 

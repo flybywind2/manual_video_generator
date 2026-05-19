@@ -33,8 +33,12 @@ def test_doctor_script_emits_machine_readable_json_contract():
     assert {
         "python",
         "node",
+        "npm",
+        "npx",
         "ffmpeg",
         "playwright_browsers",
+        "hf_cache",
+        "corp_ca",
         "onedrive_path",
         "long_paths",
         "app_config",
@@ -76,6 +80,16 @@ def test_build_bundle_script_excludes_pytest_temp_dirs_and_dist_self_copy():
     assert ".pytest_tmp*" in script
     assert "Test-IsInsidePath" in script
     assert "$Dist" in script
+
+
+def test_smoke_script_supports_live_browser_and_output_smoke_dir():
+    script = Path("scripts/smoke.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$LiveBrowser" in script
+    assert "create_pipeline_draft" in script
+    assert "continue_pipeline_draft" in script
+    assert "output\") / \"smoke\"" in script
+    assert "uvicorn backend.app.main:app" in script
 
 
 def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp_path: Path):

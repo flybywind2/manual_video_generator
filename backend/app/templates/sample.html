@@ -20,6 +20,11 @@
       .detail-panel { display: none; }
       .detail-panel.is-visible { display: block; }
       .tag { display: inline-block; padding: 5px 9px; border-radius: 999px; background: #f1f5ff; color: #245bff; font-weight: 800; font-size: 12px; }
+      .login-panel, .modal-panel, .iframe-panel { display: none; }
+      .login-panel.is-visible, .modal-panel.is-visible, .iframe-panel.is-visible { display: block; }
+      .modal-panel { position: fixed; inset: 0; background: rgba(17,24,39,.36); z-index: 50; }
+      .modal-card { width: min(420px, calc(100% - 40px)); margin: 12vh auto; background: white; border-radius: 8px; padding: 24px; box-shadow: 0 24px 80px rgba(17,24,39,.26); }
+      iframe { width: 100%; height: 180px; border: 1px solid #d8e0ec; border-radius: 8px; background: #fff; }
     </style>
   </head>
   <body>
@@ -31,6 +36,12 @@
       <section class="sample-hero">
         <h1>LOT 조회</h1>
         <p>매뉴얼 영상 생성을 검증하기 위한 샘플 사내 시스템 화면입니다.</p>
+      </section>
+      <section class="login-panel">
+        <h2>로그인</h2>
+        <label>사용자 ID <input name="username" value="" /></label>
+        <label>비밀번호 <input name="password" type="password" value="" /></label>
+        <button type="button" data-action="login">로그인</button>
       </section>
       <section class="search-panel">
         <h2>검색 조건</h2>
@@ -56,8 +67,36 @@
         <p>완료 조건: 상세 화면이 보이면 완료</p>
         <span class="tag">조건 충족</span>
       </section>
+      <section class="iframe-panel">
+        <h2>임베디드 도움말</h2>
+        <iframe title="sample embedded help" srcdoc="<p>iframe 내부 안내입니다. 조회 후 상세 보기를 누르세요.</p>"></iframe>
+      </section>
     </main>
+    <div class="modal-panel" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <h2>조회 조건 확인</h2>
+        <p>모달이 있는 화면에서 브라우저 에이전트가 안전하게 진행하는지 검증합니다.</p>
+        <button type="button" data-action="close-modal">확인</button>
+      </div>
+    </div>
     <script>
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("variant") === "login") {
+        document.querySelector(".login-panel").classList.add("is-visible");
+      }
+      if (params.get("variant") === "modal") {
+        document.querySelector(".modal-panel").classList.add("is-visible");
+      }
+      if (params.get("variant") === "iframe") {
+        document.querySelector(".iframe-panel").classList.add("is-visible");
+      }
+      document.querySelector("[data-action='login']").addEventListener("click", () => {
+        document.querySelector(".login-panel").classList.remove("is-visible");
+        document.body.dataset.loggedIn = "true";
+      });
+      document.querySelector("[data-action='close-modal']").addEventListener("click", () => {
+        document.querySelector(".modal-panel").classList.remove("is-visible");
+      });
       document.querySelector("[data-action='search']").addEventListener("click", () => {
         document.querySelector("#results td:nth-child(3)").textContent = "조회 완료";
       });

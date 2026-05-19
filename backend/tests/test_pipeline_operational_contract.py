@@ -110,6 +110,98 @@ def test_continue_updates_workflow_state_between_execution_stages(tmp_path: Path
     assert "updated_at" in state
 
 
+def test_deferred_live_mcp_rehearsal_runs_after_continue_login_window(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_PLAYWRIGHT_MCP_MODE", "live")
+    monkeypatch.setenv("MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND", "fake-mcp")
+    request = _request().model_copy(update={"execution_mode": "ai", "login_mode": "manual"})
+    calls: list[bool] = []
+
+    def fake_rehearse_plan(_plan, _settings, package_dir, *, allow_live=True, deferred_reason="", **_kwargs):
+        calls.append(allow_live)
+        if not allow_live:
+            return {
+                "status": "deferred-until-authenticated",
+                "adapter": "playwright-mcp-live-deferred",
+                "mode": "live",
+                "executed": False,
+                "requires_live_mode": True,
+                "deferred_reason": deferred_reason,
+                "candidate_calls": [],
+            }
+        execution_path = package_dir / "playwright_mcp_execution.json"
+        execution_path.write_text(json.dumps({"status": "live-completed"}), encoding="utf-8")
+        return {
+            "status": "live-completed",
+            "adapter": "playwright-mcp-live",
+            "mode": "live",
+            "executed": True,
+            "requires_live_mode": False,
+            "execution_path": str(execution_path),
+            "candidate_calls": [],
+        }
+
+    monkeypatch.setattr(pipeline_module, "rehearse_plan", fake_rehearse_plan)
+
+    draft = create_pipeline_draft(request, base_dir=tmp_path, capture_browser=False)
+    result = continue_pipeline_draft(draft.job_id, base_dir=tmp_path, capture_browser=False)
+
+    assert calls == [False, True]
+    rehearsal = json.loads((result.package_dir / "rehearsal_log.json").read_text(encoding="utf-8"))
+    assert rehearsal["status"] == "deferred-until-authenticated"
+    assert rehearsal["post_login_status"] == "live-completed"
+    events = [json.loads(line) for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()]
+    assert any(event["step_id"] == "mcp_rehearsal_after_login" and event["status"] == "ok" for event in events)
+
+
+def test_continue_stops_when_browser_capture_reports_login_required(tmp_path: Path, monkeypatch):
+    draft = create_pipeline_draft(
+        _request().model_copy(update={"execution_mode": "ai", "login_mode": "none"}),
+        base_dir=tmp_path,
+        capture_browser=True,
+    )
+    state_path = draft.package_dir / "workflow_state.json"
+
+    def login_required_capture(_request, _plan, dirs, _settings):
+        video = dirs.package / "manual_video_agent_usage.webm"
+        video.write_bytes(b"webm")
+        return {
+            "status": "degraded",
+            "degrade_reason": "login_required",
+            "captures": [],
+            "masked_names": [],
+            "video": video,
+            "action_log": [{"status": "blocked", "reason": "login_required"}],
+            "action_log_path": dirs.package / "capture_action_log.json",
+            "final_frame": None,
+        }
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", login_required_capture)
+
+    with pytest.raises(RuntimeError, match="login required"):
+        continue_pipeline_draft(draft.job_id, base_dir=tmp_path, capture_browser=True)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["current_step"] == "execution_failed"
+    assert state["can_continue"] is True
+    assert state["details"]["degrade_reason"] == "login_required"
+
+
+def test_workflow_package_contract_shape_is_stable_for_sample_continue(tmp_path: Path):
+    draft = create_pipeline_draft(_request(), base_dir=tmp_path, capture_browser=False)
+    result = continue_pipeline_draft(draft.job_id, base_dir=tmp_path, capture_browser=False)
+
+    state = json.loads((result.package_dir / "workflow_state.json").read_text(encoding="utf-8"))
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()]
+
+    assert set(state).issuperset({"status", "current_step", "can_continue", "request", "capture_browser", "environment", "updated_at", "details"})
+    assert state["status"] == "completed"
+    assert state["current_step"] == "completed"
+    assert set(manifest).issuperset({"job_id", "status", "environment", "degradations", "artifacts", "supporting_artifacts", "artifact_dependencies"})
+    assert {"capture", "tts", "masking", "render", "manifest"}.issubset({event["actor"] for event in events})
+
+
 def test_continue_rejects_job_id_path_traversal(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="invalid job id"):
         continue_pipeline_draft("..\\..\\outside", base_dir=tmp_path, capture_browser=False)

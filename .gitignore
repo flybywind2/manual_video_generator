@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp*/
+.workflow_smoke/
+.workflow_live_smoke/
+output/smoke/
 .playwright-mcp/
 dist/
 output/
