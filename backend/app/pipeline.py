@@ -33,7 +33,8 @@ from backend.app.package_builder import build_media_assets, build_preview_manual
 from backend.app.policies import ApprovalGate
 from backend.app.redaction import RedactionPipeline, redact_sensitive
 from backend.app.terminal_logging import TerminalRunLogger
-from backend.app.workflow import WORKFLOW_STEPS, WorkflowStatus, WorkflowStep
+from backend.app.workflow import WorkflowStatus, WorkflowStep
+from backend.app.workflow_graph import WORKFLOW_GRAPH
 
 
 class PipelineInput(BaseModel):
@@ -138,9 +139,14 @@ def _update_workflow_state(
     if status is not None:
         state["status"] = status
     if current_step is not None:
-        if current_step not in WORKFLOW_STEPS:
+        if not WORKFLOW_GRAPH.has_step(current_step):
             raise ValueError(f"unknown workflow step: {current_step}")
         state["current_step"] = current_step
+        state["workflow_node"] = {
+            "actor": WORKFLOW_GRAPH.node(current_step).actor,
+            "label": WORKFLOW_GRAPH.node(current_step).label,
+            "next_steps": WORKFLOW_GRAPH.next_steps(current_step),
+        }
     if can_continue is not None:
         state["can_continue"] = can_continue
     if request is not _WORKFLOW_UNSET:
@@ -155,6 +161,7 @@ def _update_workflow_state(
         state["details"] = redact_sensitive(details)
     if last_error is not None:
         state["last_error"] = last_error
+    state["workflow_graph"] = WORKFLOW_GRAPH.metadata()
     state["updated_at"] = datetime.now().isoformat(timespec="seconds")
     _write_json(state_path, state)
 

@@ -81,6 +81,7 @@ flowchart TB
 ```
 
 실행 중에는 백엔드가 `workflow_state.json`을 단계별로 갱신하고, UI는 이 파일을 폴링해 좌측 Workflow와 Pipeline 진행 상태를 갱신합니다.
+내부적으로는 `backend/app/workflow_graph.py`의 `WORKFLOW_GRAPH`가 각 단계의 actor, label, next_steps를 정의합니다. `workflow_state.json`에는 현재 `workflow_node`와 전체 `workflow_graph` metadata가 포함되어 UI, 진단 로그, 향후 LangGraph 전환의 기준 계약으로 쓰입니다.
 
 ```mermaid
 stateDiagram-v2

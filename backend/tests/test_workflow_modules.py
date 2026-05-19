@@ -2,6 +2,36 @@ from pathlib import Path
 
 from backend.app.browser_runner import run_capture, run_demonstration_replay
 from backend.app.package_builder import build_media_assets, build_preview_manual_assets
+from backend.app.workflow import WorkflowStep
+from backend.app.workflow_graph import WORKFLOW_GRAPH, WorkflowGraph, WorkflowNode
+
+
+def test_workflow_graph_exposes_ordered_nodes_and_edges():
+    assert WORKFLOW_GRAPH.ordered_steps()[0] == WorkflowStep.PLAN_REVIEW
+    assert WORKFLOW_GRAPH.ordered_steps()[-1] == WorkflowStep.COMPLETED
+    assert WORKFLOW_GRAPH.next_steps(WorkflowStep.CAPTURE) == [
+        WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
+        WorkflowStep.REPLAY,
+        WorkflowStep.TTS,
+        WorkflowStep.EXECUTION_FAILED,
+    ]
+    assert WORKFLOW_GRAPH.node(WorkflowStep.TTS).actor == "tts"
+    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.RENDER, WorkflowStep.OPENCODE) is True
+    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.TTS, WorkflowStep.CAPTURE) is False
+
+
+def test_workflow_graph_rejects_unknown_steps():
+    graph = WorkflowGraph(
+        [
+            WorkflowNode(step="a", actor="a", label="A", next_steps=("b",)),
+            WorkflowNode(step="b", actor="b", label="B"),
+        ]
+    )
+
+    assert graph.has_step("a") is True
+    assert graph.has_step("missing") is False
+    assert graph.transition_allowed("", "a") is True
+    assert graph.transition_allowed("missing", "a") is False
 
 
 def test_browser_runner_selects_placeholder_when_capture_disabled(tmp_path: Path):

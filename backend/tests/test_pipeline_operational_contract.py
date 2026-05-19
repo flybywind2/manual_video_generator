@@ -106,6 +106,9 @@ def test_continue_updates_workflow_state_between_execution_stages(tmp_path: Path
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["status"] == "completed"
     assert state["current_step"] == "completed"
+    assert state["workflow_node"]["actor"] == "pipeline"
+    assert state["workflow_graph"]["name"] == "manual-video-agent-workflow"
+    assert any(node["step"] == "capture" and "tts" in node["next_steps"] for node in state["workflow_graph"]["nodes"])
     assert state["can_continue"] is False
     assert "updated_at" in state
 
@@ -195,7 +198,20 @@ def test_workflow_package_contract_shape_is_stable_for_sample_continue(tmp_path:
     manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
     events = [json.loads(line) for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()]
 
-    assert set(state).issuperset({"status", "current_step", "can_continue", "request", "capture_browser", "environment", "updated_at", "details"})
+    assert set(state).issuperset(
+        {
+            "status",
+            "current_step",
+            "workflow_node",
+            "workflow_graph",
+            "can_continue",
+            "request",
+            "capture_browser",
+            "environment",
+            "updated_at",
+            "details",
+        }
+    )
     assert state["status"] == "completed"
     assert state["current_step"] == "completed"
     assert set(manifest).issuperset({"job_id", "status", "environment", "degradations", "artifacts", "supporting_artifacts", "artifact_dependencies"})

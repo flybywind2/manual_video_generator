@@ -33,13 +33,15 @@ flowchart TB
     S --> T["18. Text edit/Rerender"]
 ```
 
+`backend/app/workflow_graph.py`는 현재 파이프라인의 그래프 계약을 dependency-free로 표현한다. 각 node는 `step`, `actor`, `label`, `next_steps`, `optional`을 가지며, `workflow_state.json`은 현재 node와 전체 graph metadata를 함께 내보낸다. 향후 LangGraph를 도입하더라도 먼저 이 계약을 adapter로 compile하고, pipeline 내부 상태와 package contract는 유지한다.
+
 ## Layer Map
 
 | Layer | Primary files | Responsibility |
 |---|---|---|
 | Web/API | `backend/app/main.py` | FastAPI endpoints, artifact routing, text artifact edit API |
 | UI | `backend/app/templates/index.html`, `backend/app/static/app.js`, `backend/app/static/styles.css` | 요청 입력, 계획 검수, 실행/재렌더 버튼, workflow polling, artifact editor |
-| Orchestrator | `backend/app/pipeline.py`, `backend/app/workflow.py` | workflow state, package dirs, planner/rehearsal/capture/TTS/render/opencode orchestration |
+| Orchestrator | `backend/app/pipeline.py`, `backend/app/workflow.py`, `backend/app/workflow_graph.py` | workflow state, graph metadata, package dirs, planner/rehearsal/capture/TTS/render/opencode orchestration |
 | Runners/Builders | `backend/app/browser_runner.py`, `backend/app/package_builder.py`, `backend/app/artifact_dependencies.py` | browser capture/replay decision boundary, media/preview/manual grouping, rerender dependency graph |
 | Configuration | `backend/app/config.py`, `backend/app/env_bootstrap.py`, `.env.example` | `.env` parsing, safe config status, runtime path bootstrap |
 | Adapters | `backend/app/adapters/*.py` | LLM/input extraction, browser agent, MCP, TTS, HyperFrames, OpenCode |
