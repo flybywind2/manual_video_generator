@@ -1017,6 +1017,8 @@ def _complete_pipeline_execution(
                 settings,
                 tts_audio=tts_result.audio_paths,
                 storage_state=capture_result.get("storage_state"),
+                run_id=job_id,
+                terminal=terminal,
             )
         except Exception as exc:  # noqa: BLE001 - keep original demonstration package inspectable.
             replay_result = {
@@ -1828,6 +1830,8 @@ def _replay_demonstration_with_playwright(
     *,
     tts_audio: list[Path],
     storage_state: dict[str, Any] | None = None,
+    run_id: str = "",
+    terminal: TerminalRunLogger | None = None,
 ) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
@@ -1856,6 +1860,20 @@ def _replay_demonstration_with_playwright(
     durations = _step_audio_durations(media_plan, tts_audio)
     steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
     launch_kwargs = _playwright_launch_kwargs(settings, interactive=False)
+    default_timeout_ms = _replay_default_timeout_ms(settings)
+    navigation_timeout_ms = _replay_navigation_timeout_ms(settings)
+    _record_replay_terminal(
+        terminal,
+        run_id,
+        "browser-launch",
+        {
+            "component": "direct-playwright-replay",
+            "event_count": len(events),
+            "default_timeout_ms": default_timeout_ms,
+            "navigation_timeout_ms": navigation_timeout_ms,
+            "is_mcp": False,
+        },
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
@@ -1870,14 +1888,79 @@ def _replay_demonstration_with_playwright(
                 context_options["storage_state"] = storage_state
             context = browser.new_context(**context_options)
             page = context.new_page()
+            _configure_replay_page_timeouts(page, default_timeout_ms, navigation_timeout_ms)
+            _record_replay_terminal(
+                terminal,
+                run_id,
+                "navigate-started",
+                {"component": "direct-playwright-replay", "url": request.target_url, "is_mcp": False},
+            )
             _prepare_capture_page(page, request.target_url)
+            _record_replay_terminal(
+                terminal,
+                run_id,
+                "navigate-ok",
+                {"component": "direct-playwright-replay", "is_mcp": False},
+            )
             if durations:
+                _record_replay_terminal(
+                    terminal,
+                    run_id,
+                    "initial-wait",
+                    {
+                        "component": "direct-playwright-replay",
+                        "duration_seconds": round(float(durations[0]), 3),
+                        "is_mcp": False,
+                    },
+                )
                 _wait_for_replay_step(page, durations[0])
             for index, event in enumerate(events, start=1):
                 step = steps[index] if index < len(steps) else _demonstration_event_to_step(index, event)
                 duration = durations[index] if index < len(durations) else _fallback_step_duration_seconds(step)
-                replay_log.append(_execute_demonstration_replay_event(page, event, step, duration))
-                captures.append(_screenshot(page, dirs.captures, _step_capture_name(step, used_names)))
+                _record_replay_terminal(
+                    terminal,
+                    run_id,
+                    "event-started",
+                    {
+                        "component": "direct-playwright-replay",
+                        "index": index,
+                        "event_type": str(event.get("type") or ""),
+                        "step_id": str(step.get("id") or ""),
+                        "duration_seconds": round(float(duration), 3),
+                        "is_mcp": False,
+                    },
+                )
+                event_log = _execute_demonstration_replay_event(page, event, step, duration)
+                replay_log.append(event_log)
+                _record_replay_terminal(
+                    terminal,
+                    run_id,
+                    _replay_event_terminal_status(event_log),
+                    {
+                        "component": "direct-playwright-replay",
+                        "index": index,
+                        "event_type": str(event.get("type") or ""),
+                        "step_id": str(step.get("id") or ""),
+                        "method": str(event_log.get("method") or ""),
+                        "reason": str(event_log.get("reason") or ""),
+                        "error": str(event_log.get("error") or ""),
+                        "is_mcp": False,
+                    },
+                )
+                capture = _screenshot(page, dirs.captures, _step_capture_name(step, used_names))
+                captures.append(capture)
+                _record_replay_terminal(
+                    terminal,
+                    run_id,
+                    "capture-ok",
+                    {
+                        "component": "direct-playwright-replay",
+                        "index": index,
+                        "capture": capture.name,
+                        "is_mcp": False,
+                    },
+                    artifacts=[capture],
+                )
             final_frame = _screenshot(page, dirs.package, "final_frame.png")
         finally:
             if context is not None:
@@ -1887,6 +1970,12 @@ def _replay_demonstration_with_playwright(
     videos = sorted(replay_dir.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not videos:
         replay_log.append({"type": "demonstration_replay_video", "status": "failed", "reason": "browser_recording_missing"})
+        _record_replay_terminal(
+            terminal,
+            run_id,
+            "video-missing",
+            {"component": "direct-playwright-replay", "reason": "browser_recording_missing", "is_mcp": False},
+        )
         return {
             "status": "degraded",
             "degrade_reason": "demonstration_replay_recording_missing",
@@ -1899,6 +1988,13 @@ def _replay_demonstration_with_playwright(
     shutil.copy2(videos[0], video)
     replay_log[0]["status"] = "ok"
     replay_log.append({"type": "demonstration_replay_video", "status": "ok", "video": str(video)})
+    _record_replay_terminal(
+        terminal,
+        run_id,
+        "video-ready",
+        {"component": "direct-playwright-replay", "video": video.name, "is_mcp": False},
+        artifacts=[video],
+    )
     return {
         "status": "ok",
         "degrade_reason": "",
@@ -1908,6 +2004,58 @@ def _replay_demonstration_with_playwright(
         "final_frame": final_frame,
         "action_log": replay_log,
     }
+
+
+def _record_replay_terminal(
+    terminal: TerminalRunLogger | None,
+    run_id: str,
+    status: str,
+    details: dict[str, Any] | None = None,
+    *,
+    artifacts: list[Any] | None = None,
+) -> None:
+    if terminal is None:
+        return
+    replay_details = {"component": "direct-playwright-replay", "is_mcp": False}
+    replay_details.update(details or {})
+    terminal.record(run_id=run_id, actor="replay", status=status, details=replay_details, artifacts=artifacts)
+
+
+def _replay_default_timeout_ms(settings: Any) -> int:
+    return _bounded_milliseconds(getattr(settings, "request_timeout_seconds", 5.0), minimum=1.0, maximum=8.0, fallback=5.0)
+
+
+def _replay_navigation_timeout_ms(settings: Any) -> int:
+    return _bounded_milliseconds(getattr(settings, "request_timeout_seconds", 10.0), minimum=5.0, maximum=15.0, fallback=10.0)
+
+
+def _bounded_milliseconds(value: Any, *, minimum: float, maximum: float, fallback: float) -> int:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = fallback
+    seconds = min(max(seconds, minimum), maximum)
+    return int(seconds * 1000)
+
+
+def _configure_replay_page_timeouts(page: Any, default_timeout_ms: int, navigation_timeout_ms: int) -> None:
+    set_default_timeout = getattr(page, "set_default_timeout", None)
+    if callable(set_default_timeout):
+        set_default_timeout(default_timeout_ms)
+    set_navigation_timeout = getattr(page, "set_default_navigation_timeout", None)
+    if callable(set_navigation_timeout):
+        set_navigation_timeout(navigation_timeout_ms)
+
+
+def _replay_event_terminal_status(event_log: dict[str, Any]) -> str:
+    status = str(event_log.get("status") or "ok")
+    if status == "ok":
+        return "event-ok"
+    if status == "skipped":
+        return "event-skipped"
+    if status == "failed":
+        return "event-failed"
+    return f"event-{status}"
 
 
 def _execute_demonstration_replay_event(page: Any, event: dict[str, Any], step: dict[str, Any], duration_seconds: float) -> dict[str, Any]:

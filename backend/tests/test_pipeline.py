@@ -2186,11 +2186,13 @@ def test_demonstration_pipeline_replays_events_after_tts_for_final_video(tmp_pat
             "storage_state": {"cookies": [{"name": "sid", "value": "demo"}], "origins": []},
         }
 
-    def fake_replay(request, media_plan, action_log, dirs, settings, *, tts_audio, storage_state=None):
+    def fake_replay(request, media_plan, action_log, dirs, settings, *, tts_audio, storage_state=None, run_id="", terminal=None):
         calls["replay"] = {
             "source": media_plan.get("source"),
             "tts_audio_count": len(tts_audio),
             "storage_state": storage_state,
+            "run_id": run_id,
+            "terminal": terminal,
         }
         replay_capture = dirs.captures / "playwright_replay.png"
         replay_capture.write_bytes((dirs.captures / "direct_demo.png").read_bytes())
@@ -2245,12 +2247,15 @@ def test_demonstration_pipeline_replays_events_after_tts_for_final_video(tmp_pat
     assert calls["replay"]["source"] == "direct-demonstration-media-plan"
     assert calls["replay"]["tts_audio_count"] > 0
     assert calls["replay"]["storage_state"]["cookies"][0]["name"] == "sid"
+    assert calls["replay"]["run_id"].startswith("job_")
+    assert calls["replay"]["terminal"] is not None
     assert calls["render_fallback"].name == "manual_video_agent_usage.webm"
     assert calls["render_fallback"].read_bytes() == b"playwright-replay"
     assert result.artifacts.video.read_bytes() == b"playwright-replay"
 
 
 def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkeypatch):
+    import io
     import wave
     import playwright.sync_api as sync_api
 
@@ -2283,6 +2288,12 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
 
     class FakePage:
         keyboard = FakeKeyboard()
+
+        def set_default_timeout(self, timeout):
+            events.append(("set_default_timeout", timeout))
+
+        def set_default_navigation_timeout(self, timeout):
+            events.append(("set_default_navigation_timeout", timeout))
 
         def goto(self, url, wait_until):
             events.append(("goto", url, wait_until))
@@ -2362,6 +2373,7 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
 
     class Settings:
         playwright_executable_path = ""
+        request_timeout_seconds = 60.0
 
     dirs = _make_dirs(tmp_path / "package")
     audio_paths = [dirs.tts / "00.wav", dirs.tts / "01.wav", dirs.tts / "02.wav", dirs.tts / "03.wav"]
@@ -2383,6 +2395,8 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
         {"type": "click", "text": "전송"},
         {"type": "key", "key": "Enter", "label": "질문"},
     ]
+    terminal_stream = io.StringIO()
+    terminal = pipeline_module.TerminalRunLogger(enabled=True, stream=terminal_stream)
 
     result = pipeline_module._replay_demonstration_with_playwright(
         PipelineInput(
@@ -2398,17 +2412,28 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
         Settings(),
         tts_audio=audio_paths,
         storage_state={"cookies": [{"name": "sid", "value": "ok"}], "origins": []},
+        run_id="job-test",
+        terminal=terminal,
     )
 
     assert result["status"] == "ok"
     assert result["video"].name == "manual_video_agent_usage.webm"
     assert result["video"].read_bytes() == b"replay-webm"
+    assert ("set_default_timeout", 8000) in events
+    assert ("set_default_navigation_timeout", 15000) in events
     assert ("new_context", {"cookies": [{"name": "sid", "value": "ok"}], "origins": []}, True) in events
     assert ("fill", "label", "질문", "st.form과 st.input 차이") in events
     assert ("click", "button", "전송") in events
     assert ("key", "Enter") in events
     assert any(item == ("wait_for_timeout", 1100) for item in events)
     assert len(result["captures"]) == 3
+    terminal_text = terminal_stream.getvalue()
+    assert '"actor": "replay"' in terminal_text
+    assert '"status": "navigate-started"' in terminal_text
+    assert '"status": "initial-wait"' in terminal_text
+    assert '"status": "event-started"' in terminal_text
+    assert '"status": "event-ok"' in terminal_text
+    assert '"component": "direct-playwright-replay"' in terminal_text
 
 
 def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):
