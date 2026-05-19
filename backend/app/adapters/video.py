@@ -37,7 +37,7 @@ def render_final_video(
     command_runner: CommandRunner | None = None,
 ) -> VideoRenderResult:
     audio_paths = [Path(path) for path in (tts_audio or [])]
-    duration_seconds, duration_source = _composition_duration(plan, audio_paths)
+    duration_seconds, duration_source, step_durations = _composition_timing(plan, audio_paths)
     composition_dir = _write_hyperframes_composition(
         plan,
         package_dir,
@@ -45,6 +45,7 @@ def render_final_video(
         fallback_video,
         duration_seconds=duration_seconds,
         duration_source=duration_source,
+        step_durations=step_durations,
     )
     metadata_path = package_dir / "video_render.json"
     runner = subprocess.run if command_runner is None else command_runner
@@ -274,12 +275,20 @@ def _concat_file_line(path: Path) -> str:
     return f"file '{normalized}'"
 
 
-def _composition_duration(plan: dict[str, Any], audio_paths: list[Path]) -> tuple[float, str]:
-    audio_duration = sum(_wav_duration_seconds(path) for path in audio_paths)
-    if audio_duration > 0:
-        return round(max(1.0, audio_duration), 3), "tts_audio"
-    step_count = max(1, len([step for step in plan.get("steps", []) if isinstance(step, dict)]))
-    return float(max(6, min(90, step_count * 4))), "step_count"
+def _composition_timing(plan: dict[str, Any], audio_paths: list[Path]) -> tuple[float, str, list[float]]:
+    steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+    step_count = max(1, len(steps))
+    audio_durations = [_wav_duration_seconds(path) for path in audio_paths]
+    if any(duration > 0 for duration in audio_durations):
+        durations = [
+            round(duration if duration > 0 else 1.0, 3)
+            for duration in audio_durations[:step_count]
+        ]
+        if len(durations) < step_count:
+            durations.extend([1.0] * (step_count - len(durations)))
+        return round(max(1.0, sum(durations)), 3), "tts_audio", durations
+    fallback_duration = float(max(6, min(90, step_count * 4)))
+    return fallback_duration, "step_count", [round(fallback_duration / step_count, 3)] * step_count
 
 
 def _wav_duration_seconds(path: Path) -> float:
@@ -303,11 +312,14 @@ def _write_hyperframes_composition(
     *,
     duration_seconds: float,
     duration_source: str,
+    step_durations: list[float],
 ) -> Path:
     composition_dir = package_dir / "hyperframes"
     composition_dir.mkdir(parents=True, exist_ok=True)
     source_video = Path(os.path.relpath(fallback_video, composition_dir)).as_posix()
     source_preview = Path(os.path.relpath(preview_html, composition_dir)).as_posix()
+    captions = _caption_entries(plan, duration_seconds, step_durations)
+    captions_json = json.dumps(captions, ensure_ascii=False).replace("</", "<\\/")
     slides = []
     for index, step in enumerate(plan.get("steps", []), start=1):
         slides.append(
@@ -333,6 +345,9 @@ def _write_hyperframes_composition(
     .manual-video-pointer {{ position: absolute; right: 116px; bottom: 108px; width: 28px; height: 28px; pointer-events: none; filter: drop-shadow(0 8px 16px rgba(17,24,39,.32)); }}
     .manual-video-pointer::before {{ content: ""; position: absolute; left: 0; top: 0; width: 0; height: 0; border-left: 22px solid #111827; border-top: 13px solid transparent; border-bottom: 13px solid transparent; transform: rotate(-34deg); transform-origin: 0 50%; }}
     .manual-video-pointer::after {{ content: ""; position: absolute; left: 14px; top: 14px; width: 10px; height: 10px; border-radius: 999px; background: #21d4fd; border: 2px solid #fff; box-shadow: 0 0 0 7px rgba(33,212,253,.18); }}
+    .manual-video-caption {{ position: absolute; left: 48px; right: 48px; bottom: 42px; z-index: 6; display: grid; gap: 8px; padding: 20px 24px; border: 1px solid rgba(255,255,255,.62); border-radius: 8px; background: rgba(5,8,22,.82); color: #fff; box-shadow: 0 24px 70px rgba(5,8,22,.38); backdrop-filter: blur(10px); }}
+    .manual-video-caption-title {{ margin: 0; color: #21d4fd; font-size: 16px; font-weight: 900; line-height: 1.25; }}
+    .manual-video-caption-text {{ margin: 0; font-size: 28px; font-weight: 850; line-height: 1.35; }}
     aside {{ padding: 54px 42px; border-left: 1px solid #d8e0ec; display: flex; flex-direction: column; gap: 18px; }}
     aside .dot {{ width: 16px; height: 16px; border-radius: 999px; background: #21d4fd; box-shadow: 0 0 36px rgba(33,212,253,.72); }}
     aside h1 {{ margin: 14px 0 6px; font-size: 42px; line-height: 1.08; }}
@@ -349,6 +364,10 @@ def _write_hyperframes_composition(
     <div class="stage">
       <video class="manual-source-video" src="{_escape(source_video)}" muted autoplay loop playsinline></video>
       <div class="manual-video-pointer"></div>
+      <div class="manual-video-caption" aria-live="polite">
+        <p class="manual-video-caption-title">{_escape(captions[0]['title']) if captions else ''}</p>
+        <p class="manual-video-caption-text">{_escape(captions[0]['caption']) if captions else ''}</p>
+      </div>
     </div>
     <aside>
       <div class="dot"></div>
@@ -358,6 +377,29 @@ def _write_hyperframes_composition(
       <div class="steps">{''.join(slides)}</div>
     </aside>
   </div>
+  <script>
+    const manualVideoCaptions = {captions_json};
+    const updateManualVideoCaption = () => {{
+      const video = document.querySelector('.manual-source-video');
+      const title = document.querySelector('.manual-video-caption-title');
+      const text = document.querySelector('.manual-video-caption-text');
+      if (!video || !title || !text || !manualVideoCaptions.length) return;
+      const duration = Number(video.duration || {duration_seconds:.3f}) || {duration_seconds:.3f};
+      const current = Number(video.currentTime || 0) % Math.max(duration, 0.1);
+      const active = manualVideoCaptions.find((item) => current >= item.start && current < item.end)
+        || manualVideoCaptions[manualVideoCaptions.length - 1];
+      title.textContent = active.title || '';
+      text.textContent = active.caption || active.title || '';
+    }};
+    const video = document.querySelector('.manual-source-video');
+    if (video) {{
+      video.addEventListener('loadedmetadata', updateManualVideoCaption);
+      video.addEventListener('timeupdate', updateManualVideoCaption);
+      video.addEventListener('play', updateManualVideoCaption);
+      window.setInterval(updateManualVideoCaption, 250);
+      updateManualVideoCaption();
+    }}
+  </script>
 </body>
 </html>"""
     (composition_dir / "index.html").write_text(html, encoding="utf-8")
@@ -370,6 +412,7 @@ def _write_hyperframes_composition(
                 "source_video_relative": source_video,
                 "duration_seconds": duration_seconds,
                 "duration_source": duration_source,
+                "captions": captions,
                 "steps": len(slides),
             },
             ensure_ascii=False,
@@ -378,6 +421,32 @@ def _write_hyperframes_composition(
         encoding="utf-8",
     )
     return composition_dir
+
+
+def _caption_entries(plan: dict[str, Any], duration_seconds: float, step_durations: list[float]) -> list[dict[str, Any]]:
+    steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
+    if not steps:
+        return []
+    total = max(float(duration_seconds), 0.1)
+    captions: list[dict[str, Any]] = []
+    current = 0.0
+    for index, step in enumerate(steps):
+        duration = step_durations[index] if index < len(step_durations) else total / len(steps)
+        start = round(current, 3)
+        current = total if index == len(steps) - 1 else min(total, current + max(float(duration), 0.1))
+        end = round(current, 3)
+        title = str(step.get("title") or f"Step {index + 1}")
+        caption = str(step.get("caption") or step.get("narration") or title)
+        captions.append(
+            {
+                "step_id": str(step.get("id") or f"step_{index + 1}"),
+                "title": title,
+                "caption": caption,
+                "start": start,
+                "end": end,
+            }
+        )
+    return captions
 
 
 def _split_command(command: str) -> list[str]:

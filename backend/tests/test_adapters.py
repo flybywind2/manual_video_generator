@@ -941,6 +941,48 @@ def test_hyperframes_composition_duration_tracks_tts_audio(tmp_path: Path):
     assert 'data-duration="4.000"' in html
     assert manifest["duration_seconds"] == 4.0
     assert manifest["duration_source"] == "tts_audio"
+    assert manifest["captions"][0]["start"] == 0.0
+    assert manifest["captions"][0]["end"] == 1.25
+    assert manifest["captions"][1]["start"] == 1.25
+    assert manifest["captions"][1]["end"] == 4.0
+
+
+def test_hyperframes_composition_burns_visible_step_captions(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "missing-hyperframes-command",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    plan = {
+        "steps": [
+            {"id": "demo_start", "title": "시작", "caption": "시연을 시작합니다."},
+            {"id": "demo_01_input", "title": "질문 입력", "caption": "질문에 값을 입력합니다."},
+            {"id": "demo_02_click", "title": "전송 클릭", "caption": "전송 버튼을 클릭합니다."},
+        ]
+    }
+
+    render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+
+    html = (tmp_path / "hyperframes" / "index.html").read_text(encoding="utf-8")
+    manifest = json.loads((tmp_path / "hyperframes" / "hyperframes_manifest.json").read_text(encoding="utf-8"))
+
+    assert "manual-video-caption" in html
+    assert "updateManualVideoCaption" in html
+    assert "질문에 값을 입력합니다." in html
+    assert "전송 버튼을 클릭합니다." in html
+    assert manifest["captions"][1]["caption"] == "질문에 값을 입력합니다."
 
 
 def test_hyperframes_render_reports_missing_ffmpeg(tmp_path: Path, monkeypatch):
