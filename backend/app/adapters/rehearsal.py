@@ -121,7 +121,13 @@ def _run_live_mcp(
                         "result": result,
                     }
                 )
-            execution["status"] = "live-failed" if execution.get("had_tool_errors") else "live-completed"
+                if _mcp_result_has_login_blocker(result):
+                    execution["status"] = "blocked-login"
+                    execution["blocked_reason"] = "login_required"
+                    execution["blocked_action_id"] = action.get("id")
+                    break
+            if execution["status"] == "live-started":
+                execution["status"] = "live-failed" if execution.get("had_tool_errors") else "live-completed"
     except Exception as exc:  # noqa: BLE001 - direct Playwright capture remains the fallback path.
         execution["status"] = "live-failed"
         execution["error"] = f"{type(exc).__name__}: {exc}"
@@ -144,6 +150,27 @@ def _run_live_mcp(
             "checked_actions": [action.get("id", "") for action in actions],
             "candidate_calls": artifact_calls,
         }
+    if execution["status"] == "blocked-login":
+        return {
+            "status": "blocked-login",
+            "adapter": "playwright-mcp-live",
+            "mode": "live",
+            "executed": True,
+            "requires_live_mode": True,
+            "attempted_actions": execution.get("attempted_actions", 0),
+            "executed_actions": execution.get("executed_actions", 0),
+            "skipped_actions": execution.get("skipped_actions", []),
+            "command": settings.playwright_mcp_command,
+            "calls_path": str(calls_path),
+            "execution_path": str(execution_path),
+            "observations": [
+                "Playwright MCP live session이 로그인 화면을 감지해 추가 tool call을 중단했습니다.",
+                "로그인 세션이 필요한 대상은 직접 로그인 또는 credentials 로그인 후 Python Playwright 캡처 단계에서 진행합니다.",
+            ],
+            "checked_actions": [action.get("id", "") for action in actions],
+            "candidate_calls": artifact_calls,
+            "deferred_reason": "login_required",
+        }
     return {
         "status": "live-failed",
         "adapter": "playwright-mcp-live",
@@ -164,6 +191,44 @@ def _run_live_mcp(
         "candidate_calls": artifact_calls,
         "error": execution.get("error", ""),
     }
+
+
+def _mcp_result_has_login_blocker(result: Any) -> bool:
+    text = _flatten_mcp_result_text(result).lower()
+    if not text:
+        return False
+    blockers = [
+        "로그인 또는 회원가입",
+        "로그인이 필요",
+        "로그인 후",
+        "로그인하세요",
+        "sign in",
+        "signin",
+        "log in",
+        "login required",
+        "continue with google",
+        "continue with apple",
+        "password",
+        "비밀번호",
+        "sso",
+    ]
+    return any(blocker.lower() in text for blocker in blockers)
+
+
+def _flatten_mcp_result_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            if key in {"text", "content", "message", "result", "title", "ariaLabel"}:
+                parts.append(_flatten_mcp_result_text(item))
+            elif isinstance(item, (dict, list, tuple)):
+                parts.append(_flatten_mcp_result_text(item))
+        return " ".join(part for part in parts if part)
+    if isinstance(value, (list, tuple)):
+        return " ".join(_flatten_mcp_result_text(item) for item in value)
+    return ""
 
 
 def _action_to_mcp_call(action: dict[str, Any]) -> dict[str, Any] | None:

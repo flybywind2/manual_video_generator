@@ -349,6 +349,32 @@ def test_pipeline_draft_defers_live_mcp_when_login_is_required(tmp_path, monkeyp
     assert not (package_dir / "playwright_mcp_execution.json").exists()
 
 
+def test_pipeline_draft_defers_live_mcp_for_auth_url_even_without_login_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("MANUAL_AGENT_PLAYWRIGHT_MCP_MODE", "live")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/pipeline/draft?capture_browser=false",
+        json={
+            "request_text": "사내 시스템 메뉴얼 작성",
+            "target_url": "http://internal.example.local/login",
+            "role": "사용자",
+            "completion_condition": "홈 화면",
+            "login_mode": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rehearsal"]["status"] == "deferred-until-authenticated"
+    assert body["rehearsal"]["deferred_reason"] == "login_required"
+
+    package_dir = Path(body["package_dir"])
+    assert (package_dir / "playwright_mcp_calls.json").exists()
+    assert not (package_dir / "playwright_mcp_execution.json").exists()
+
+
 def test_pipeline_continue_api_runs_after_draft_plan_review(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
     client = TestClient(app)

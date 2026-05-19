@@ -1197,6 +1197,45 @@ def test_playwright_mcp_live_mode_can_be_deferred_until_after_login(tmp_path: Pa
     assert not (tmp_path / "playwright_mcp_execution.json").exists()
 
 
+def test_playwright_mcp_live_mode_stops_when_login_screen_is_detected(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
+    plan = {
+        "steps": [{"id": "step_chat", "title": "챗봇", "caption": "챗봇", "narration": "챗봇"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://internal.example.local/chat", "step_id": "step_chat"},
+            {"id": "a2", "type": "fill_by_label", "label": "프롬프트", "value": "테스트", "step_id": "step_chat"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            return {"content": [{"type": "text", "text": "로그인 또는 회원가입 후 계속하세요"}]}
+
+    result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
+
+    assert result["status"] == "blocked-login"
+    assert result["deferred_reason"] == "login_required"
+    assert result["executed_actions"] == 1
+    assert [name for name, _args in calls] == ["browser_navigate"]
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["status"] == "blocked-login"
+    assert execution["blocked_reason"] == "login_required"
+
+
 def test_playwright_mcp_manifest_mode_is_explicitly_not_rehearsed(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
     plan = {

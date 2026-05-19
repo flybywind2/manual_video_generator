@@ -318,7 +318,27 @@ def _is_demonstration_mode(request: PipelineInput) -> bool:
 
 def _requires_login_before_mcp_rehearsal(request: PipelineInput, settings: Any) -> bool:
     login = _resolve_login_options(request, settings)
-    return _is_demonstration_mode(request) or str(login.get("mode") or "none").lower() in {"manual", "credentials"}
+    return (
+        _is_demonstration_mode(request)
+        or str(login.get("mode") or "none").lower() in {"manual", "credentials"}
+        or _has_login_or_auth_hint(request)
+    )
+
+
+def _has_login_or_auth_hint(request: PipelineInput) -> bool:
+    text = " ".join(
+        [
+            str(getattr(request, "target_url", "") or ""),
+            str(getattr(request, "request_text", "") or ""),
+            str(getattr(request, "completion_condition", "") or ""),
+        ]
+    ).lower()
+    return bool(
+        re.search(
+            r"(^|[/_.?&=#:\-\s])(login|log-in|signin|sign-in|sso|auth|authenticate|인증|로그인)([/_.?&=#:\-\s]|$)",
+            text,
+        )
+    )
 
 
 def _environment_terminal_details(environment: dict[str, str]) -> dict[str, Any]:
@@ -4256,7 +4276,7 @@ def _rehearsal_audit_status(rehearsal: dict[str, Any]) -> str:
     status = str(rehearsal.get("status", ""))
     if status.endswith("failed"):
         return "degraded"
-    if status in {"skipped", "manifest-only", "deferred-until-authenticated"}:
+    if status in {"skipped", "manifest-only", "deferred-until-authenticated", "blocked-login"}:
         return "skipped"
     return "ok"
 
@@ -4265,6 +4285,8 @@ def _rehearsal_degrade_reason(rehearsal: dict[str, Any]) -> str:
     status = str(rehearsal.get("status", ""))
     if status.endswith("failed"):
         return "playwright_mcp_live_failed"
+    if status == "blocked-login":
+        return "login_required"
     return ""
 
 
