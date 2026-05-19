@@ -2758,6 +2758,108 @@ def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_
     assert result["degrade_reason"] == "browser_recording_missing"
 
 
+def test_capture_with_playwright_can_attach_to_cdp_browser_context(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        def new_page(self):
+            events.append(("new_page",))
+            return FakePage()
+
+        def close(self):
+            events.append(("context_close",))
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def connect_over_cdp(self, endpoint):
+            events.append(("connect_over_cdp", endpoint))
+            return FakeBrowser()
+
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs))
+            raise AssertionError("CDP runner must not launch a new browser")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        browser_runner = "cdp_attach"
+        cdp_endpoint = "http://127.0.0.1:9222"
+        enable_browser_agent = False
+
+        class login:
+            mode = "none"
+            username_selector = ""
+            password_selector = ""
+            submit_selector = ""
+            success_selector = ""
+            username = ""
+            password = ""
+            manual_timeout_seconds = 120.0
+            credentials_timeout_seconds = 30.0
+
+    plan = {
+        "steps": [{"id": "step_intro", "title": "홈", "caption": "홈", "narration": "홈"}],
+        "actions": [{"id": "a1", "type": "capture_step", "step_id": "step_intro"}],
+    }
+    dirs = _make_dirs(tmp_path / "package")
+    request = PipelineInput(
+        request_text="CDP로 열린 브라우저 화면 확인",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈",
+    )
+
+    result = _capture_with_playwright(request, plan, dirs, Settings())
+
+    assert ("connect_over_cdp", "http://127.0.0.1:9222") in events
+    assert not any(event[0] == "launch" for event in events)
+    assert result["video"].exists()
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "browser_recording_missing"
+
+
 def test_raise_if_login_failed_aborts_capture_on_failed_login():
     auth_result = {
         "storage_state": None,

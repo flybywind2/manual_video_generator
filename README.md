@@ -460,6 +460,8 @@ MANUAL_AGENT_ENABLE_RERANKER
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE
 MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND
 MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH
+MANUAL_AGENT_BROWSER_RUNNER
+MANUAL_AGENT_CDP_ENDPOINT
 MANUAL_AGENT_ENABLE_BROWSER_AGENT
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS
 MANUAL_AGENT_LOGIN_MODE
@@ -570,6 +572,8 @@ MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.company.local
 ```
 
 처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`을 재사용합니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
+
+Playwright가 새 브라우저를 띄우는 방식이 사내 SSO/보안정책과 맞지 않으면 CDP attach 모드를 사용할 수 있습니다. 자세한 절차는 [docs/CDP_USAGE.md](docs/CDP_USAGE.md)를 참고하세요.
 
 터미널에서 파이프라인 구성요소별 진행 상황을 보려면 다음을 켭니다.
 

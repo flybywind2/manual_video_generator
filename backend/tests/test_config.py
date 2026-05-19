@@ -20,6 +20,8 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_BROWSER_USER_DATA_DIR=" in env_example
     assert "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=" in env_example
     assert "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=" in env_example
+    assert "MANUAL_AGENT_BROWSER_RUNNER=" in env_example
+    assert "MANUAL_AGENT_CDP_ENDPOINT=" in env_example
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -64,6 +66,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_BROWSER_USER_DATA_DIR=C:\\AppBundle\\manualgen\\browser-profile",
                 "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=*.corp.local",
                 "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.corp.local",
+                "MANUAL_AGENT_BROWSER_RUNNER=cdp_attach",
+                "MANUAL_AGENT_CDP_ENDPOINT=http://127.0.0.1:9222",
                 "MANUAL_AGENT_TTS_PROVIDER=melotts",
                 "MANUAL_AGENT_TTS_DEVICE=cpu",
                 "MANUAL_AGENT_TTS_SPEED=1.1",
@@ -115,6 +119,11 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.login.sso_profile_dir == "C:\\AppBundle\\manualgen\\browser-profile"
     assert settings.login.auth_server_allowlist == "*.corp.local"
     assert settings.login.auth_negotiate_delegate_allowlist == "*.corp.local"
+    assert settings.browser_runner == "cdp_attach"
+    assert settings.cdp_endpoint == "http://127.0.0.1:9222"
+    runtime_status = settings.safe_status()["runtime"]
+    assert runtime_status["browser_runner"] == "cdp_attach"
+    assert runtime_status["cdp_endpoint_set"] is True
     assert settings.login.credentials_configured is True
     assert settings.tts_provider == "melotts"
     assert settings.tts_device == "cpu"

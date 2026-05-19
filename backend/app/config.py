@@ -183,6 +183,8 @@ class AppSettings:
     playwright_mcp_mode: str
     playwright_mcp_command: str
     playwright_executable_path: str
+    browser_runner: str
+    cdp_endpoint: str
     enable_browser_agent: bool
     browser_agent_max_steps: int
     tts_provider: str
@@ -233,6 +235,8 @@ class AppSettings:
                 "playwright_mcp_mode": self.playwright_mcp_mode,
                 "playwright_mcp_command_set": bool(self.playwright_mcp_command),
                 "playwright_executable_path_set": bool(self.playwright_executable_path),
+                "browser_runner": self.browser_runner,
+                "cdp_endpoint_set": bool(self.cdp_endpoint),
                 "browser_channel": self.login.browser_channel,
                 "sso_profile_dir_set": bool(self.login.sso_profile_dir),
                 "enable_browser_agent": self.enable_browser_agent,
@@ -356,6 +360,8 @@ def load_settings(
         playwright_mcp_mode=_get(env, "PLAYWRIGHT_MCP_MODE", "manifest"),
         playwright_mcp_command=_get(env, "PLAYWRIGHT_MCP_COMMAND", "npx @playwright/mcp@latest --headless"),
         playwright_executable_path=_get(env, "PLAYWRIGHT_EXECUTABLE_PATH"),
+        browser_runner=_normalize_browser_runner(_get(env, "BROWSER_RUNNER", "playwright")),
+        cdp_endpoint=_get(env, "CDP_ENDPOINT", "http://127.0.0.1:9222"),
         enable_browser_agent=_get_bool(env, "ENABLE_BROWSER_AGENT", False),
         browser_agent_max_steps=_get_int(env, "BROWSER_AGENT_MAX_STEPS", 8),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
@@ -475,6 +481,13 @@ def _normalize_browser_channel(value: str) -> str:
     if normalized in {"msedge", "chrome", "chromium"}:
         return normalized
     return normalized
+
+
+def _normalize_browser_runner(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized in {"cdp", "cdp_attach", "attach"}:
+        return "cdp_attach"
+    return "playwright"
 
 
 def _split_csv(value: str) -> list[str]:

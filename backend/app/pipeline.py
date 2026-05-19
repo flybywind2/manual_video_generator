@@ -1611,11 +1611,19 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     with sync_playwright() as p:
         persistent_context = None
         browser = None
+        cdp_attached = False
         signal_context = None
         signal_page = None
         context = None
+        close_context = True
         try:
-            if login["mode"] == "sso_profile":
+            if _browser_runner_mode(settings) == "cdp_attach":
+                browser = p.chromium.connect_over_cdp(_cdp_endpoint(settings))
+                cdp_attached = True
+                context = _cdp_context(browser)
+                close_context = False
+                page = _first_context_page(context)
+            elif login["mode"] == "sso_profile":
                 context_options = _recording_context_options(dirs)
                 persistent_context = p.chromium.launch_persistent_context(
                     user_data_dir=_sso_profile_dir(login, settings),
@@ -1669,11 +1677,11 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
                 except Exception:
                     capture_result["storage_state"] = None
         finally:
-            if context is not None:
+            if context is not None and close_context:
                 context.close()
             if signal_context is not None:
                 signal_context.close()
-            if browser is not None:
+            if browser is not None and not cdp_attached:
                 browser.close()
 
     videos = sorted(dirs.raw_video.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
@@ -1765,6 +1773,32 @@ def _playwright_integrated_auth_args(settings: Any) -> list[str]:
     if delegate_allowlist:
         args.append(f"--auth-negotiate-delegate-allowlist={delegate_allowlist}")
     return args
+
+
+def _browser_runner_mode(settings: Any) -> str:
+    normalized = str(getattr(settings, "browser_runner", "playwright") or "playwright").strip().lower().replace("-", "_")
+    if normalized in {"cdp", "cdp_attach", "attach"}:
+        return "cdp_attach"
+    return "playwright"
+
+
+def _cdp_endpoint(settings: Any) -> str:
+    endpoint = str(getattr(settings, "cdp_endpoint", "") or "").strip()
+    return endpoint or "http://127.0.0.1:9222"
+
+
+def _cdp_context(browser: Any) -> Any:
+    contexts = list(getattr(browser, "contexts", []) or [])
+    if contexts:
+        return contexts[0]
+    return browser.new_context()
+
+
+def _first_context_page(context: Any) -> Any:
+    pages = list(getattr(context, "pages", []) or [])
+    if pages:
+        return pages[0]
+    return context.new_page()
 
 
 def _discover_playwright_chromium(browser_roots: list[Path] | None = None) -> Path | None:
