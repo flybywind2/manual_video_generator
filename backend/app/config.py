@@ -139,6 +139,10 @@ class LoginSettings:
     password: str
     manual_timeout_seconds: float
     credentials_timeout_seconds: float
+    sso_profile_dir: str
+    browser_channel: str
+    auth_server_allowlist: str
+    auth_negotiate_delegate_allowlist: str
 
     @property
     def credentials_configured(self) -> bool:
@@ -156,6 +160,10 @@ class LoginSettings:
             "credentials_configured": self.credentials_configured,
             "manual_timeout_seconds": self.manual_timeout_seconds,
             "credentials_timeout_seconds": self.credentials_timeout_seconds,
+            "sso_profile_dir_set": bool(self.sso_profile_dir),
+            "browser_channel": self.browser_channel,
+            "auth_server_allowlist_set": bool(self.auth_server_allowlist),
+            "auth_negotiate_delegate_allowlist_set": bool(self.auth_negotiate_delegate_allowlist),
         }
 
 
@@ -225,6 +233,8 @@ class AppSettings:
                 "playwright_mcp_mode": self.playwright_mcp_mode,
                 "playwright_mcp_command_set": bool(self.playwright_mcp_command),
                 "playwright_executable_path_set": bool(self.playwright_executable_path),
+                "browser_channel": self.login.browser_channel,
+                "sso_profile_dir_set": bool(self.login.sso_profile_dir),
                 "enable_browser_agent": self.enable_browser_agent,
                 "browser_agent_max_steps": self.browser_agent_max_steps,
                 "tts_provider": self.tts_provider,
@@ -326,6 +336,10 @@ def load_settings(
         password=_get(env, "LOGIN_PASSWORD"),
         manual_timeout_seconds=_get_float(env, "LOGIN_MANUAL_TIMEOUT_SECONDS", 120.0),
         credentials_timeout_seconds=_get_float(env, "LOGIN_CREDENTIALS_TIMEOUT_SECONDS", 30.0),
+        sso_profile_dir=_get(env, "BROWSER_USER_DATA_DIR", str(Path("runtime") / "browser-profile")),
+        browser_channel=_normalize_browser_channel(_get(env, "BROWSER_CHANNEL")),
+        auth_server_allowlist=_get(env, "AUTH_SERVER_ALLOWLIST"),
+        auth_negotiate_delegate_allowlist=_get(env, "AUTH_NEGOTIATE_DELEGATE_ALLOWLIST"),
     )
     return AppSettings(
         llm=llm,
@@ -447,9 +461,20 @@ def _get_int(env: Mapping[str, str], suffix: str, default: int) -> int:
 
 def _normalize_login_mode(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized in {"manual", "credentials", "none"}:
+    if normalized in {"manual", "credentials", "none", "sso_profile", "sso-profile", "ad_sso", "ad-sso"}:
+        if normalized in {"sso-profile", "ad_sso", "ad-sso"}:
+            return "sso_profile"
         return normalized
     return "none"
+
+
+def _normalize_browser_channel(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"", "none", "bundled"}:
+        return ""
+    if normalized in {"msedge", "chrome", "chromium"}:
+        return normalized
+    return normalized
 
 
 def _split_csv(value: str) -> list[str]:

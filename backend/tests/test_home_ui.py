@@ -30,6 +30,8 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "로그인 완료 버튼" in body
     assert "직접 로그인" in body
     assert ".env ID/password" in body
+    assert "AD SSO 프로필" in body
+    assert 'value="sso_profile"' in body
     assert 'name="login_password"' not in body
     assert 'data-action="add-input-value"' in body
     assert 'data-action="remove-input-value"' in body

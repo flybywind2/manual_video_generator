@@ -16,6 +16,10 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_SUPERTONIC_VOICE=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_LANG=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=" in env_example
+    assert "MANUAL_AGENT_BROWSER_CHANNEL=" in env_example
+    assert "MANUAL_AGENT_BROWSER_USER_DATA_DIR=" in env_example
+    assert "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=" in env_example
+    assert "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=" in env_example
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -56,6 +60,10 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_LOGIN_USERNAME=user01",
                 "MANUAL_AGENT_LOGIN_PASSWORD=plain-password",
                 "MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=90",
+                "MANUAL_AGENT_BROWSER_CHANNEL=msedge",
+                "MANUAL_AGENT_BROWSER_USER_DATA_DIR=C:\\AppBundle\\manualgen\\browser-profile",
+                "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=*.corp.local",
+                "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.corp.local",
                 "MANUAL_AGENT_TTS_PROVIDER=melotts",
                 "MANUAL_AGENT_TTS_DEVICE=cpu",
                 "MANUAL_AGENT_TTS_SPEED=1.1",
@@ -103,6 +111,10 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.login.username == "user01"
     assert settings.login.password == "plain-password"
     assert settings.login.manual_timeout_seconds == 90
+    assert settings.login.browser_channel == "msedge"
+    assert settings.login.sso_profile_dir == "C:\\AppBundle\\manualgen\\browser-profile"
+    assert settings.login.auth_server_allowlist == "*.corp.local"
+    assert settings.login.auth_negotiate_delegate_allowlist == "*.corp.local"
     assert settings.login.credentials_configured is True
     assert settings.tts_provider == "melotts"
     assert settings.tts_device == "cpu"

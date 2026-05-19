@@ -373,7 +373,7 @@ def _requires_login_before_mcp_rehearsal(request: PipelineInput, settings: Any) 
     login = _resolve_login_options(request, settings)
     return (
         _is_demonstration_mode(request)
-        or str(login.get("mode") or "none").lower() in {"manual", "credentials"}
+        or str(login.get("mode") or "none").lower() in {"manual", "credentials", "sso_profile"}
         or _has_login_or_auth_hint(request)
     )
 
@@ -1602,28 +1602,41 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     demonstration_mode = _is_demonstration_mode(request)
     if demonstration_mode:
         login = {**login, "mode": "none", "success_selector": ""}
-    launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual" or demonstration_mode)
+    interactive = login["mode"] in {"manual", "sso_profile"} or demonstration_mode
+    launch_kwargs = _playwright_launch_kwargs(
+        settings,
+        interactive=interactive,
+        use_browser_channel=login["mode"] == "sso_profile",
+    )
     with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_kwargs)
+        persistent_context = None
+        browser = None
         signal_context = None
         signal_page = None
         context = None
         try:
+            if login["mode"] == "sso_profile":
+                context_options = _recording_context_options(dirs)
+                persistent_context = p.chromium.launch_persistent_context(
+                    user_data_dir=_sso_profile_dir(login, settings),
+                    **{**launch_kwargs, **context_options},
+                )
+                context = persistent_context
+                page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
+            else:
+                browser = p.chromium.launch(**launch_kwargs)
             if login["mode"] == "manual" or demonstration_mode:
                 signal_context, signal_page = _open_signal_control_page(browser)
-            context_options: dict[str, Any] = {
-                "viewport": {"width": 1280, "height": 800},
-                "record_video_dir": str(dirs.raw_video),
-                "record_video_size": {"width": 1280, "height": 800},
-            }
+            context_options = _recording_context_options(dirs)
             auth_result = {"storage_state": None, "action_log": []}
             if login["mode"] == "credentials":
                 auth_result = _authenticate_before_recording(browser, request, login, settings=settings, package_dir=dirs.package)
                 _raise_if_login_failed(auth_result)
             if auth_result.get("storage_state"):
                 context_options["storage_state"] = auth_result["storage_state"]
-            context = browser.new_context(**context_options)
-            page = context.new_page()
+            if context is None:
+                context = browser.new_context(**context_options)
+                page = context.new_page()
             manual_authenticated = False
             if login["mode"] == "manual":
                 auth_result = _authenticate_recording_page(page, request, login, signal_page=signal_page)
@@ -1660,7 +1673,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
                 context.close()
             if signal_context is not None:
                 signal_context.close()
-            browser.close()
+            if browser is not None:
+                browser.close()
 
     videos = sorted(dirs.raw_video.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
     video_name = "direct_demonstration_source.webm" if demonstration_mode else "manual_video_agent_usage.webm"
@@ -1704,16 +1718,53 @@ def _playwright_launch_kwargs(
     browser_roots: list[Path] | None = None,
     *,
     interactive: bool = False,
+    use_browser_channel: bool = False,
 ) -> dict[str, Any]:
     launch_kwargs: dict[str, Any] = {"headless": not interactive}
     executable_path = str(getattr(settings, "playwright_executable_path", "") or "").strip()
+    channel = str(getattr(getattr(settings, "login", None), "browser_channel", "") or "").strip()
+    if use_browser_channel and channel and not executable_path:
+        launch_kwargs["channel"] = channel
     if executable_path:
         launch_kwargs["executable_path"] = executable_path
+    auth_args = _playwright_integrated_auth_args(settings) if use_browser_channel else []
+    if auth_args:
+        launch_kwargs["args"] = auth_args
+    if executable_path:
         return launch_kwargs
     discovered = _discover_playwright_chromium(browser_roots=browser_roots)
     if discovered:
         launch_kwargs["executable_path"] = str(discovered)
     return launch_kwargs
+
+
+def _recording_context_options(dirs: PipelineDirs) -> dict[str, Any]:
+    return {
+        "viewport": {"width": 1280, "height": 800},
+        "record_video_dir": str(dirs.raw_video),
+        "record_video_size": {"width": 1280, "height": 800},
+    }
+
+
+def _sso_profile_dir(login: dict[str, Any], settings: Any) -> str:
+    configured = str(login.get("sso_profile_dir") or "").strip()
+    profile_dir = Path(configured) if configured else Path(str(getattr(settings, "output_dir", "output"))) / "browser-profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return str(profile_dir.resolve())
+
+
+def _playwright_integrated_auth_args(settings: Any) -> list[str]:
+    login_settings = getattr(settings, "login", None)
+    if login_settings is None:
+        return []
+    args = []
+    allowlist = str(getattr(login_settings, "auth_server_allowlist", "") or "").strip()
+    delegate_allowlist = str(getattr(login_settings, "auth_negotiate_delegate_allowlist", "") or "").strip()
+    if allowlist:
+        args.append(f"--auth-server-allowlist={allowlist}")
+    if delegate_allowlist:
+        args.append(f"--auth-negotiate-delegate-allowlist={delegate_allowlist}")
+    return args
 
 
 def _discover_playwright_chromium(browser_roots: list[Path] | None = None) -> Path | None:
@@ -1794,8 +1845,8 @@ def _prepare_capture_page(page: Any, target_url: str) -> None:
 
 def _resolve_login_options(request: PipelineInput, settings: Any) -> dict[str, Any]:
     configured = getattr(settings, "login", None)
-    requested_mode = str(request.login_mode or "").strip().lower()
-    mode = requested_mode if requested_mode in {"none", "manual", "credentials"} else getattr(configured, "mode", "none")
+    requested_mode = _normalize_request_login_mode(request.login_mode)
+    mode = requested_mode if requested_mode in {"none", "manual", "credentials", "sso_profile"} else getattr(configured, "mode", "none")
     success_selector = str(request.login_success_selector or getattr(configured, "success_selector", "") or "").strip()
     return {
         "mode": mode,
@@ -1807,7 +1858,15 @@ def _resolve_login_options(request: PipelineInput, settings: Any) -> dict[str, A
         "password": str(getattr(configured, "password", "") or ""),
         "manual_timeout_ms": int(float(getattr(configured, "manual_timeout_seconds", 120.0) or 120.0) * 1000),
         "credentials_timeout_ms": int(float(getattr(configured, "credentials_timeout_seconds", 30.0) or 30.0) * 1000),
+        "sso_profile_dir": str(getattr(configured, "sso_profile_dir", "") or ""),
     }
+
+
+def _normalize_request_login_mode(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized in {"ad_sso", "sso_profile"}:
+        return "sso_profile"
+    return normalized
 
 
 def _authenticate_before_recording(

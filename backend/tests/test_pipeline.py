@@ -838,6 +838,28 @@ def test_playwright_launch_kwargs_disables_headless_for_manual_login():
     assert launch_kwargs == {"headless": False}
 
 
+def test_playwright_launch_kwargs_uses_browser_channel_only_when_requested():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_BROWSER_CHANNEL": "msedge",
+            "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST": "*.corp.local",
+            "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST": "*.corp.local",
+        }
+    )
+
+    normal_kwargs = _playwright_launch_kwargs(settings, browser_roots=[])
+    sso_kwargs = _playwright_launch_kwargs(settings, interactive=True, use_browser_channel=True, browser_roots=[])
+
+    assert "channel" not in normal_kwargs
+    assert "args" not in normal_kwargs
+    assert sso_kwargs["headless"] is False
+    assert sso_kwargs["channel"] == "msedge"
+    assert sso_kwargs["args"] == [
+        "--auth-server-allowlist=*.corp.local",
+        "--auth-negotiate-delegate-allowlist=*.corp.local",
+    ]
+
+
 def test_playwright_launch_kwargs_uses_configured_executable_path(tmp_path):
     chrome = tmp_path / "chrome.exe"
     chrome.write_text("", encoding="utf-8")
@@ -1315,6 +1337,27 @@ def test_resolve_login_options_uses_env_mode_when_request_mode_is_empty():
     login = _resolve_login_options(request, settings)
 
     assert login["mode"] == "manual"
+
+
+def test_resolve_login_options_supports_ad_sso_profile_alias():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LOGIN_MODE": "none",
+            "MANUAL_AGENT_BROWSER_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\browser-profile",
+        }
+    )
+    request = PipelineInput(
+        request_text="SSO로 접속 후 메뉴얼",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="홈 화면",
+        login_mode="ad-sso",
+    )
+
+    login = _resolve_login_options(request, settings)
+
+    assert login["mode"] == "sso_profile"
+    assert login["sso_profile_dir"] == "C:\\AppBundle\\manualgen\\browser-profile"
 
 
 def test_handle_login_uses_env_credentials_and_redacts_action_log():
