@@ -1605,32 +1605,38 @@ def test_manual_capture_reuses_logged_in_recording_context(tmp_path, monkeypatch
             events.append(("locator_click",))
 
     class FakePage:
+        def __init__(self, kind="recorded"):
+            self.kind = kind
+
         def goto(self, url, wait_until):
-            events.append(("goto", url, wait_until))
+            events.append((self.kind, "goto", url, wait_until))
 
         def wait_for_load_state(self, state, timeout):
-            events.append(("wait_for_load_state", state, timeout))
+            events.append((self.kind, "wait_for_load_state", state, timeout))
 
         def wait_for_function(self, expression, *args, **kwargs):
-            events.append(("wait_for_function", "manualLoginCompleted" in expression, args, kwargs))
+            events.append((self.kind, "wait_for_function", "manualLoginCompleted" in expression, args, kwargs))
 
         def add_style_tag(self, content):
-            events.append(("add_style_tag",))
+            events.append((self.kind, "add_style_tag"))
 
         def add_init_script(self, script):
-            events.append(("add_init_script",))
+            events.append((self.kind, "add_init_script", "로그인 완료" in script, "시연 완료" in script))
+
+        def expose_function(self, name, callback):
+            events.append((self.kind, "expose_function", name))
 
         def evaluate(self, script, *args):
-            events.append(("evaluate", args))
+            events.append((self.kind, "evaluate", args))
             if "return { completed" in script:
                 return {"completed": True, "successSelectorMatched": False}
             return None
 
         def wait_for_timeout(self, timeout):
-            events.append(("wait_for_timeout", timeout))
+            events.append((self.kind, "wait_for_timeout", timeout))
 
         def screenshot(self, path, full_page):
-            events.append(("screenshot", Path(path).name, full_page))
+            events.append((self.kind, "screenshot", Path(path).name, full_page))
             Path(path).write_bytes(b"png")
 
         def get_by_role(self, *args, **kwargs):
@@ -1639,17 +1645,18 @@ def test_manual_capture_reuses_logged_in_recording_context(tmp_path, monkeypatch
     class FakeContext:
         def __init__(self, options):
             self.options = options
+            self.kind = "recorded" if options.get("record_video_dir") else "control"
 
         def new_page(self):
-            events.append(("new_page",))
-            return FakePage()
+            events.append((self.kind, "new_page"))
+            return FakePage(self.kind)
 
         def storage_state(self):
-            events.append(("storage_state",))
+            events.append((self.kind, "storage_state"))
             return {"cookies": [{"name": "sid", "value": "manual"}], "origins": []}
 
         def close(self):
-            events.append(("context_close",))
+            events.append((self.kind, "context_close"))
             raw_dir = self.options.get("record_video_dir")
             if raw_dir:
                 Path(raw_dir).mkdir(parents=True, exist_ok=True)
@@ -1713,12 +1720,16 @@ def test_manual_capture_reuses_logged_in_recording_context(tmp_path, monkeypatch
 
     result = _capture_with_playwright(request, plan, dirs, Settings())
 
-    assert len(context_options) == 1
-    assert "record_video_dir" in context_options[0]
+    assert len(context_options) == 2
+    assert "record_video_dir" not in context_options[0]
+    assert "record_video_dir" in context_options[1]
     assert result["action_log"][0]["type"] == "login"
     assert result["action_log"][0]["status"] == "ok"
-    assert ("storage_state",) not in events
-    assert events.count(("new_page",)) == 1
+    assert not any(event[1:] == ("storage_state",) for event in events)
+    assert events.count(("recorded", "new_page")) == 1
+    assert events.count(("control", "new_page")) == 1
+    assert any(event == ("control", "add_init_script", True, False) for event in events)
+    assert not any(event == ("recorded", "add_init_script", True, False) for event in events)
     assert result["video"].exists()
 
 
@@ -1728,51 +1739,56 @@ def test_demonstration_capture_waits_for_user_signal_instead_of_browser_agent(tm
     events = []
 
     class FakePage:
+        def __init__(self, kind="recorded"):
+            self.kind = kind
+
         def goto(self, url, wait_until):
-            events.append(("goto", url, wait_until))
+            events.append((self.kind, "goto", url, wait_until))
 
         def wait_for_load_state(self, state, timeout):
-            events.append(("wait_for_load_state", state, timeout))
+            events.append((self.kind, "wait_for_load_state", state, timeout))
 
         def wait_for_function(self, expression, timeout):
-            events.append(("wait_for_function", expression, timeout))
+            events.append((self.kind, "wait_for_function", expression, timeout))
 
         def add_style_tag(self, content):
-            events.append(("add_style_tag",))
+            events.append((self.kind, "add_style_tag"))
 
         def add_init_script(self, script):
-            events.append(("add_init_script", "시연 완료" in script))
+            events.append((self.kind, "add_init_script", "로그인 완료" in script, "시연 완료" in script))
 
         def expose_function(self, name, callback):
-            events.append(("expose_function", name))
+            events.append((self.kind, "expose_function", name))
             callback()
 
         def evaluate(self, script, *args):
             if "__manualDemonstrationEvents" in script and "slice()" in script:
-                events.append(("read_demo_events",))
+                events.append((self.kind, "read_demo_events"))
                 return [{"type": "click", "label": "전송", "text": "전송"}]
             if "manualDemonstrationCompleted" in script:
-                events.append(("wait_demo_signal", args))
+                events.append((self.kind, "wait_demo_signal", args))
                 return {"completed": True}
-            events.append(("evaluate", args))
+            events.append((self.kind, "evaluate", args))
             return None
 
         def wait_for_timeout(self, timeout):
-            events.append(("wait_for_timeout", timeout))
+            events.append((self.kind, "wait_for_timeout", timeout))
 
         def screenshot(self, path, full_page):
-            events.append(("screenshot", Path(path).name, full_page))
+            events.append((self.kind, "screenshot", Path(path).name, full_page))
             Path(path).write_bytes(b"png")
 
         def click(self, selector):
-            events.append(("plan_click", selector))
+            events.append((self.kind, "plan_click", selector))
 
     class FakeContext:
         def __init__(self, options):
             self.options = options
+            self.kind = "recorded" if options.get("record_video_dir") else "control"
 
         def new_page(self):
-            return FakePage()
+            events.append((self.kind, "new_page"))
+            return FakePage(self.kind)
 
         def close(self):
             raw_dir = self.options.get("record_video_dir")
@@ -1838,8 +1854,10 @@ def test_demonstration_capture_waits_for_user_signal_instead_of_browser_agent(tm
     result = _capture_with_playwright(request, plan, dirs, Settings())
 
     assert ("launch", False) in events
-    assert any(item == ("expose_function", "__manualDemonstrationSignalFromPage") for item in events)
-    assert ("plan_click", "button.search") not in events
+    assert any(item == ("control", "expose_function", "__manualDemonstrationSignalFromPage") for item in events)
+    assert not any(item == ("recorded", "add_init_script", False, True) for item in events)
+    assert any(item == ("control", "add_init_script", False, True) for item in events)
+    assert ("recorded", "plan_click", "button.search") not in events
     assert result["action_log"][0]["type"] == "demonstration"
     assert result["action_log"][0]["mode"] == "demonstration"
     assert result["action_log"][0]["event_count"] == 1

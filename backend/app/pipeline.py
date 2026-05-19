@@ -1317,47 +1317,57 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     launch_kwargs = _playwright_launch_kwargs(settings, interactive=login["mode"] == "manual" or demonstration_mode)
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_kwargs)
-        context_options: dict[str, Any] = {
-            "viewport": {"width": 1280, "height": 800},
-            "record_video_dir": str(dirs.raw_video),
-            "record_video_size": {"width": 1280, "height": 800},
-        }
-        auth_result = {"storage_state": None, "action_log": []}
-        if login["mode"] == "credentials":
-            auth_result = _authenticate_before_recording(browser, request, login)
-            _raise_if_login_failed(auth_result)
-        if auth_result.get("storage_state"):
-            context_options["storage_state"] = auth_result["storage_state"]
-        context = browser.new_context(**context_options)
-        page = context.new_page()
-        manual_authenticated = False
-        if login["mode"] == "manual":
-            auth_result = _authenticate_recording_page(page, request, login)
-            _raise_if_login_failed(auth_result)
-            manual_authenticated = True
-        actions = plan.get("actions", [])
-        if demonstration_mode:
-            if not manual_authenticated:
-                _prepare_capture_page(page, request.target_url)
-            capture_result = _execute_demonstration_capture(page, request, plan, dirs.captures, settings)
-        elif getattr(settings, "enable_browser_agent", False):
-            if not manual_authenticated:
-                _prepare_capture_page(page, request.target_url)
-            capture_result = _execute_browser_agent_actions(page, request, plan, dirs.captures, settings)
-        else:
-            if not manual_authenticated and (not actions or actions[0].get("type") != "navigate"):
-                _prepare_capture_page(page, request.target_url)
-            capture_result = _execute_capture_actions(page, plan, dirs.captures, skip_initial_navigate=manual_authenticated)
-        capture_result["action_log"] = [*auth_result.get("action_log", []), *capture_result.get("action_log", [])]
-        captures = capture_result["captures"]
-        if not captures:
-            first_step = _first_plan_step(plan)
-            _apply_step_overlay(page, first_step)
-            page.wait_for_timeout(900)
-            captures.append(_screenshot(page, dirs.captures, _step_capture_name(first_step, set())))
-        final_frame = _screenshot(page, dirs.package, "final_frame.png")
-        context.close()
-        browser.close()
+        signal_context = None
+        signal_page = None
+        context = None
+        try:
+            if login["mode"] == "manual" or demonstration_mode:
+                signal_context, signal_page = _open_signal_control_page(browser)
+            context_options: dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 800},
+                "record_video_dir": str(dirs.raw_video),
+                "record_video_size": {"width": 1280, "height": 800},
+            }
+            auth_result = {"storage_state": None, "action_log": []}
+            if login["mode"] == "credentials":
+                auth_result = _authenticate_before_recording(browser, request, login)
+                _raise_if_login_failed(auth_result)
+            if auth_result.get("storage_state"):
+                context_options["storage_state"] = auth_result["storage_state"]
+            context = browser.new_context(**context_options)
+            page = context.new_page()
+            manual_authenticated = False
+            if login["mode"] == "manual":
+                auth_result = _authenticate_recording_page(page, request, login, signal_page=signal_page)
+                _raise_if_login_failed(auth_result)
+                manual_authenticated = True
+            actions = plan.get("actions", [])
+            if demonstration_mode:
+                if not manual_authenticated:
+                    _prepare_capture_page(page, request.target_url)
+                capture_result = _execute_demonstration_capture(page, request, plan, dirs.captures, settings, signal_page=signal_page)
+            elif getattr(settings, "enable_browser_agent", False):
+                if not manual_authenticated:
+                    _prepare_capture_page(page, request.target_url)
+                capture_result = _execute_browser_agent_actions(page, request, plan, dirs.captures, settings)
+            else:
+                if not manual_authenticated and (not actions or actions[0].get("type") != "navigate"):
+                    _prepare_capture_page(page, request.target_url)
+                capture_result = _execute_capture_actions(page, plan, dirs.captures, skip_initial_navigate=manual_authenticated)
+            capture_result["action_log"] = [*auth_result.get("action_log", []), *capture_result.get("action_log", [])]
+            captures = capture_result["captures"]
+            if not captures:
+                first_step = _first_plan_step(plan)
+                _apply_step_overlay(page, first_step)
+                page.wait_for_timeout(900)
+                captures.append(_screenshot(page, dirs.captures, _step_capture_name(first_step, set())))
+            final_frame = _screenshot(page, dirs.package, "final_frame.png")
+        finally:
+            if context is not None:
+                context.close()
+            if signal_context is not None:
+                signal_context.close()
+            browser.close()
 
     videos = sorted(dirs.raw_video.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
     video = dirs.package / "manual_video_agent_usage.webm"
@@ -1434,6 +1444,34 @@ def _default_playwright_browser_roots() -> list[Path]:
     return roots
 
 
+def _open_signal_control_page(browser: Any) -> tuple[Any, Any]:
+    context = browser.new_context(viewport={"width": 420, "height": 260})
+    page = context.new_page()
+    html = """<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>Manual Video Agent Control</title>
+  <style>
+    body{margin:0;padding:22px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8fbff;color:#111827}
+    h1{margin:0 0 10px;font-size:18px;line-height:1.3}
+    p{margin:0;color:#465161;font-size:13px;line-height:1.55}
+  </style>
+</head>
+<body>
+  <h1>Manual Video Agent Control</h1>
+  <p>대상 시스템 조작은 녹화 브라우저에서 진행하고, 로그인/시연 완료 신호만 이 창에서 누릅니다.</p>
+</body>
+</html>"""
+    set_content = getattr(page, "set_content", None)
+    if callable(set_content):
+        try:
+            set_content(html)
+        except Exception:
+            pass
+    return context, page
+
+
 def _prepare_capture_page(page: Any, target_url: str) -> None:
     page.goto(target_url, wait_until="load")
     try:
@@ -1503,11 +1541,16 @@ def _authenticate_before_recording(browser: Any, request: PipelineInput, login: 
     return {"storage_state": storage_state, "action_log": action_log}
 
 
-def _authenticate_recording_page(page: Any, request: PipelineInput, login: dict[str, Any]) -> dict[str, Any]:
+def _authenticate_recording_page(
+    page: Any,
+    request: PipelineInput,
+    login: dict[str, Any],
+    signal_page: Any | None = None,
+) -> dict[str, Any]:
     action_log: list[dict[str, Any]] = []
     try:
         _prepare_capture_page(page, request.target_url)
-        action_log.append(_handle_login(page, login))
+        action_log.append(_handle_login(page, login, signal_page=signal_page))
     except Exception as exc:  # noqa: BLE001 - caller records the failure and aborts capture.
         action_log.append(
             {
@@ -1639,6 +1682,7 @@ def _execute_demonstration_capture(
     plan: dict[str, Any],
     capture_dir: Path,
     settings: Any,
+    signal_page: Any | None = None,
 ) -> dict[str, Any]:
     used_names: set[str] = set()
     captures: list[Path] = []
@@ -1656,13 +1700,14 @@ def _execute_demonstration_capture(
     signal_state = _ManualLoginSignalState()
     timeout_ms = int(float(getattr(settings, "demonstration_timeout_seconds", 600.0) or 600.0) * 1000)
     action_log: list[dict[str, Any]] = []
+    signal_target = signal_page or page
     try:
         _install_demonstration_recorder(page)
-        signal_token = _install_demonstration_signal(page, signal_state=signal_state)
+        signal_token = _install_demonstration_signal(signal_target, signal_state=signal_state)
         _clear_step_caption_overlay(page)
         completion_signal = _wait_for_demonstration_completion(page, timeout_ms, signal_state, signal_token)
         events = _read_demonstration_events(page)
-        _remove_demonstration_signal(page)
+        _remove_demonstration_signal(signal_target)
         captures.append(_screenshot(page, capture_dir, _step_capture_name(step, used_names)))
         action_log.append(
             {
@@ -2026,10 +2071,10 @@ def _action_text_candidates(action: dict[str, Any]) -> list[str]:
     return [value] if value else []
 
 
-def _handle_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+def _handle_login(page: Any, login: dict[str, Any], signal_page: Any | None = None) -> dict[str, Any]:
     mode = str(login.get("mode") or "none")
     if mode == "manual":
-        return _wait_for_manual_login(page, login)
+        return _wait_for_manual_login(page, login, signal_page=signal_page)
     if mode == "credentials":
         return _submit_login_credentials(page, login)
     return {"type": "login", "mode": mode, "status": "skipped"}
@@ -2137,6 +2182,11 @@ def _install_demonstration_signal(
       const runId = __MANUAL_DEMONSTRATION_RUN_ID__;
       const completedRunKey = '__manualDemonstrationCompletedRunId';
       const legacyCompletedKey = '__manualDemonstrationCompleted';
+      try {
+        if (typeof window.__manualLoginCleanup === 'function') window.__manualLoginCleanup();
+        const loginButton = document.querySelector('[data-manual-login-signal="true"]');
+        if (loginButton) loginButton.remove();
+      } catch {}
       const readStoredCompletion = () => {
         try { return window.sessionStorage.getItem(completedRunKey) === runId; } catch { return false; }
       };
@@ -2286,10 +2336,11 @@ def _remove_demonstration_signal(page: Any) -> None:
         pass
 
 
-def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
+def _wait_for_manual_login(page: Any, login: dict[str, Any], signal_page: Any | None = None) -> dict[str, Any]:
     success_selector = str(login.get("success_selector") or "").strip()
     timeout_ms = int(login.get("manual_timeout_ms") or 120000)
     signal_state = _ManualLoginSignalState()
+    signal_target = signal_page or page
     log = {
         "type": "login",
         "mode": "manual",
@@ -2298,9 +2349,9 @@ def _wait_for_manual_login(page: Any, login: dict[str, Any]) -> dict[str, Any]:
         "signal_button_enabled": True,
     }
     try:
-        _install_manual_login_signal(page, signal_state=signal_state)
+        _install_manual_login_signal(signal_target, signal_state=signal_state)
         log["completion_signal"] = _wait_for_manual_login_completion(page, success_selector, timeout_ms, signal_state)
-        _remove_manual_login_signal(page)
+        _remove_manual_login_signal(signal_target)
     except Exception as exc:  # noqa: BLE001 - keep the package inspectable when manual login times out.
         log["status"] = "failed"
         log["error"] = f"{type(exc).__name__}: {exc}"
@@ -2324,12 +2375,17 @@ def _install_manual_login_signal(page: Any, signal_state: _ManualLoginSignalStat
         pass
     script = """
     (() => {
+      const disabledKey = '__manualLoginSignalDisabled';
       const readStoredCompletion = () => {
         try { return window.sessionStorage.getItem('__manualLoginCompleted') === 'true'; } catch { return false; }
+      };
+      const readDisabled = () => {
+        try { return window.sessionStorage.getItem(disabledKey) === 'true'; } catch { return false; }
       };
       window.__manualLoginCompleted = window.__manualLoginCompleted === true || readStoredCompletion();
       const selector = '[data-manual-login-signal="true"]';
       window.__manualLoginCleanup = () => {
+        try { window.sessionStorage.setItem(disabledKey, 'true'); } catch {}
         const button = document.querySelector(selector);
         if (button) button.remove();
         if (window.__manualLoginSignalObserver) {
@@ -2360,6 +2416,11 @@ def _install_manual_login_signal(page: Any, signal_state: _ManualLoginSignalStat
         window.setTimeout(window.__manualLoginCleanup, 120);
       };
       const install = () => {
+        if (readDisabled()) {
+          const disabledButton = document.querySelector(selector);
+          if (disabledButton) disabledButton.remove();
+          return false;
+        }
         if (!document.body) return false;
         let button = document.querySelector(selector);
         if (!button) {
