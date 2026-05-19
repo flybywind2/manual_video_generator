@@ -69,6 +69,7 @@ class ArtifactPaths(BaseModel):
     video_render_metadata: Path | None = None
     skills_metadata: Path | None = None
     opencode_metadata: Path | None = None
+    selector_trace: Path | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -972,6 +973,7 @@ def rerender_pipeline_package(
         },
     )
 
+    selector_trace_path = _write_selector_trace(dirs.package, _capture_action_entries_from_artifact(result.artifacts.capture_action_log))
     artifacts = ArtifactPaths(
         html_preview=html_path,
         markdown_manual=result.artifacts.markdown_manual,
@@ -985,6 +987,7 @@ def rerender_pipeline_package(
         input_extraction=result.artifacts.input_extraction,
         final_frame=result.artifacts.final_frame,
         capture_action_log=result.artifacts.capture_action_log,
+        selector_trace=selector_trace_path,
         subtitles=subtitles_path,
         media_plan=media_plan_path,
         tts_audio=tts_result.audio_paths,
@@ -1397,6 +1400,7 @@ def _complete_pipeline_execution(
         },
     )
 
+    selector_trace_path = _write_selector_trace(dirs.package, capture_result.get("action_log", []))
     manifest_path = dirs.package / "package_manifest.json"
     artifacts = ArtifactPaths(
         html_preview=html_path,
@@ -1411,6 +1415,7 @@ def _complete_pipeline_execution(
         input_extraction=dirs.package / "input_extraction.json",
         final_frame=capture_result.get("final_frame"),
         capture_action_log=capture_result.get("action_log_path"),
+        selector_trace=selector_trace_path,
         subtitles=subtitles_path,
         media_plan=media_plan_path,
         tts_audio=tts_result.audio_paths,
@@ -1497,6 +1502,7 @@ def artifact_response(result: PipelineResult) -> dict[str, Any]:
             "package_manifest_url": f"{rel_base}/package_manifest.json",
             "audit_log_url": f"{rel_base}/audit_log.jsonl",
             "capture_action_log_url": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
+            "selector_trace_url": f"{rel_base}/selector_trace.json" if result.artifacts.selector_trace else None,
             "subtitles_url": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
             "media_plan_url": f"{rel_base}/media_plan.json"
             if result.artifacts.media_plan and result.artifacts.media_plan.exists()
@@ -1577,6 +1583,7 @@ def _supporting_artifact_urls(result: PipelineResult, rel_base: str) -> dict[str
         "audit_log": f"{rel_base}/audit_log.jsonl",
         "artifact_edit_log": f"{rel_base}/artifact_edit_log.jsonl" if artifact_edit_log.exists() else None,
         "capture_action_log": f"{rel_base}/capture_action_log.json" if result.artifacts.capture_action_log else None,
+        "selector_trace": f"{rel_base}/selector_trace.json" if result.artifacts.selector_trace else None,
         "subtitles": f"{rel_base}/subtitles.vtt" if result.artifacts.subtitles else None,
         "media_plan": f"{rel_base}/media_plan.json" if result.artifacts.media_plan and result.artifacts.media_plan.exists() else None,
         "tts_metadata": f"{rel_base}/tts/tts_metadata.json" if result.artifacts.tts_metadata else None,
@@ -1627,6 +1634,7 @@ def _pipeline_result_from_manifest(manifest_path: Path) -> PipelineResult:
             input_extraction=Path(artifacts["input_extraction"]),
             final_frame=Path(artifacts["final_frame"]) if artifacts.get("final_frame") else None,
             capture_action_log=Path(artifacts["capture_action_log"]) if artifacts.get("capture_action_log") else None,
+            selector_trace=Path(artifacts["selector_trace"]) if artifacts.get("selector_trace") else None,
             subtitles=Path(artifacts["subtitles"]) if artifacts.get("subtitles") else None,
             media_plan=media_plan if media_plan.exists() else None,
             tts_audio=[Path(path) for path in artifacts.get("tts_audio", [])],
@@ -2138,6 +2146,8 @@ def _execute_capture_actions(
                         page.wait_for_timeout(500)
             elif action_type == "fill":
                 selector = str(action.get("selector") or "")
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "action.selector"
                 if not selector:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_selector"
@@ -2147,6 +2157,8 @@ def _execute_capture_actions(
                     page.wait_for_timeout(300)
             elif action_type == "fill_by_label":
                 label = str(action.get("label") or action.get("name") or "")
+                log_entry["label"] = label
+                log_entry["selector_candidates"] = [_input_selector_for_name(candidate) for candidate in _semantic_label_candidates(label)]
                 if not label:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_label"
@@ -2154,9 +2166,15 @@ def _execute_capture_actions(
                     _apply_step_overlay(page, step, action)
                     method = _fill_by_label(page, label, str(action.get("value") or ""))
                     log_entry["method"] = method
+                    selector = _selector_from_action_method(method)
+                    if selector:
+                        log_entry["selector"] = selector
+                        log_entry["selector_source"] = "resolved_method"
                     page.wait_for_timeout(300)
             elif action_type == "click":
                 selector = str(action.get("selector") or "")
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "action.selector"
                 if not selector:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_selector"
@@ -2166,6 +2184,7 @@ def _execute_capture_actions(
                     page.wait_for_timeout(700)
             elif action_type == "click_by_text":
                 texts = _action_text_candidates(action)
+                log_entry["texts"] = texts
                 if not texts:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_text"
@@ -2173,10 +2192,17 @@ def _execute_capture_actions(
                     _apply_step_overlay(page, step, action)
                     method = _click_by_text(page, texts)
                     log_entry["method"] = method
+                    selector = _selector_from_action_method(method)
+                    if selector:
+                        log_entry["selector"] = selector
+                        log_entry["selector_source"] = "resolved_method"
                     page.wait_for_timeout(700)
             elif action_type == "press":
                 selector = str(action.get("selector") or "")
                 key = str(action.get("key") or "Enter")
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "action.selector"
+                log_entry["key"] = key
                 if not selector:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_selector"
@@ -2186,6 +2212,8 @@ def _execute_capture_actions(
                     page.wait_for_timeout(500)
             elif action_type == "wait_for_selector":
                 selector = str(action.get("selector") or "")
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "action.selector"
                 if not selector:
                     log_entry["status"] = "skipped"
                     log_entry["reason"] = "missing_selector"
@@ -2645,6 +2673,72 @@ def _write_capture_action_log(capture_result: dict[str, Any]) -> None:
     _write_json(Path(path), payload)
 
 
+def _write_selector_trace(package_dir: Path, action_log: list[dict[str, Any]]) -> Path:
+    selectors: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(action_log):
+        if not isinstance(entry, dict):
+            continue
+        base = {
+            "entry_index": index,
+            "action_id": str(entry.get("action_id") or ""),
+            "type": str(entry.get("type") or ""),
+            "step_id": str(entry.get("step_id") or ""),
+            "status": str(entry.get("status") or ""),
+            "label": str(entry.get("label") or entry.get("text") or ""),
+        }
+        for selector, source in _selector_values_from_log_entry(entry):
+            key = (base["action_id"], selector)
+            if key in seen:
+                continue
+            seen.add(key)
+            selectors.append({**base, "selector": selector, "source": source})
+    path = package_dir / "selector_trace.json"
+    _write_json(
+        path,
+        {
+            "status": "completed",
+            "selector_count": len(selectors),
+            "selectors": redact_sensitive(selectors),
+        },
+    )
+    return path
+
+
+def _capture_action_entries_from_artifact(path: Path | None) -> list[dict[str, Any]]:
+    if not path or not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _selector_values_from_log_entry(entry: dict[str, Any]) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    selector = str(entry.get("selector") or "").strip()
+    if selector:
+        values.append((selector, str(entry.get("selector_source") or "selector")))
+    for selector in entry.get("selector_candidates") or []:
+        selector_text = str(selector or "").strip()
+        if selector_text:
+            values.append((selector_text, "selector_candidates"))
+    element = entry.get("element")
+    if isinstance(element, dict):
+        selector_text = str(element.get("selector") or "").strip()
+        if selector_text:
+            values.append((selector_text, "element.selector"))
+        for selector in element.get("selector_candidates") or []:
+            selector_text = str(selector or "").strip()
+            if selector_text:
+                values.append((selector_text, "element.selector_candidates"))
+    return values
+
+
 def _execute_browser_agent_actions(
     page: Any,
     request: PipelineInput,
@@ -2799,10 +2893,25 @@ def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
             const id = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
             return (id?.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '').trim();
           };
+          const cssEscape = (value) => {
+            try { return CSS.escape(String(value)); } catch { return String(value).replace(/"/g, '\\"'); }
+          };
+          const selectorFor = (el) => {
+            if (!el || !el.tagName) return '';
+            if (el.id) return `#${cssEscape(el.id)}`;
+            const testId = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-action');
+            if (testId) return `[${el.getAttribute('data-testid') ? 'data-testid' : el.getAttribute('data-test') ? 'data-test' : 'data-action'}="${cssEscape(testId)}"]`;
+            const name = el.getAttribute('name');
+            if (name) return `${el.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
+            const aria = el.getAttribute('aria-label');
+            if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
+            return el.tagName.toLowerCase();
+          };
           const fields = Array.from(document.querySelectorAll('input, textarea, select'))
             .filter(visible)
             .slice(0, 40)
             .map((el) => ({
+              selector: selectorFor(el),
               label: labelFor(el),
               name: el.name || '',
               placeholder: el.getAttribute('placeholder') || '',
@@ -2813,6 +2922,7 @@ def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
             .filter(visible)
             .slice(0, 60)
             .map((el) => ({
+              selector: selectorFor(el),
               text: textOf(el).slice(0, 120),
               role: el.getAttribute('role') || el.tagName.toLowerCase(),
               href: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') || '' : '',
@@ -2918,14 +3028,27 @@ def _execute_single_browser_agent_action(
     }
     try:
         if action_type == "fill_by_label":
+            log_entry["label"] = str(action.get("label") or "")
+            log_entry["selector_candidates"] = [
+                _input_selector_for_name(candidate) for candidate in _semantic_label_candidates(str(action.get("label") or ""))
+            ]
             _apply_step_overlay(page, step, action)
             method = _fill_by_label(page, str(action.get("label") or ""), str(action.get("value") or ""))
             log_entry["method"] = method
+            selector = _selector_from_action_method(method)
+            if selector:
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "resolved_method"
             page.wait_for_timeout(300)
         elif action_type == "click_by_text":
+            log_entry["texts"] = _action_text_candidates(action)
             _apply_step_overlay(page, step, action)
             method = _click_by_text(page, _action_text_candidates(action))
             log_entry["method"] = method
+            selector = _selector_from_action_method(method)
+            if selector:
+                log_entry["selector"] = selector
+                log_entry["selector_source"] = "resolved_method"
             page.wait_for_timeout(700)
         elif action_type == "press_key":
             _apply_step_overlay(page, step, action)
@@ -3051,6 +3174,15 @@ def _input_selector_for_name(name: str) -> str:
     return f'input[name="{escaped}"], textarea[name="{escaped}"], select[name="{escaped}"]'
 
 
+def _selector_from_action_method(method: str) -> str:
+    text = str(method or "")
+    if text.startswith("locator:"):
+        return text.removeprefix("locator:")
+    if text.startswith(("get_by_label:", "get_by_placeholder:", "get_by_role:", "get_by_text:")):
+        return f"semantic:{text}"
+    return ""
+
+
 def _action_text_candidates(action: dict[str, Any]) -> list[str]:
     raw = action.get("texts", action.get("text", action.get("label", "")))
     if isinstance(raw, list):
@@ -3105,6 +3237,28 @@ def _install_demonstration_recorder(page: Any) -> None:
         return String(el?.value || '').slice(0, 160);
       };
       const compact = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 96);
+      const cssEscape = (value) => {
+        try { return CSS.escape(String(value)); } catch { return String(value).replace(/"/g, '\\"'); }
+      };
+      const selectorFor = (el) => {
+        if (!el || !el.tagName) return '';
+        if (el.id) return `#${cssEscape(el.id)}`;
+        const testId = el.getAttribute?.('data-testid') || el.getAttribute?.('data-test') || el.getAttribute?.('data-action');
+        if (testId) return `[${el.getAttribute('data-testid') ? 'data-testid' : el.getAttribute('data-test') ? 'data-test' : 'data-action'}="${cssEscape(testId)}"]`;
+        const name = el.getAttribute?.('name');
+        if (name) return `${el.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
+        const aria = el.getAttribute?.('aria-label');
+        if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
+        return el.tagName.toLowerCase();
+      };
+      const selectorCandidatesFor = (el) => {
+        const candidates = [selectorFor(el)].filter(Boolean);
+        const label = labelFor(el);
+        if (label) candidates.push(`semantic:label:${label}`);
+        const text = visibleText(el);
+        if (text) candidates.push(`semantic:text:${compact(text)}`);
+        return [...new Set(candidates)].slice(0, 6);
+      };
       const captionFor = (event) => {
         if (!event || !event.type) return '';
         if (event.type === 'click') {
@@ -3134,6 +3288,9 @@ def _install_demonstration_recorder(page: Any) -> None:
           type: 'click',
           timestamp: now(),
           label: labelFor(el),
+          selector: selectorFor(el),
+          selector_candidates: selectorCandidatesFor(el),
+          selector_source: 'demonstration.dom',
           text: visibleText(el).slice(0, 160),
           tag: el.tagName?.toLowerCase?.() || '',
           role: el.getAttribute?.('role') || '',
@@ -3147,6 +3304,9 @@ def _install_demonstration_recorder(page: Any) -> None:
           type: 'input',
           timestamp: now(),
           label: labelFor(el),
+          selector: selectorFor(el),
+          selector_candidates: selectorCandidatesFor(el),
+          selector_source: 'demonstration.dom',
           field: el.name || el.id || '',
           input_type: el.getAttribute('type') || el.tagName.toLowerCase(),
           value: redactValue(el)
@@ -3160,6 +3320,9 @@ def _install_demonstration_recorder(page: Any) -> None:
           timestamp: now(),
           key: 'Enter',
           label: labelFor(el),
+          selector: selectorFor(el),
+          selector_candidates: selectorCandidatesFor(el),
+          selector_source: 'demonstration.dom',
           field: el?.name || el?.id || ''
         });
       }, true);
@@ -4740,6 +4903,7 @@ def _manifest(
         "audit_log": str(result.artifacts.audit_log),
         "artifact_edit_log": _optional_path(package_dir / "artifact_edit_log.jsonl"),
         "capture_action_log": _optional_path(result.artifacts.capture_action_log),
+        "selector_trace": _optional_path(result.artifacts.selector_trace),
         "subtitles": _optional_path(result.artifacts.subtitles),
         "media_plan": _optional_path(result.artifacts.media_plan),
         "tts_metadata": _optional_path(result.artifacts.tts_metadata),
@@ -4770,6 +4934,7 @@ def _manifest(
             "input_extraction": str(result.artifacts.input_extraction),
             "final_frame": str(result.artifacts.final_frame) if result.artifacts.final_frame else None,
             "capture_action_log": str(result.artifacts.capture_action_log) if result.artifacts.capture_action_log else None,
+            "selector_trace": str(result.artifacts.selector_trace) if result.artifacts.selector_trace else None,
             "subtitles": str(result.artifacts.subtitles) if result.artifacts.subtitles else None,
             "media_plan": str(result.artifacts.media_plan) if result.artifacts.media_plan else None,
             "tts_audio": [str(path) for path in result.artifacts.tts_audio],

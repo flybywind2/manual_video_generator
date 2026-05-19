@@ -171,6 +171,18 @@ def test_static_styles_define_loading_spinner():
     assert ".button.is-loading" in body
 
 
+def test_static_app_exposes_selector_trace_artifact_and_friendly_view():
+    client = TestClient(app)
+
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Selector Trace" in body
+    assert "selector_trace" in body
+    assert "renderSelectorTraceArtifact" in body
+
+
 def test_sample_screen_includes_login_modal_and_iframe_variants():
     client = TestClient(app)
 

@@ -547,6 +547,7 @@ function renderArtifacts(result, message = "") {
     ["리허설 로그", supporting.rehearsal_log || result.artifacts.rehearsal_log_url],
     ["MCP Calls", supporting.playwright_mcp_calls || result.artifacts.mcp_calls_url],
     ["MCP 실행 로그", supporting.playwright_mcp_execution || result.artifacts.mcp_execution_url],
+    ["Selector Trace", supporting.selector_trace || result.artifacts.selector_trace_url],
     ["마스킹 로그", result.artifacts.masking_log_url],
     ["TTS 메타데이터", result.artifacts.tts_metadata_url],
     ["렌더링 메타데이터", result.artifacts.video_render_metadata_url],
@@ -765,6 +766,7 @@ function renderArtifactSummary(data, name) {
   if (pathName.includes("package_manifest")) items.unshift(["유형", "Package Manifest"]);
   if (pathName.includes("tts_metadata")) items.unshift(["유형", "TTS Metadata"]);
   if (pathName.includes("capture_action_log")) items.unshift(["유형", "Capture Log"]);
+  if (pathName.includes("selector_trace")) items.unshift(["유형", "Selector Trace"]);
   return `<div class="friendly-summary">${items.map(([key, value]) => `
     <div class="friendly-summary-card"><span>${escapeHtml(key)}</span><strong>${escapeHtml(formatJsonValue(value))}</strong></div>
   `).join("")}</div>`;
@@ -779,6 +781,9 @@ function renderKnownArtifact(name, data) {
   if (lowerName.includes("tts_metadata")) {
     return renderEntryCards(data.entries || [], "음성");
   }
+  if (lowerName.includes("selector_trace")) {
+    return renderSelectorTraceArtifact(data);
+  }
   if (lowerName.includes("capture_action_log") || lowerName.includes("rehearsal") || lowerName.includes("mcp")) {
     return renderEntryCards(Array.isArray(data) ? data : data.entries || data.calls || [], "로그");
   }
@@ -786,6 +791,23 @@ function renderKnownArtifact(name, data) {
     return renderManifestArtifact(data);
   }
   return "";
+}
+
+function renderSelectorTraceArtifact(data) {
+  const selectors = Array.isArray(data.selectors) ? data.selectors : [];
+  return `
+    <section class="friendly-block">
+      <h3>사용된 Selector</h3>
+      ${selectors.length ? `<div class="friendly-card-list">${selectors.slice(0, 120).map((item, index) => `
+        <article class="friendly-card selector-card">
+          <span>${escapeHtml(item.type || "selector")} · ${index + 1}</span>
+          <strong><code>${escapeHtml(item.selector || "")}</code></strong>
+          <p>${escapeHtml([item.label, item.step_id, item.source].filter(Boolean).join(" · "))}</p>
+          ${renderKeyValueList(item, { compact: true, exclude: ["selector", "label", "step_id", "source"] })}
+        </article>
+      `).join("")}</div>` : `<div class="artifact-empty-state">selector 기록 없음</div>`}
+    </section>
+  `;
 }
 
 function renderPlanArtifact(data) {

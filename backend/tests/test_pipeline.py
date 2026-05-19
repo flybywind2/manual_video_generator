@@ -25,6 +25,7 @@ from backend.app.pipeline import (
     _render_subtitles,
     _raise_if_login_failed,
     _resolve_login_options,
+    _write_selector_trace,
     rerender_pipeline_package,
     run_pipeline,
 )
@@ -158,6 +159,7 @@ def test_package_manifest_lists_all_generated_supporting_artifacts(tmp_path):
         "opencode_metadata",
         "audit_log",
         "capture_action_log",
+        "selector_trace",
         "subtitles",
         "media_plan",
         "hyperframes_composition",
@@ -197,6 +199,7 @@ def test_run_pipeline_extracts_missing_input_values_before_planning(tmp_path):
     assert any(action["type"] == "fill_by_label" and action["label"] == "LOT" for action in action_plan["actions"])
     assert any(action["type"] == "fill_by_label" and action["label"] == "라인" for action in action_plan["actions"])
     assert result.artifacts.input_extraction.exists()
+    assert (result.package_dir / "selector_trace.json").exists()
 
 
 def test_run_pipeline_falls_back_to_placeholder_when_browser_capture_raises(tmp_path, monkeypatch):
@@ -987,6 +990,38 @@ def test_execute_capture_actions_uses_plan_selectors_without_mes_defaults(tmp_pa
     assert "[data-action='detail']" not in rendered_calls
 
 
+def test_write_selector_trace_extracts_selectors_from_action_logs(tmp_path):
+    trace_path = _write_selector_trace(
+        tmp_path,
+        [
+            {
+                "action_id": "a1",
+                "type": "fill",
+                "status": "ok",
+                "selector": "#user-id",
+                "selector_source": "action.selector",
+                "step_id": "step_1",
+            },
+            {
+                "type": "click",
+                "status": "ok",
+                "element": {"selector": "button.primary", "text": "조회"},
+                "selector_candidates": ["button.primary", "[data-action='search']"],
+            },
+            {"type": "wait", "status": "ok"},
+        ],
+    )
+
+    payload = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    assert payload["status"] == "completed"
+    assert payload["selector_count"] == 3
+    assert payload["selectors"][0]["selector"] == "#user-id"
+    assert payload["selectors"][0]["source"] == "action.selector"
+    assert payload["selectors"][1]["selector"] == "button.primary"
+    assert payload["selectors"][2]["selector"] == "[data-action='search']"
+
+
 def test_execute_capture_actions_runs_semantic_fill_and_text_clicks(tmp_path):
     calls = []
 
@@ -1035,6 +1070,24 @@ def test_execute_capture_actions_runs_semantic_fill_and_text_clicks(tmp_path):
     assert ("click", "button", "조회") in calls
     assert [entry["status"] for entry in result["action_log"][:2]] == ["ok", "ok"]
     assert [path.name for path in result["captures"]] == ["step_search.png"]
+
+
+def test_demonstration_recorder_records_dom_selector_metadata():
+    scripts = []
+
+    class FakePage:
+        def add_init_script(self, script):
+            scripts.append(script)
+
+        def evaluate(self, script):
+            scripts.append(script)
+
+    _install_demonstration_recorder(FakePage())
+
+    recorder_script = "\n".join(scripts)
+    assert "selectorFor" in recorder_script
+    assert "selector_candidates" in recorder_script
+    assert "selector_source: 'demonstration.dom'" in recorder_script
 
 
 def test_execute_capture_actions_records_selector_failures_without_aborting(tmp_path):
