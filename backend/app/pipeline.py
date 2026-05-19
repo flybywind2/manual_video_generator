@@ -2651,21 +2651,6 @@ def _execute_browser_agent_actions(
 ) -> dict[str, Any]:
     if not getattr(settings, "enable_browser_agent", False):
         return _execute_capture_actions(page, plan, capture_dir)
-    if not getattr(getattr(settings, "llm", None), "is_configured", False) and decide_next is decide_browser_agent_action:
-        fallback = _execute_capture_actions(page, plan, capture_dir)
-        fallback["action_log"] = [
-            {
-                "type": "browser_agent",
-                "source": "browser-agent",
-                "status": "degraded",
-                "reason": "llm_not_configured",
-            },
-            *fallback.get("action_log", []),
-        ]
-        fallback["status"] = "degraded"
-        fallback["degrade_reason"] = "browser_agent_llm_not_configured"
-        return fallback
-
     captures: list[Path] = []
     action_log: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []

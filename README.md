@@ -112,6 +112,8 @@ stateDiagram-v2
 
 fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=true`를 켭니다. strict mode는 입력값 추출, planner, 브라우저 캡처처럼 fallback을 자주 타는 단계에서 첫 예외를 그대로 발생시켜 문제 지점을 숨기지 않습니다. 일반 모드에서도 `package_manifest.json`의 `fallback_events`에는 강등된 actor, reason, 관련 artifact, 요약 details가 남습니다.
 
+`MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`인 경우 LLM이 설정되지 않았거나 일시적으로 실패해도 즉시 기존 action plan으로 내려가지 않고, 관찰된 필드/버튼/`scenario_brief`를 기준으로 로컬 자율 정책을 먼저 사용합니다. 이 로컬 정책은 입력값 매핑, 안전 클릭 의도, 금지 클릭 의도, 최근 실패 이력을 보고 `fill_by_label`, `click_by_text`, `press_key`, `capture_step`, `finish` 중 하나를 선택합니다.
+
 개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
 
 사내 PC에서 Codex를 사용할 수 없고 OpenCode만 허용되는 배포 기준은 [OpenCode Only 사내 배포 메모](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 따릅니다.

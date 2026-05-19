@@ -296,6 +296,109 @@ def test_browser_agent_prompt_includes_augmented_brief_and_failure_history(tmp_p
     assert action["value"] == "st.form과 st.input 차이"
 
 
+def test_browser_agent_local_policy_fills_visible_field_without_llm():
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 prompt 입력하고 결과 받는 영상",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 표시",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+        agent_brief={
+            "task_type": "chat_prompt",
+            "safe_click_intents": ["전송", "Send", "Enter"],
+            "forbidden_click_intents": ["Web Search"],
+        },
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"fields": [{"label": "질문", "value": ""}], "clickables": [{"text": "전송"}]},
+        history=[],
+        step_index=1,
+    )
+
+    assert action["status"] == "ok"
+    assert action["source"] == "browser-agent-local"
+    assert action["type"] == "fill_by_label"
+    assert action["label"] == "질문"
+    assert action["value"] == "st.form과 st.input 차이"
+
+
+def test_browser_agent_local_policy_clicks_safe_send_after_fill_without_llm():
+    request = PipelineInput(
+        request_text="사내 chatbot 서비스에 prompt 입력하고 결과 받는 영상",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 표시",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+        agent_brief={
+            "task_type": "chat_prompt",
+            "safe_click_intents": ["전송", "Send", "Enter"],
+            "forbidden_click_intents": ["Web Search"],
+        },
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "fields": [{"label": "질문", "value": "st.form과 st.input 차이"}],
+            "clickables": [{"text": "Web Search"}, {"text": "전송"}],
+            "body_text": "사내 챗봇",
+        },
+        history=[{"step": 1, "type": "fill_by_label", "status": "ok"}],
+        step_index=2,
+    )
+
+    assert action["status"] == "ok"
+    assert action["source"] == "browser-agent-local"
+    assert action["type"] == "click_by_text"
+    assert action["texts"] == ["전송"]
+
+
+def test_browser_agent_llm_error_falls_back_to_local_policy_when_not_strict():
+    request = PipelineInput(
+        request_text="MES에서 LOT 조회",
+        target_url="http://internal.example.local/mes",
+        role="사용자",
+        completion_condition="조회 결과",
+        input_values={"LOT": "LOT-001"},
+        agent_brief={"task_type": "lookup", "safe_click_intents": ["조회", "검색"]},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_USER_ID": "USER01",
+            "MANUAL_AGENT_USER_TYPE": "AD_ID",
+        }
+    )
+
+    def fail_post(url, headers, payload, timeout_seconds):
+        raise RuntimeError("browser agent timeout")
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={"fields": [{"label": "LOT", "value": ""}], "clickables": [{"text": "조회"}]},
+        history=[],
+        step_index=1,
+        http_post=fail_post,
+    )
+
+    assert action["status"] == "ok"
+    assert action["source"] == "browser-agent-local-fallback"
+    assert action["type"] == "fill_by_label"
+    assert action["llm_error"] == "RuntimeError: browser agent timeout"
+
+
 def test_browser_agent_blocks_dangerous_click_texts():
     request = PipelineInput(
         request_text="계정 조회",

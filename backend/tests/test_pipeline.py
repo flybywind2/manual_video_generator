@@ -1368,7 +1368,7 @@ def test_recording_helpers_include_cursor_click_and_input_focus_overlays():
     assert "__manualRecordingOverlayInterval" in init_script
 
 
-def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configured(tmp_path):
+def test_execute_browser_agent_actions_uses_local_policy_when_llm_is_not_configured(tmp_path):
     calls = []
 
     class FakePage:
@@ -1381,6 +1381,11 @@ def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configur
         def click(self, selector):
             calls.append(("click", selector))
 
+        class keyboard:
+            @staticmethod
+            def press(key):
+                calls.append(("press", key))
+
         def screenshot(self, path, full_page):
             Path(path).write_bytes(b"png")
 
@@ -1389,6 +1394,8 @@ def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configur
         target_url="http://internal.example.local",
         role="사용자",
         completion_condition="조회 결과",
+        input_values={"검색어": "LOT-001"},
+        agent_brief={"task_type": "lookup", "safe_click_intents": ["조회"]},
     )
     settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
     plan = {
@@ -1399,12 +1406,46 @@ def test_execute_browser_agent_actions_degrades_to_plan_when_llm_is_not_configur
         ],
     }
 
-    result = _execute_browser_agent_actions(FakePage(), request, plan, tmp_path, settings)
+    observations = [
+        {"fields": [{"label": "검색어", "value": ""}], "clickables": [{"text": "조회"}], "body_text": "검색 화면"},
+        {"fields": [{"label": "검색어", "value": "LOT-001"}], "clickables": [{"text": "조회"}], "body_text": "검색 화면"},
+        {"fields": [{"label": "검색어", "value": "LOT-001"}], "clickables": [], "body_text": "조회 결과 1건"},
+    ]
 
-    assert result["status"] == "degraded"
-    assert result["degrade_reason"] == "browser_agent_llm_not_configured"
-    assert result["action_log"][0]["reason"] == "llm_not_configured"
-    assert ("click", "button.search") in calls
+    def observe_page(_page):
+        return observations.pop(0) if observations else {"body_text": "조회 결과 1건"}
+
+    class Locator:
+        def fill(self, value):
+            calls.append(("fill", value))
+
+        def click(self):
+            calls.append(("click_text",))
+
+    class SemanticPage(FakePage):
+        def get_by_label(self, label, exact=False):
+            calls.append(("get_by_label", label, exact))
+            return Locator()
+
+        def get_by_role(self, role, name, exact=False):
+            calls.append(("get_by_role", role, name, exact))
+            return Locator()
+
+    result = _execute_browser_agent_actions(
+        SemanticPage(),
+        request,
+        plan,
+        tmp_path,
+        settings,
+        observe_page=observe_page,
+    )
+
+    assert result["status"] == "ok"
+    assert result["degrade_reason"] == ""
+    assert result["action_log"][0]["source"] == "browser-agent-local"
+    assert result["action_log"][0]["type"] == "fill_by_label"
+    assert ("fill", "LOT-001") in calls
+    assert not any(call == ("click", "button.search") for call in calls)
 
 
 def test_resolve_login_options_prefers_request_mode_and_env_credentials():

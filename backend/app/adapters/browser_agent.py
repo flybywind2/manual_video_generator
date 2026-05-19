@@ -45,10 +45,10 @@ def decide_browser_agent_action(
 ) -> dict[str, Any]:
     if not settings.enable_browser_agent:
         return {"status": "disabled", "type": "finish", "reason": "browser_agent_disabled"}
-    if not settings.llm.is_configured:
-        return {"status": "disabled", "type": "finish", "reason": "llm_not_configured"}
     if _has_login_blocker(observation):
         return {"status": "blocked", "type": "finish", "reason": "login_required"}
+    if not settings.llm.is_configured:
+        return _decide_local_browser_action(request, observation, history, step_index=step_index, source="browser-agent-local")
 
     post = post_json if http_post is None else http_post
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
@@ -105,17 +105,30 @@ def decide_browser_agent_action(
         "temperature": 0.1,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
-    response = post(url, headers, payload, settings.llm_timeout_seconds)
-    content = response["choices"][0]["message"]["content"]
-    record_llm_response(
-        component="browser_agent",
-        model=settings.llm.model,
-        response=response,
-        content=content,
-        terminal_enabled=settings.enable_terminal_logs,
-        package_dir=package_dir,
-    )
-    return _normalize_browser_agent_action(_parse_json_content(content), request)
+    try:
+        response = post(url, headers, payload, settings.llm_timeout_seconds)
+        content = response["choices"][0]["message"]["content"]
+        record_llm_response(
+            component="browser_agent",
+            model=settings.llm.model,
+            response=response,
+            content=content,
+            terminal_enabled=settings.enable_terminal_logs,
+            package_dir=package_dir,
+        )
+        return _normalize_browser_agent_action(_parse_json_content(content), request)
+    except Exception as exc:  # noqa: BLE001 - local policy keeps autonomous mode useful when LLM is flaky.
+        if getattr(settings, "strict_mode", False):
+            raise
+        action = _decide_local_browser_action(
+            request,
+            observation,
+            history,
+            step_index=step_index,
+            source="browser-agent-local-fallback",
+        )
+        action["llm_error"] = f"{type(exc).__name__}: {exc}"
+        return action
 
 
 def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[str, Any]:
@@ -183,6 +196,198 @@ def _resolve_fill_value(data: dict[str, Any], request: Any, *, value_key: str, l
 
 def _compact_text(value: str) -> str:
     return re.sub(r"\s+", "", value).lower()
+
+
+def _decide_local_browser_action(
+    request: Any,
+    observation: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    step_index: int,
+    source: str,
+) -> dict[str, Any]:
+    if _success_likely_satisfied(request, observation, history):
+        return _local_action("finish", source=source, reason="완료 조건으로 보이는 화면 상태를 확인했습니다.")
+
+    input_values = getattr(request, "input_values", {}) or {}
+    fields = [field for field in observation.get("fields", []) if isinstance(field, dict)]
+    filled_values = _filled_values_from_fields(fields)
+    for key, value in input_values.items():
+        value_text = str(value or "").strip()
+        if not value_text or value_text in filled_values:
+            continue
+        field = _best_field_for_input(str(key), value_text, fields, input_values)
+        if field:
+            label = _field_label(field) or str(key)
+            if not _recent_failed(history, "fill_by_label", label):
+                return {
+                    "status": "ok",
+                    "source": source,
+                    "type": "fill_by_label",
+                    "label": label,
+                    "value": value_text,
+                    "value_key": str(key),
+                    "reason": f"{label} 입력칸에 {str(key)} 값을 입력합니다.",
+                }
+
+    safe_clicks = _safe_click_intents(request)
+    click_text = _first_matching_click(observation.get("clickables", []), safe_clicks, history)
+    if click_text:
+        return {
+            "status": "ok",
+            "source": source,
+            "type": "click_by_text",
+            "texts": [click_text],
+            "reason": f"{click_text} 버튼을 선택합니다.",
+        }
+
+    task_type = str((getattr(request, "agent_brief", {}) or {}).get("task_type") or "")
+    has_filled = any(item.get("type") == "fill_by_label" and item.get("status") == "ok" for item in history)
+    if task_type == "chat_prompt" and has_filled and not _recent_failed(history, "press_key", "Enter"):
+        return {
+            "status": "ok",
+            "source": source,
+            "type": "press_key",
+            "key": "Enter",
+            "reason": "채팅 입력값을 Enter로 전송합니다.",
+        }
+
+    if step_index <= 2 or _last_action_type(history) in {"click_by_text", "press_key", "wait"}:
+        return _local_action("capture_step", source=source, reason="현재 화면을 캡처해 진행 상태를 확인합니다.")
+    return _local_action("finish", source=source, reason="추가로 실행할 안전한 자동 동작을 찾지 못했습니다.")
+
+
+def _local_action(action_type: str, *, source: str, reason: str) -> dict[str, Any]:
+    return {"status": "ok", "source": source, "type": action_type, "reason": reason}
+
+
+def _success_likely_satisfied(request: Any, observation: dict[str, Any], history: list[dict[str, Any]]) -> bool:
+    text = _compact_text(
+        " ".join(
+            [
+                str(observation.get("title") or ""),
+                str(observation.get("body_text") or ""),
+                " ".join(str(item) for item in observation.get("headings", []) or []),
+            ]
+        )
+    )
+    if not text:
+        return False
+    criteria = [str(getattr(request, "completion_condition", "") or "")]
+    criteria.extend(str(item) for item in (getattr(request, "agent_brief", {}) or {}).get("success_criteria", []) or [])
+    meaningful = [
+        _compact_text(item)
+        for item in criteria
+        if len(_compact_text(item)) >= 3 and not any(marker in item for marker in ("보이면", "완료", "확인"))
+    ]
+    if any(item and item in text for item in meaningful):
+        return True
+    task_type = str((getattr(request, "agent_brief", {}) or {}).get("task_type") or "")
+    if task_type == "chat_prompt" and any(item.get("type") in {"click_by_text", "press_key"} for item in history):
+        return any(token in text for token in ("답변", "response", "assistant", "응답"))
+    if task_type == "lookup" and any(item.get("type") == "click_by_text" for item in history):
+        return any(token in text for token in ("조회결과", "검색결과", "결과", "건수", "목록"))
+    return False
+
+
+def _filled_values_from_fields(fields: list[dict[str, Any]]) -> set[str]:
+    return {str(field.get("value") or "").strip() for field in fields if str(field.get("value") or "").strip()}
+
+
+def _best_field_for_input(
+    key: str,
+    value: str,
+    fields: list[dict[str, Any]],
+    input_values: dict[str, Any],
+) -> dict[str, Any] | None:
+    editable = [
+        field
+        for field in fields
+        if str(field.get("value") or "").strip() in {"", "<redacted>"}
+        and str(field.get("type") or "").lower() not in {"hidden", "submit", "button", "checkbox", "radio"}
+    ]
+    if not editable:
+        return None
+    key_norm = _compact_text(key)
+    for field in editable:
+        label_norm = _compact_text(_field_label(field))
+        if key_norm and label_norm and (key_norm in label_norm or label_norm in key_norm):
+            return field
+    value_hint = _input_value_hint(value)
+    for field in editable:
+        label_norm = _compact_text(_field_label(field))
+        if value_hint and value_hint in label_norm:
+            return field
+    if len(input_values) == 1 and len(editable) == 1:
+        return editable[0]
+    if len(input_values) == 1:
+        return editable[0]
+    return None
+
+
+def _field_label(field: dict[str, Any]) -> str:
+    return str(field.get("label") or field.get("placeholder") or field.get("name") or "").strip()
+
+
+def _input_value_hint(value: str) -> str:
+    lowered = value.lower()
+    if "lot" in lowered:
+        return "lot"
+    if "@" in lowered:
+        return "email"
+    return ""
+
+
+def _safe_click_intents(request: Any) -> list[str]:
+    brief = getattr(request, "agent_brief", {}) or {}
+    intents = [str(item).strip() for item in brief.get("safe_click_intents", []) or [] if str(item).strip()]
+    if intents:
+        return intents
+    text = f"{getattr(request, 'request_text', '')} {getattr(request, 'completion_condition', '')}"
+    inferred: list[str] = []
+    if any(token in text for token in ("챗봇", "chatbot", "prompt", "프롬프트", "질문")):
+        inferred.extend(["전송", "Send", "Enter"])
+    if any(token in text for token in ("조회", "검색", "search")):
+        inferred.extend(["조회", "검색", "Search"])
+    if "상세" in text:
+        inferred.extend(["상세", "상세 보기", "Detail", "Details"])
+    return list(dict.fromkeys(inferred))
+
+
+def _first_matching_click(clickables: Any, intents: list[str], history: list[dict[str, Any]]) -> str:
+    if not isinstance(clickables, list):
+        return ""
+    for intent in intents:
+        intent_norm = _compact_text(intent)
+        if not intent_norm or _has_dangerous_text([intent]) or is_disallowed_click_texts([intent]):
+            continue
+        for item in clickables:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or item.get("href") or "").strip()
+            if not text or _has_dangerous_text([text]) or is_disallowed_click_texts([text]):
+                continue
+            text_norm = _compact_text(text)
+            if (intent_norm in text_norm or text_norm in intent_norm) and not _recent_failed(history, "click_by_text", text):
+                return text
+    return ""
+
+
+def _recent_failed(history: list[dict[str, Any]], action_type: str, target: str) -> bool:
+    target_norm = _compact_text(target)
+    for item in history[-4:]:
+        if item.get("status") not in {"failed", "blocked", "degraded"}:
+            continue
+        if item.get("type") != action_type:
+            continue
+        reason = _compact_text(str(item.get("reason") or ""))
+        if not target_norm or target_norm in reason or reason in target_norm:
+            return True
+    return False
+
+
+def _last_action_type(history: list[dict[str, Any]]) -> str:
+    return str(history[-1].get("type") or "") if history else ""
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:
