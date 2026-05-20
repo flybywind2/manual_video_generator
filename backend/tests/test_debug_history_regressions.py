@@ -26,7 +26,7 @@ def test_debug_history_ui_input_values_can_be_added_replaced_and_removed():
     assert "input_values: readInputValues()" in body
 
 
-def test_debug_history_capture_waits_for_full_load_and_render_frame_before_helper_injection():
+def test_debug_history_capture_waits_for_dom_and_render_frame_before_helper_injection():
     calls = []
 
     class FakePage:
@@ -50,10 +50,10 @@ def test_debug_history_capture_waits_for_full_load_and_render_frame_before_helpe
 
     _prepare_capture_page(FakePage(), "http://internal.example.local/chat")
 
-    assert calls[0] == ("goto", "http://internal.example.local/chat", "load")
-    assert not any(call[:3] == ("goto", "http://internal.example.local/chat", "domcontentloaded") for call in calls)
+    assert calls[0] == ("goto", "http://internal.example.local/chat", "domcontentloaded")
+    assert not any(call[:3] == ("goto", "http://internal.example.local/chat", "load") for call in calls)
     wait_call = next(call for call in calls if call[0] == "wait_for_function")
-    assert "document.readyState === 'complete'" in wait_call[1]
+    assert "readyState === 'interactive' || readyState === 'complete'" in wait_call[1]
     assert "document.body.children.length > 0" in wait_call[1]
     assert "requestAnimationFrame" in wait_call[1]
     assert all("data-action" not in str(call) for call in calls)

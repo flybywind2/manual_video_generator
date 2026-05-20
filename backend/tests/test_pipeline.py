@@ -973,12 +973,41 @@ def test_prepare_capture_page_waits_for_generic_js_ready_before_injecting_helper
 
     _prepare_capture_page(page, "http://127.0.0.1:8000/sample")
 
-    assert calls[0] == ("goto", "http://127.0.0.1:8000/sample", "load")
+    assert calls[0] == ("goto", "http://127.0.0.1:8000/sample", "domcontentloaded")
     assert ("wait_for_load_state", "networkidle", 5000) in calls
     assert any(call[0] == "wait_for_function" and "document.readyState" in call[1] for call in calls)
+    assert any(call[0] == "wait_for_function" and "interactive" in call[1] for call in calls)
     assert all("data-action" not in str(call) for call in calls)
     assert calls[-2][0] == "add_style_tag"
     assert calls[-1][0] == "evaluate"
+
+
+def test_prepare_capture_page_does_not_wait_for_full_load_before_demonstration():
+    calls = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            calls.append(("goto", url, wait_until))
+            if wait_until == "load":
+                raise TimeoutError("full load never finished")
+
+        def wait_for_load_state(self, state, timeout):
+            calls.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            calls.append(("wait_for_function", expression, timeout))
+
+        def add_style_tag(self, content):
+            calls.append(("add_style_tag", "manual-caption" in content))
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", script[:40], args))
+
+    _prepare_capture_page(FakePage(), "https://example.test/app")
+
+    assert ("goto", "https://example.test/app", "domcontentloaded") in calls
+    assert not any(call == ("goto", "https://example.test/app", "load") for call in calls)
+    assert any(call[0] == "wait_for_function" and "interactive" in call[1] for call in calls)
 
 
 def test_execute_capture_actions_uses_plan_selectors_without_mes_defaults(tmp_path):

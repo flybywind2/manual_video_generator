@@ -2015,7 +2015,7 @@ def _open_signal_control_page(browser: Any) -> tuple[Any, Any]:
 
 
 def _prepare_capture_page(page: Any, target_url: str) -> None:
-    page.goto(target_url, wait_until="load")
+    page.goto(target_url, wait_until="domcontentloaded")
     try:
         page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
@@ -2025,7 +2025,8 @@ def _prepare_capture_page(page: Any, target_url: str) -> None:
     page.wait_for_function(
         """
         () => new Promise((resolve) => {
-          const ready = document.readyState === 'complete'
+          const readyState = document.readyState;
+          const ready = (readyState === 'interactive' || readyState === 'complete')
             && document.body
             && document.body.children.length > 0;
           if (!ready) {
