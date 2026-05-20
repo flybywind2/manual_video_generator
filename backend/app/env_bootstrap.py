@@ -30,6 +30,7 @@ def build_runtime_environment(
         "MANUAL_AGENT_BUNDLE_ROOT": str(base),
         "HF_HOME": env.get("HF_HOME") or str(runtime / "hf-cache"),
         "NPM_CONFIG_CACHE": env.get("NPM_CONFIG_CACHE") or str(runtime / "npm-cache"),
+        "SUPERTONIC_CACHE_DIR": env.get("SUPERTONIC_CACHE_DIR") or str(runtime / "supertonic3"),
     }
     playwright_browsers = env.get("PLAYWRIGHT_BROWSERS_PATH") or ""
     if not playwright_browsers and (runtime / "browsers").exists():
@@ -77,6 +78,7 @@ def runtime_fingerprint(environ: Mapping[str, str] | None = None) -> dict[str, s
         "playwright_browsers_path": env.get("PLAYWRIGHT_BROWSERS_PATH", ""),
         "hf_home": env.get("HF_HOME", ""),
         "npm_config_cache": env.get("NPM_CONFIG_CACHE", ""),
+        "supertonic_cache_dir": env.get("SUPERTONIC_CACHE_DIR", ""),
         "requests_ca_bundle_set": str(bool(env.get("REQUESTS_CA_BUNDLE"))).lower(),
         "node_extra_ca_certs_set": str(bool(env.get("NODE_EXTRA_CA_CERTS"))).lower(),
     }

@@ -21,6 +21,7 @@ def test_build_runtime_environment_points_caches_inside_bundle(tmp_path: Path):
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "runtime" / "browsers")
     assert env["HF_HOME"] == str(tmp_path / "runtime" / "hf-cache")
     assert env["NPM_CONFIG_CACHE"] == str(tmp_path / "runtime" / "npm-cache")
+    assert env["SUPERTONIC_CACHE_DIR"] == str(tmp_path / "runtime" / "supertonic3")
     assert env["REQUESTS_CA_BUNDLE"] == str(tmp_path / "config" / "corp-root-ca.pem")
     assert env["NODE_EXTRA_CA_CERTS"] == str(tmp_path / "config" / "corp-root-ca.pem")
     assert env["PATH"].endswith("C:\\Windows\\System32")
@@ -31,6 +32,7 @@ def test_build_runtime_environment_does_not_force_missing_playwright_browser_pat
 
     assert "PLAYWRIGHT_BROWSERS_PATH" not in env
     assert env["HF_HOME"] == str(tmp_path / "runtime" / "hf-cache")
+    assert env["SUPERTONIC_CACHE_DIR"] == str(tmp_path / "runtime" / "supertonic3")
 
 
 def test_build_runtime_environment_does_not_override_existing_cache_values(tmp_path: Path):
@@ -41,6 +43,7 @@ def test_build_runtime_environment_does_not_override_existing_cache_values(tmp_p
             "PLAYWRIGHT_BROWSERS_PATH": "D:\\cached-browsers",
             "HF_HOME": "D:\\hf",
             "NPM_CONFIG_CACHE": "D:\\npm-cache",
+            "SUPERTONIC_CACHE_DIR": "D:\\supertonic3",
             "MANUAL_AGENT_OUTPUT_DIR": "D:\\manual-output",
         },
     )
@@ -48,6 +51,7 @@ def test_build_runtime_environment_does_not_override_existing_cache_values(tmp_p
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == "D:\\cached-browsers"
     assert env["HF_HOME"] == "D:\\hf"
     assert env["NPM_CONFIG_CACHE"] == "D:\\npm-cache"
+    assert env["SUPERTONIC_CACHE_DIR"] == "D:\\supertonic3"
     assert "MANUAL_AGENT_OUTPUT_DIR" not in env
 
 
@@ -58,6 +62,7 @@ def test_build_runtime_environment_reads_runtime_values_from_env_file(tmp_path: 
                 "PLAYWRIGHT_BROWSERS_PATH=D:\\pw",
                 "HF_HOME=D:\\hf",
                 "NPM_CONFIG_CACHE=D:\\npm",
+                "SUPERTONIC_CACHE_DIR=D:\\supertonic3",
             ]
         ),
         encoding="utf-8",
@@ -68,6 +73,7 @@ def test_build_runtime_environment_reads_runtime_values_from_env_file(tmp_path: 
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == "D:\\pw"
     assert env["HF_HOME"] == "D:\\hf"
     assert env["NPM_CONFIG_CACHE"] == "D:\\npm"
+    assert env["SUPERTONIC_CACHE_DIR"] == "D:\\supertonic3"
 
 
 def test_build_runtime_environment_prepends_existing_portable_bins(tmp_path: Path):
