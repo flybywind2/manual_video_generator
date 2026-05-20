@@ -1267,8 +1267,10 @@ function plannerStatusRow(status) {
   if (!status.runtime.enable_internal_planner) {
     return { label: "Planner", state: "neutral", text: "Local", detail: "deterministic planner" };
   }
+  const provider = status.llm.provider || "LLM";
+  const model = status.llm.model ? ` · ${status.llm.model}` : "";
   return status.llm.configured
-    ? { label: "Planner", state: "ready", text: "Ready", detail: "internal LLM" }
+    ? { label: "Planner", state: "ready", text: "Ready", detail: `${provider}${model}` }
     : { label: "Planner", state: "missing", text: "Missing", detail: "LLM config required" };
 }
 
