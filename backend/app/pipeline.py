@@ -1669,7 +1669,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
 
     login = _resolve_login_options(request, settings)
     demonstration_mode = _is_demonstration_mode(request)
-    if demonstration_mode:
+    if demonstration_mode and login["mode"] == "manual":
         login = {**login, "mode": "none", "success_selector": ""}
     interactive = login["mode"] in {"manual", "sso_profile"} or demonstration_mode
     launch_kwargs = _playwright_launch_kwargs(
@@ -1702,7 +1702,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
                 page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
             else:
                 browser = p.chromium.launch(**launch_kwargs)
-            if login["mode"] == "manual" or demonstration_mode:
+            if browser is not None and (login["mode"] == "manual" or demonstration_mode):
                 signal_context, signal_page = _open_signal_control_page(browser)
             context_options = _recording_context_options(dirs)
             auth_result = {"storage_state": None, "action_log": []}
@@ -1787,6 +1787,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
         "action_log_path": action_log_path,
         "status": capture_result.get("status", "ok"),
         "degrade_reason": capture_result.get("degrade_reason", ""),
+        "storage_state": capture_result.get("storage_state"),
     }
 
 
@@ -2358,7 +2359,8 @@ def _replay_demonstration_with_playwright(
     used_names: set[str] = set()
     durations = _step_audio_durations(media_plan, tts_audio)
     steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
-    launch_kwargs = _playwright_launch_kwargs(settings, interactive=False)
+    runner_mode = _browser_runner_mode(settings)
+    launch_kwargs = _playwright_launch_kwargs(settings, interactive=False) if runner_mode != "cdp_attach" else {}
     default_timeout_ms = _replay_default_timeout_ms(settings)
     navigation_timeout_ms = _replay_navigation_timeout_ms(settings)
     _record_replay_terminal(
@@ -2375,18 +2377,28 @@ def _replay_demonstration_with_playwright(
     )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_kwargs)
+        browser = None
         context = None
+        close_context = True
+        cdp_attached = False
         try:
-            context_options: dict[str, Any] = {
-                "viewport": {"width": 1280, "height": 800},
-                "record_video_dir": str(replay_dir),
-                "record_video_size": {"width": 1280, "height": 800},
-            }
-            if isinstance(storage_state, dict) and storage_state:
-                context_options["storage_state"] = storage_state
-            context = browser.new_context(**context_options)
-            page = context.new_page()
+            if runner_mode == "cdp_attach":
+                browser = p.chromium.connect_over_cdp(_cdp_endpoint(settings))
+                cdp_attached = True
+                context = _cdp_context(browser)
+                close_context = False
+                page = _first_context_page(context)
+            else:
+                browser = p.chromium.launch(**launch_kwargs)
+                context_options: dict[str, Any] = {
+                    "viewport": {"width": 1280, "height": 800},
+                    "record_video_dir": str(replay_dir),
+                    "record_video_size": {"width": 1280, "height": 800},
+                }
+                if isinstance(storage_state, dict) and storage_state:
+                    context_options["storage_state"] = storage_state
+                context = browser.new_context(**context_options)
+                page = context.new_page()
             _configure_replay_page_timeouts(page, default_timeout_ms, navigation_timeout_ms)
             _record_replay_terminal(
                 terminal,
@@ -2462,18 +2474,20 @@ def _replay_demonstration_with_playwright(
                 )
             final_frame = _screenshot(page, dirs.package, "final_frame.png")
         finally:
-            if context is not None:
+            if context is not None and close_context:
                 context.close()
-            browser.close()
+            if browser is not None and not cdp_attached:
+                browser.close()
 
     videos = sorted(replay_dir.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not videos:
-        replay_log.append({"type": "demonstration_replay_video", "status": "failed", "reason": "browser_recording_missing"})
+        missing_reason = "cdp_attach_existing_context_no_video_recording" if cdp_attached else "browser_recording_missing"
+        replay_log.append({"type": "demonstration_replay_video", "status": "failed", "reason": missing_reason})
         _record_replay_terminal(
             terminal,
             run_id,
             "video-missing",
-            {"component": "direct-playwright-replay", "reason": "browser_recording_missing", "is_mcp": False},
+            {"component": "direct-playwright-replay", "reason": missing_reason, "is_mcp": False},
         )
         return {
             "status": "degraded",

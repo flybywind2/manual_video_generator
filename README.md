@@ -576,7 +576,11 @@ MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.company.local
 
 처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`을 재사용합니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
 
+직접 시연 모드에서도 `sso_profile`은 유지됩니다. 이 모드에서는 수동 로그인용 `로그인 완료` 버튼을 쓰지 않고, 사용자가 실제 업무 흐름을 끝낸 뒤 `시연 완료` 신호만 누르면 됩니다.
+
 Playwright가 새 브라우저를 띄우는 방식이 사내 SSO/보안정책과 맞지 않으면 CDP attach 모드를 사용할 수 있습니다. 자세한 절차는 [docs/CDP_USAGE.md](docs/CDP_USAGE.md)를 참고하세요.
+
+`MANUAL_AGENT_BROWSER_RUNNER=cdp_attach`로 실행하면 직접 시연과 시연 기반 replay가 모두 이미 열린 CDP 브라우저 컨텍스트를 사용합니다. 이 경우 로그인된 브라우저 상태를 잃지 않지만, 기존 CDP 컨텍스트에서는 Playwright 내장 WebM 녹화가 제한되어 영상 산출물이 degraded로 표시될 수 있습니다.
 
 사내 정책상 CDP 포트를 열기 어렵거나, 사용자가 이미 로그인한 실제 브라우저 탭 안에서 agent를 동작시켜야 하면 extension bridge 모드를 사용할 수 있습니다. 이 모드는 LiteWebAgent 계열처럼 브라우저 확장/로컬 네이티브 호스트가 `observe → act → verify` API를 제공하고, Manual Video Agent는 그 계약에 따라 다음 행동을 결정합니다. 자세한 계약은 [docs/EXTENSION_BRIDGE.md](docs/EXTENSION_BRIDGE.md)를 참고하세요.
 

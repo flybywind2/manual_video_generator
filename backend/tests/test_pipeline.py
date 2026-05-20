@@ -2460,6 +2460,119 @@ def test_demonstration_mode_ignores_manual_login_gate_and_uses_only_demo_signal(
     assert result["video"].exists()
 
 
+def test_demonstration_mode_preserves_sso_profile_browser_context(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakePage:
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def add_init_script(self, script):
+            events.append(("add_init_script", "시연 완료" in script, "로그인 완료" in script))
+
+        def expose_function(self, name, callback):
+            events.append(("expose_function", name))
+            if name == "__manualDemonstrationSignalFromPage":
+                callback()
+
+        def evaluate(self, script, *args):
+            if "__manualDemonstrationEvents" in script and "slice()" in script:
+                return [{"type": "click", "text": "검색"}]
+            if "manualDemonstrationCompleted" in script:
+                return {"completed": True}
+            events.append(("evaluate", args))
+            return None
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+    class FakePersistentContext:
+        pages = [FakePage()]
+
+        def storage_state(self):
+            events.append(("storage_state",))
+            return {"cookies": [{"name": "sso", "value": "ok"}], "origins": []}
+
+        def close(self):
+            events.append(("persistent_close",))
+
+    class FakeChromium:
+        def launch_persistent_context(self, user_data_dir, **kwargs):
+            events.append(("launch_persistent_context", user_data_dir, kwargs.get("channel"), kwargs.get("headless")))
+            raw_dir = Path(kwargs["record_video_dir"])
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / "sso-demo.webm").write_bytes(b"webm")
+            return FakePersistentContext()
+
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs))
+            raise AssertionError("sso_profile demonstration must use persistent context")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        enable_browser_agent = False
+        demonstration_timeout_seconds = 30.0
+
+        class login:
+            mode = "none"
+            username_selector = ""
+            password_selector = ""
+            submit_selector = ""
+            success_selector = ""
+            username = ""
+            password = ""
+            manual_timeout_seconds = 120.0
+            credentials_timeout_seconds = 30.0
+            sso_profile_dir = str(tmp_path / "sso-profile")
+            browser_channel = "msedge"
+            auth_server_allowlist = "*.corp.local"
+            auth_negotiate_delegate_allowlist = "*.corp.local"
+
+    request = PipelineInput(
+        request_text="SSO 로그인 상태로 직접 시연",
+        target_url="http://internal.example.local/app",
+        role="사용자",
+        completion_condition="홈",
+        execution_mode="demonstration",
+        login_mode="sso_profile",
+    )
+    dirs = _make_dirs(tmp_path / "package")
+
+    result = _capture_with_playwright(request, {"steps": [], "actions": []}, dirs, Settings())
+
+    assert any(event[0] == "launch_persistent_context" for event in events)
+    assert not any(event[0] == "launch" for event in events)
+    assert any(event == ("storage_state",) for event in events)
+    assert result["storage_state"]["cookies"][0]["name"] == "sso"
+    assert result["video"].name == "direct_demonstration_source.webm"
+
+
 def test_demonstration_recorder_records_events_without_burned_in_captions():
     calls = []
 
@@ -2899,6 +3012,134 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
     assert '"status": "event-started"' in terminal_text
     assert '"status": "event-ok"' in terminal_text
     assert '"component": "direct-playwright-replay"' in terminal_text
+
+
+def test_demonstration_replay_uses_cdp_context_when_configured(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakeLocator:
+        def __init__(self, kind, value):
+            self.kind = kind
+            self.value = value
+
+        def click(self):
+            events.append(("click", self.kind, self.value))
+
+    class FakePage:
+        def set_default_timeout(self, timeout):
+            events.append(("set_default_timeout", timeout))
+
+        def set_default_navigation_timeout(self, timeout):
+            events.append(("set_default_navigation_timeout", timeout))
+
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+            return None
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+        def get_by_role(self, role, *args, **kwargs):
+            return FakeLocator(role, kwargs.get("name") or "")
+
+        @property
+        def keyboard(self):
+            class Keyboard:
+                def press(_self, key):
+                    events.append(("key", key))
+            return Keyboard()
+
+    class FakeContext:
+        pages = [FakePage()]
+
+        def new_page(self):
+            events.append(("new_page",))
+            return FakePage()
+
+        def close(self):
+            events.append(("context_close",))
+
+    class FakeBrowser:
+        contexts = [FakeContext()]
+
+        def new_context(self, **kwargs):
+            events.append(("new_context", kwargs))
+            raise AssertionError("CDP replay must use attached context to preserve SSO")
+
+        def close(self):
+            events.append(("browser_close",))
+
+    class FakeChromium:
+        def connect_over_cdp(self, endpoint):
+            events.append(("connect_over_cdp", endpoint))
+            return FakeBrowser()
+
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs))
+            raise AssertionError("CDP replay must not launch a fresh browser")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        browser_runner = "cdp_attach"
+        cdp_endpoint = "http://127.0.0.1:9222"
+        request_timeout_seconds = 60.0
+
+    dirs = _make_dirs(tmp_path / "package")
+    audio = dirs.tts / "00.wav"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"")
+    result = pipeline_module._replay_demonstration_with_playwright(
+        PipelineInput(
+            request_text="CDP 시연 replay",
+            target_url="http://internal.example.local/app",
+            role="사용자",
+            completion_condition="완료",
+            execution_mode="demonstration",
+        ),
+        {"steps": [{"id": "demo_start", "title": "시작", "caption": "시작"}]},
+        [{"type": "demonstration", "status": "ok"}, {"type": "click", "text": "조회"}],
+        dirs,
+        Settings(),
+        tts_audio=[audio],
+        storage_state={"cookies": [{"name": "sid", "value": "unused"}]},
+    )
+
+    assert ("connect_over_cdp", "http://127.0.0.1:9222") in events
+    assert not any(event[0] == "launch" for event in events)
+    assert not any(event[0] == "new_context" for event in events)
+    assert not any(event[0] == "context_close" for event in events)
+    assert result["status"] == "degraded"
+    assert result["degrade_reason"] == "demonstration_replay_recording_missing"
+    assert any(entry.get("reason") == "cdp_attach_existing_context_no_video_recording" for entry in result["action_log"])
 
 
 def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):

@@ -53,11 +53,17 @@ MANUAL_AGENT_BROWSER_RUNNER=playwright
 4. UI에서 대상 URL과 시나리오를 입력하고 파이프라인을 실행합니다.
 5. `.env 설정 상태`에서 `browser_runner=cdp_attach`, `cdp_endpoint_set=true`인지 확인합니다.
 
+## 직접 시연과 재촬영 동작
+
+`MANUAL_AGENT_BROWSER_RUNNER=cdp_attach`인 경우 직접 시연과 시연 기반 replay는 모두 이미 열린 CDP 브라우저 컨텍스트에 붙어서 실행합니다. 즉, 사용자가 CDP 브라우저에서 AD SSO를 완료했다면 replay 단계가 새 Playwright 브라우저를 열어 로그인 상태를 잃지 않습니다.
+
+`MANUAL_AGENT_LOGIN_MODE=sso_profile`을 함께 쓰는 경우에도 직접 시연 모드는 SSO profile 설정을 유지합니다. 수동 로그인용 `로그인 완료` 게이트는 직접 시연에서는 사용하지 않고, 시연 제어는 별도 `시연 완료` 신호만 사용합니다.
+
 ## 주의사항
 
 - 일반 업무용 기본 브라우저 프로필을 그대로 붙이지 말고, 가능하면 전용 `--user-data-dir`를 사용하세요.
 - CDP attach는 이미 열린 브라우저 상태에 의존하므로 재현성이 Playwright launch보다 낮습니다.
-- CDP로 기존 컨텍스트에 붙는 경우 Playwright의 내장 WebM 녹화가 제한될 수 있습니다. 이때 패키지는 스크린샷/로그를 유지하고 영상은 degraded 상태로 표시될 수 있습니다.
+- CDP로 기존 컨텍스트에 붙는 경우 Playwright의 내장 WebM 녹화가 제한될 수 있습니다. 이때 패키지는 스크린샷/로그를 유지하고 영상은 `cdp_attach_existing_context_no_video_recording` degraded 상태로 표시될 수 있습니다.
 - remote debugging port를 `0.0.0.0`이나 외부 IP에 열지 마세요.
 - 회사 정책이 CDP 포트를 차단하면 `sso_profile` 또는 `manual` 로그인 모드를 사용해야 합니다.
 
