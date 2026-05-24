@@ -640,6 +640,49 @@ def test_browser_agent_stops_when_login_modal_blocks_target():
     assert action["reason"] == "login_required"
 
 
+def test_browser_agent_waits_on_sso_profile_auth_interstitial_instead_of_finishing():
+    request = PipelineInput(
+        request_text="사내 시스템에서 챗봇에 질문 입력 후 답변 확인",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+            "MANUAL_AGENT_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\browser-profile",
+        }
+    )
+
+    def fail_post(url, headers, payload, timeout_seconds):
+        raise AssertionError("SSO auth interstitial should be waited without asking the LLM to finish")
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": "https://adfs.corp.local/adfs/ls/SAMLRequest=...",
+            "title": "Corporate SSO",
+            "body_text": "SAML 인증을 진행 중입니다. Login Password Windows Authentication Redirecting",
+            "fields": [{"label": "Password", "type": "password", "value": "<redacted>"}],
+            "clickables": [],
+        },
+        history=[],
+        step_index=2,
+        http_post=fail_post,
+    )
+
+    assert action["status"] == "ok"
+    assert action["type"] == "wait"
+    assert action["timeout_ms"] >= 1000
+    assert action["reason"] == "sso_auth_redirect_wait"
+
+
 def test_extension_bridge_client_uses_observe_act_verify_contract():
     calls = []
 

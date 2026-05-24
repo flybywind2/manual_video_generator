@@ -45,6 +45,14 @@ def decide_browser_agent_action(
 ) -> dict[str, Any]:
     if not settings.enable_browser_agent:
         return {"status": "disabled", "type": "finish", "reason": "browser_agent_disabled"}
+    if _is_sso_profile_auth_interstitial(settings, observation):
+        return {
+            "status": "ok",
+            "source": "browser-agent-auth-policy",
+            "type": "wait",
+            "timeout_ms": 2000,
+            "reason": "sso_auth_redirect_wait",
+        }
     if _has_login_blocker(observation):
         return {"status": "blocked", "type": "finish", "reason": "login_required"}
     if not settings.llm.is_configured:
@@ -84,6 +92,7 @@ def decide_browser_agent_action(
                         "target_url": request.target_url,
                         "role": request.role,
                         "completion_condition": request.completion_condition,
+                        "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
                         "input_values": request.input_values,
                         "agent_brief": getattr(request, "agent_brief", {}) or {},
                         "observation": observation,
@@ -443,6 +452,35 @@ def _has_login_blocker(observation: dict[str, Any]) -> bool:
     korean_login = "로그인 또는 회원가입" in text or ("google로 계속하기" in text and "apple로 계속하기" in text)
     english_login = "sign in" in text and ("continue with google" in text or "continue with apple" in text)
     return korean_login or english_login
+
+
+def _is_sso_profile_auth_interstitial(settings: AppSettings, observation: dict[str, Any]) -> bool:
+    login_mode = str(getattr(getattr(settings, "login", None), "mode", "") or "").lower()
+    if login_mode != "sso_profile":
+        return False
+    text = " ".join(
+        [
+            str(observation.get("url") or ""),
+            str(observation.get("title") or ""),
+            str(observation.get("body_text") or ""),
+            " ".join(str(item) for item in observation.get("headings", []) or []),
+        ]
+    ).lower()
+    if not text:
+        return False
+    markers = [
+        "sso",
+        "saml",
+        "adfs",
+        "single sign-on",
+        "single sign on",
+        "windows authentication",
+        "redirecting",
+        "redirect",
+        "자동 로그인",
+        "인증",
+    ]
+    return any(marker in text for marker in markers)
 
 
 def _positive_int(value: Any, *, default: int) -> int:
