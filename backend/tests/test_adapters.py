@@ -1044,9 +1044,12 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
     }
     calls = []
 
+    monkeypatch.setenv("SUPERTONIC_CACHE_DIR", str(tmp_path / "supertonic3"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-cache"))
+
     class FakeSupertonicTts:
-        def __init__(self, *, auto_download):
-            calls.append(("init", auto_download))
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
 
         def get_voice_style(self, *, voice_name):
             calls.append(("style", voice_name))
@@ -1069,7 +1072,7 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
 
     assert result.audio_paths[0].read_bytes() == b"RIFFsupertonic"
     assert calls[:3] == [
-        ("init", False),
+        ("init", {"auto_download": False, "model_dir": str(tmp_path / "supertonic3")}),
         ("style", "F1"),
         ("synthesize", "요청을 확인합니다.", {"preset": "F1"}, "ko"),
     ]
@@ -1084,6 +1087,8 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
     assert metadata["entries"][0]["speaker"] == "F1"
     assert metadata["entries"][0]["language"] == "ko"
     assert metadata["entries"][0]["voice_source"] == "preset"
+    assert metadata["runtime"]["supertonic_cache_dir"] == str(tmp_path / "supertonic3")
+    assert metadata["runtime"]["hf_home"] == str(tmp_path / "hf-cache")
 
 
 def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_path: Path):

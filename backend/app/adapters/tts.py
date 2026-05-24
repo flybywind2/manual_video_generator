@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +46,11 @@ def synthesize_tts(plan: dict[str, Any], settings: AppSettings, tts_dir: Path) -
     if use_supertonic:
         try:
             supertonic = importlib.import_module("supertonic")
-            supertonic_model = supertonic.TTS(auto_download=settings.supertonic_auto_download)
+            supertonic_model_dir = _supertonic_model_dir()
+            supertonic_kwargs: dict[str, Any] = {"auto_download": settings.supertonic_auto_download}
+            if supertonic_model_dir:
+                supertonic_kwargs["model_dir"] = str(supertonic_model_dir)
+            supertonic_model = supertonic.TTS(**supertonic_kwargs)
             supertonic_style = supertonic_model.get_voice_style(voice_name=settings.supertonic_voice)
         except Exception as exc:  # noqa: BLE001 - optional runtime dependency.
             load_error = f"{type(exc).__name__}: {exc}"
@@ -117,8 +122,25 @@ def synthesize_tts(plan: dict[str, Any], settings: AppSettings, tts_dir: Path) -
         metadata["ai_voice_disclosure"] = SUPERTONIC_AI_DISCLOSURE
         metadata["license"] = SUPERTONIC_LICENSE
         metadata["voice_policy"] = SUPERTONIC_VOICE_POLICY
+        metadata["runtime"] = _supertonic_runtime_metadata()
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return TtsResult(audio_paths=audio_paths, metadata_path=metadata_path, entries=entries)
+
+
+def _supertonic_model_dir() -> Path | None:
+    configured = os.environ.get("SUPERTONIC_CACHE_DIR", "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def _supertonic_runtime_metadata() -> dict[str, str | bool]:
+    model_dir = _supertonic_model_dir()
+    hf_home = os.environ.get("HF_HOME", "").strip()
+    return {
+        "supertonic_cache_dir": str(model_dir) if model_dir else "",
+        "supertonic_cache_dir_exists": bool(model_dir and model_dir.exists()),
+        "hf_home": hf_home,
+        "hf_home_exists": bool(hf_home and Path(hf_home).expanduser().exists()),
+    }
 
 
 def _write_silent_wav(path: Path, duration_seconds: float) -> None:
