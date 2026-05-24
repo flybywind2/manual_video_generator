@@ -2613,10 +2613,9 @@ def _execute_demonstration_replay_event(page: Any, event: dict[str, Any], step: 
                 log_entry["status"] = "skipped"
                 log_entry["reason"] = "redacted_input_value"
             else:
-                log_entry["method"] = _fill_by_label(page, label, value)
+                log_entry["method"] = _fill_recorded_input(page, event, label, value)
         elif event_type == "click":
-            texts = _replay_text_candidates(event)
-            log_entry["method"] = _click_by_text(page, texts)
+            log_entry["method"] = _click_recorded_target(page, event)
         elif event_type == "key":
             key = str(event.get("key") or "Enter")
             page.keyboard.press(key)
@@ -2633,6 +2632,83 @@ def _execute_demonstration_replay_event(page: Any, event: dict[str, Any], step: 
         except Exception:
             pass
     return log_entry
+
+
+def _fill_recorded_input(page: Any, event: dict[str, Any], label: str, value: str) -> str:
+    selector = _recorded_selector(event)
+    if selector and _selector_is_specific(selector):
+        locator = getattr(page, "locator", None)
+        if callable(locator):
+            try:
+                locator(selector).fill(value)
+                return f"locator:{selector}"
+            except Exception:
+                pass
+    return _fill_by_label(page, label, value)
+
+
+def _click_recorded_target(page: Any, event: dict[str, Any]) -> str:
+    point = _recorded_click_point(event)
+    if point is not None:
+        mouse = getattr(page, "mouse", None)
+        click = getattr(mouse, "click", None)
+        if callable(click):
+            x, y = point
+            click(x, y)
+            return f"mouse.click:{x},{y}"
+
+    selector = _recorded_selector(event)
+    if selector and _selector_is_specific(selector):
+        locator = getattr(page, "locator", None)
+        if callable(locator):
+            try:
+                locator(selector).click()
+                return f"locator:{selector}"
+            except Exception:
+                pass
+
+    return _click_by_text(page, _replay_text_candidates(event))
+
+
+def _recorded_click_point(event: dict[str, Any]) -> tuple[int, int] | None:
+    for x_key, y_key in (("client_x", "client_y"), ("x", "y"), ("click_x", "click_y")):
+        try:
+            x = float(event.get(x_key))
+            y = float(event.get(y_key))
+        except (TypeError, ValueError):
+            continue
+        if x >= 0 and y >= 0:
+            return int(round(x)), int(round(y))
+    point = event.get("point")
+    if isinstance(point, dict):
+        try:
+            x = float(point.get("x"))
+            y = float(point.get("y"))
+        except (TypeError, ValueError):
+            return None
+        if x >= 0 and y >= 0:
+            return int(round(x)), int(round(y))
+    return None
+
+
+def _recorded_selector(event: dict[str, Any]) -> str:
+    selector = str(event.get("selector") or "").strip()
+    if selector:
+        return selector
+    for candidate in event.get("selector_candidates") or []:
+        candidate_text = str(candidate or "").strip()
+        if candidate_text and not candidate_text.startswith("semantic:"):
+            return candidate_text
+    return ""
+
+
+def _selector_is_specific(selector: str) -> bool:
+    normalized = selector.strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"button", "a", "input", "textarea", "select", "div", "span"}:
+        return False
+    return any(token in selector for token in ("#", "[", ".", ">", ":", "="))
 
 
 def _apply_replay_visual_cue(page: Any, event: dict[str, Any]) -> None:
@@ -3550,6 +3626,10 @@ def _install_demonstration_recorder(page: Any) -> None:
           selector: selectorFor(el),
           selector_candidates: selectorCandidatesFor(el),
           selector_source: 'demonstration.dom',
+          client_x: event.clientX,
+          client_y: event.clientY,
+          viewport_width: window.innerWidth,
+          viewport_height: window.innerHeight,
           text: visibleText(el).slice(0, 160),
           tag: el.tagName?.toLowerCase?.() || '',
           role: el.getAttribute?.('role') || '',

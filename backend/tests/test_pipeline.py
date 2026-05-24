@@ -3060,6 +3060,75 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
     assert '"component": "direct-playwright-replay"' in terminal_text
 
 
+def test_demonstration_replay_click_prefers_recorded_coordinates_over_text():
+    events = []
+
+    class Mouse:
+        def click(self, x, y):
+            events.append(("mouse_click", x, y))
+
+    class FakePage:
+        mouse = Mouse()
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", script, args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def get_by_role(self, role, *args, **kwargs):
+            raise AssertionError("coordinate replay must not re-pick a button by text")
+
+        def get_by_text(self, text, *args, **kwargs):
+            raise AssertionError("coordinate replay must not re-pick text")
+
+    log = pipeline_module._execute_demonstration_replay_event(
+        FakePage(),
+        {"type": "click", "text": "전송", "client_x": 321, "client_y": 456},
+        {"id": "demo_click"},
+        1.0,
+    )
+
+    assert log["status"] == "ok"
+    assert log["method"] == "mouse.click:321,456"
+    assert ("mouse_click", 321, 456) in events
+
+
+def test_demonstration_replay_uses_recorded_selector_before_text_when_no_coordinates():
+    events = []
+
+    class Locator:
+        def click(self):
+            events.append(("locator_click", "#exact-send"))
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            events.append(("evaluate", script, args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def locator(self, selector):
+            events.append(("locator", selector))
+            if selector != "#exact-send":
+                raise AssertionError("must use recorded selector first")
+            return Locator()
+
+        def get_by_role(self, role, *args, **kwargs):
+            raise AssertionError("recorded selector must be tried before text")
+
+    log = pipeline_module._execute_demonstration_replay_event(
+        FakePage(),
+        {"type": "click", "text": "전송", "selector": "#exact-send"},
+        {"id": "demo_click"},
+        1.0,
+    )
+
+    assert log["status"] == "ok"
+    assert log["method"] == "locator:#exact-send"
+    assert ("locator_click", "#exact-send") in events
+
+
 def test_demonstration_replay_uses_cdp_context_when_configured(tmp_path, monkeypatch):
     import playwright.sync_api as sync_api
 
