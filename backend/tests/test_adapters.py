@@ -1588,6 +1588,53 @@ def test_playwright_mcp_live_mode_stops_when_login_screen_is_detected(tmp_path: 
     assert execution["blocked_reason"] == "login_required"
 
 
+def test_playwright_mcp_live_mode_allows_sso_profile_auth_redirect(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+            "MANUAL_AGENT_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\browser-profile",
+        }
+    )
+    plan = {
+        "steps": [{"id": "step_chat", "title": "챗봇", "caption": "챗봇", "narration": "챗봇"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": "http://internal.example.local/chat", "step_id": "step_chat"},
+            {"id": "a2", "type": "fill_by_label", "label": "프롬프트", "value": "테스트", "step_id": "step_chat"},
+            {"id": "a3", "type": "capture_step", "step_id": "step_chat"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code", "browser_snapshot"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_navigate":
+                return {"content": [{"type": "text", "text": "SAML SSO redirecting through corporate authentication"}]}
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
+
+    assert result["status"] == "live-completed"
+    assert result["executed_actions"] == 3
+    assert [name for name, _args in calls] == ["browser_navigate", "browser_run_code", "browser_snapshot"]
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["status"] == "live-completed"
+    assert execution["auth_interstitials"] == [{"action_id": "a1", "reason": "sso_auth_redirect_detected"}]
+
+
 def test_playwright_mcp_manifest_mode_is_explicitly_not_rehearsed(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "manifest"})
     plan = {

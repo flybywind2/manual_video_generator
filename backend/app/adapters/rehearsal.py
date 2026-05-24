@@ -97,6 +97,7 @@ def _run_live_mcp(
         "skipped_actions": [],
         "results": [],
     }
+    sso_profile_mode = str(getattr(getattr(settings, "login", None), "mode", "") or "").lower() == "sso_profile"
     try:
         with client_factory(settings.playwright_mcp_command, settings.request_timeout_seconds) as client:
             execution["initialize"] = client.initialize()
@@ -121,6 +122,11 @@ def _run_live_mcp(
                         "result": result,
                     }
                 )
+                if sso_profile_mode and _is_auth_redirect_result(result) and action.get("type") == "navigate":
+                    execution.setdefault("auth_interstitials", []).append(
+                        {"action_id": action.get("id"), "reason": "sso_auth_redirect_detected"}
+                    )
+                    continue
                 if _mcp_result_has_login_blocker(result):
                     execution["status"] = "blocked-login"
                     execution["blocked_reason"] = "login_required"
@@ -210,9 +216,27 @@ def _mcp_result_has_login_blocker(result: Any) -> bool:
         "continue with apple",
         "password",
         "비밀번호",
-        "sso",
     ]
     return any(blocker.lower() in text for blocker in blockers)
+
+
+def _is_auth_redirect_result(result: Any) -> bool:
+    text = _flatten_mcp_result_text(result).lower()
+    if not text:
+        return False
+    redirect_markers = [
+        "sso",
+        "saml",
+        "adfs",
+        "single sign-on",
+        "single sign on",
+        "redirect",
+        "redirecting",
+        "인증",
+        "자동 로그인",
+        "windows authentication",
+    ]
+    return any(marker in text for marker in redirect_markers)
 
 
 def _flatten_mcp_result_text(value: Any) -> str:
