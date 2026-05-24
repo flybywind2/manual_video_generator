@@ -127,7 +127,7 @@ def _run_live_mcp(
                         {"action_id": action.get("id"), "reason": "sso_auth_redirect_detected"}
                     )
                     continue
-                if _mcp_result_has_login_blocker(result):
+                if _mcp_result_has_login_blocker(result, allow_auth_redirect=sso_profile_mode):
                     execution["status"] = "blocked-login"
                     execution["blocked_reason"] = "login_required"
                     execution["blocked_action_id"] = action.get("id")
@@ -199,9 +199,11 @@ def _run_live_mcp(
     }
 
 
-def _mcp_result_has_login_blocker(result: Any) -> bool:
+def _mcp_result_has_login_blocker(result: Any, *, allow_auth_redirect: bool = False) -> bool:
     text = _flatten_mcp_result_text(result).lower()
     if not text:
+        return False
+    if allow_auth_redirect and _is_auth_redirect_text(text):
         return False
     blockers = [
         "로그인 또는 회원가입",
@@ -224,6 +226,10 @@ def _is_auth_redirect_result(result: Any) -> bool:
     text = _flatten_mcp_result_text(result).lower()
     if not text:
         return False
+    return _is_auth_redirect_text(text)
+
+
+def _is_auth_redirect_text(text: str) -> bool:
     redirect_markers = [
         "sso",
         "saml",
