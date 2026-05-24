@@ -2,6 +2,7 @@ import json
 import subprocess
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1509,6 +1510,99 @@ def test_playwright_mcp_live_mode_executes_semantic_planner_actions(tmp_path: Pa
     assert execution["executed"] is True
     assert execution["attempted_actions"] == 4
     assert execution["executed_actions"] == 4
+
+
+def test_playwright_mcp_live_mode_can_run_dynamic_browser_agent_loop(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "3",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="챗봇에 프롬프트를 입력하고 답변을 확인",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "st.form과 st.input 차이"},
+        agent_brief={"task_type": "chat_prompt", "safe_click_intents": ["전송"]},
+    )
+    plan = {
+        "steps": [{"id": "step_chat", "title": "챗봇", "caption": "챗봇", "narration": "챗봇"}],
+        "actions": [
+            {"id": "a1", "type": "navigate", "target": request.target_url, "step_id": "step_chat"},
+            {"id": "a2", "type": "click_by_text", "texts": ["엉뚱한 버튼"], "step_id": "step_chat"},
+        ],
+    }
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code", "browser_snapshot"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_run_code" and "manualMcpObserve" in arguments.get("code", ""):
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "url": request.target_url,
+                                    "title": "Chat",
+                                    "fields": [{"label": "프롬프트", "selector": "#prompt", "value": ""}],
+                                    "clickables": [{"text": "전송", "selector": "#send"}],
+                                    "body_text": "프롬프트 전송",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {"status": "ok", "type": "fill_by_label", "label": "프롬프트", "value": "st.form과 st.input 차이", "reason": "질문을 입력합니다."},
+        {"status": "ok", "type": "click_by_text", "texts": ["전송"], "reason": "전송합니다."},
+        {"status": "ok", "type": "finish", "reason": "답변 화면을 확인했습니다."},
+    ]
+
+    def decide_next(*_args, **_kwargs):
+        return decisions.pop(0)
+
+    result = rehearse_plan(
+        plan,
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=decide_next,
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    assert result["adapter"] == "playwright-mcp-live-agent"
+    assert result["executed"] is True
+    assert result["executed_actions"] == 2
+    run_code_payloads = [args["code"] for name, args in calls if name == "browser_run_code"]
+    assert any("getByLabel" in code for code in run_code_payloads)
+    assert any("getByRole" in code and "전송" in code for code in run_code_payloads)
+    assert not any("엉뚱한 버튼" in code for code in run_code_payloads)
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["contract"] == "observe-act-verify"
+    assert [turn["action"]["type"] for turn in execution["turns"]] == ["fill_by_label", "click_by_text", "finish"]
+    calls_manifest = json.loads((tmp_path / "playwright_mcp_calls.json").read_text(encoding="utf-8"))
+    assert calls_manifest["mode"] == "dynamic-browser-agent"
 
 
 def test_playwright_mcp_live_mode_can_be_deferred_until_after_login(tmp_path: Path):

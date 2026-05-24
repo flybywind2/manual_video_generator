@@ -546,6 +546,7 @@ def run_pipeline(
         dirs.package,
         allow_live=not defer_mcp_live,
         deferred_reason="login_required" if defer_mcp_live else "",
+        request=effective_request,
     )
     artifact_rehearsal = redact_sensitive(rehearsal)
     _record_stage(
@@ -716,6 +717,7 @@ def create_pipeline_draft(
         dirs.package,
         allow_live=not defer_mcp_live,
         deferred_reason="login_required" if defer_mcp_live else "",
+        request=effective_request,
     )
     artifact_rehearsal = redact_sensitive(rehearsal)
     _record_stage(
@@ -1134,7 +1136,7 @@ def _complete_pipeline_execution(
                 "playwright_mcp_command_set": bool(settings.playwright_mcp_command),
             },
         )
-        post_login_rehearsal = rehearse_plan(plan, settings, dirs.package, allow_live=True)
+        post_login_rehearsal = rehearse_plan(plan, settings, dirs.package, allow_live=True, request=effective_request)
         artifact_post_login_rehearsal = redact_sensitive(post_login_rehearsal)
         artifact_rehearsal = {
             **artifact_rehearsal,
