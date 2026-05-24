@@ -1464,7 +1464,13 @@ def test_execute_browser_agent_actions_can_press_enter_key(tmp_path):
         completion_condition="답변 확인",
         input_values={"프롬프트": "st.form과 st.input 차이"},
     )
-    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true", "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "1"})
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "1",
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+        }
+    )
 
     def decide_next(request, settings, observation, history, step_index):
         return {"status": "ok", "type": "press_key", "key": "Enter", "reason": "채팅 질문 전송"}
@@ -1474,6 +1480,52 @@ def test_execute_browser_agent_actions_can_press_enter_key(tmp_path):
     assert ("press", "Enter") in events
     assert result["action_log"][0]["type"] == "press_key"
     assert result["action_log"][0]["status"] == "ok"
+
+
+def test_execute_browser_agent_actions_extends_loop_for_sso_waits(tmp_path):
+    events = []
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+            return {"body_text": "SAML SSO redirecting", "fields": [], "clickables": []}
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("style",))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="SSO 경유 후 챗봇 질문",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "테스트"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "1",
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+        }
+    )
+    decisions = [
+        {"status": "ok", "type": "wait", "timeout_ms": 1000, "reason": "sso_auth_redirect_wait"},
+        {"status": "ok", "type": "finish", "reason": "SSO 경유 완료"},
+    ]
+
+    def decide_next(*_args, **_kwargs):
+        return decisions.pop(0)
+
+    result = _execute_browser_agent_actions(FakePage(), request, {"actions": []}, tmp_path, settings, decide_next=decide_next)
+
+    assert [entry["type"] for entry in result["action_log"]] == ["wait", "finish"]
+    assert ("wait", 1000) in events
+    assert result["status"] == "ok"
 
 
 def test_capture_action_status_reports_login_required_separately():

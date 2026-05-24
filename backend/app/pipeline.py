@@ -3102,10 +3102,15 @@ def _execute_browser_agent_actions(
     trace_turns: list[dict[str, Any]] = []
     used_names: set[str] = set()
     max_steps = max(int(getattr(settings, "browser_agent_max_steps", 8) or 8), 1)
+    login_mode = str(getattr(getattr(settings, "login", None), "mode", "") or "").lower()
+    max_sso_wait_turns = 30 if login_mode == "sso_profile" else 0
     observer = observe_page or _observe_browser_for_agent
     verifier = verify_action
 
-    for step_index in range(1, max_steps + 1):
+    step_index = 1
+    functional_steps = 0
+    sso_wait_turns = 0
+    while functional_steps < max_steps and step_index <= max_steps + max_sso_wait_turns:
         try:
             observation = observer(page)
             decide_kwargs: dict[str, Any] = {"step_index": step_index}
@@ -3142,7 +3147,14 @@ def _execute_browser_agent_actions(
         action.setdefault("id", f"ba{step_index}")
         action.setdefault("source", "browser-agent-llm")
         action["step_id"] = f"browser_agent_step_{step_index}"
+        is_sso_wait = max_sso_wait_turns > 0 and _is_sso_wait_action(action)
+        if is_sso_wait:
+            sso_wait_turns += 1
+        else:
+            functional_steps += 1
         log_entry = _execute_single_browser_agent_action(page, action, capture_dir, used_names)
+        if is_sso_wait:
+            log_entry["sso_wait_turn"] = sso_wait_turns
         verification = (
             verifier(page, action, log_entry, observation)
             if verifier is not None
@@ -3177,6 +3189,17 @@ def _execute_browser_agent_actions(
             captures.append(Path(log_entry["capture"]))
         if action.get("type") == "finish":
             break
+        if is_sso_wait and sso_wait_turns > max_sso_wait_turns:
+            action_log.append(
+                {
+                    "type": "wait",
+                    "source": "browser-agent-auth-policy",
+                    "status": "blocked",
+                    "reason": "sso_auth_redirect_timeout",
+                }
+            )
+            break
+        step_index += 1
 
     if not captures:
         step = {"id": "browser_agent_step_final", "title": "자동 판단 결과", "caption": "브라우저 자동 판단 결과를 확인합니다."}
@@ -3187,6 +3210,10 @@ def _execute_browser_agent_actions(
     status, degrade_reason = _capture_action_log_status(action_log, failed_reason="browser_agent_action_failed")
     _write_browser_agent_trace(capture_dir.parent, trace_turns)
     return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
+
+
+def _is_sso_wait_action(action: dict[str, Any]) -> bool:
+    return str(action.get("type") or "") == "wait" and str(action.get("reason") or "") == "sso_auth_redirect_wait"
 
 
 def _write_browser_agent_trace(package_dir: Path, turns: list[dict[str, Any]]) -> None:

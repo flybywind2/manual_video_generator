@@ -256,6 +256,7 @@ def _run_live_mcp_browser_agent(
     candidate_calls: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
     max_steps = max(int(getattr(settings, "browser_agent_max_steps", 8) or 8), 1)
+    max_sso_wait_turns = 30 if sso_profile_mode else 0
 
     try:
         with client_factory(settings.playwright_mcp_command, settings.request_timeout_seconds) as client:
@@ -275,7 +276,10 @@ def _run_live_mcp_browser_agent(
                     execution["status"] = "blocked-login"
                     execution["blocked_reason"] = "login_required"
             if execution["status"] != "blocked-login":
-                for step_index in range(1, max_steps + 1):
+                step_index = 1
+                functional_steps = 0
+                sso_wait_turns = 0
+                while functional_steps < max_steps and step_index <= max_steps + max_sso_wait_turns:
                     observation = _observe_with_mcp(client, available_tools)
                     decide_kwargs: dict[str, Any] = {"step_index": step_index}
                     if decide_next is decide_browser_agent_action:
@@ -289,6 +293,12 @@ def _run_live_mcp_browser_agent(
                         "action": redact_sensitive(action),
                     }
                     execution["attempted_actions"] += 1
+                    is_sso_wait = sso_profile_mode and _is_sso_wait_action(action)
+                    if is_sso_wait:
+                        sso_wait_turns += 1
+                        execution["sso_wait_turns"] = sso_wait_turns
+                    else:
+                        functional_steps += 1
                     if action.get("type") == "finish":
                         turn["result"] = {"status": action.get("status", "ok"), "reason": action.get("reason", "")}
                         turn["verification"] = {"phase": "verify", "status": "ok", "reason": "agent_finished"}
@@ -303,12 +313,21 @@ def _run_live_mcp_browser_agent(
                         )
                         execution["status"] = "live-agent-completed"
                         break
+                    if is_sso_wait and max_sso_wait_turns > 0 and sso_wait_turns > max_sso_wait_turns:
+                        turn["result"] = {"status": "blocked", "reason": "sso_auth_redirect_timeout"}
+                        turn["verification"] = {"phase": "verify", "status": "blocked", "reason": "sso_auth_redirect_timeout"}
+                        execution["turns"].append(turn)
+                        history.append({"step": step_index, "type": action.get("type"), "status": "blocked", "reason": "sso_auth_redirect_timeout"})
+                        execution["status"] = "blocked-login"
+                        execution["blocked_reason"] = "sso_auth_redirect_timeout"
+                        break
                     live_call = _action_to_live_mcp_call(action, available_tools)
                     if live_call is None:
                         turn["result"] = {"status": "skipped", "reason": "no_mcp_tool_for_action"}
                         turn["verification"] = {"phase": "verify", "status": "failed", "reason": "no_mcp_tool_for_action"}
                         execution["turns"].append(turn)
                         history.append({"step": step_index, "type": action.get("type"), "status": "skipped", "reason": "no_mcp_tool_for_action"})
+                        step_index += 1
                         continue
                     result = client.call_tool(live_call["tool"], live_call["arguments"])
                     artifact_call = {"action_id": action.get("id"), **redact_sensitive(live_call)}
@@ -337,6 +356,7 @@ def _run_live_mcp_browser_agent(
                             "reason": action.get("reason", ""),
                         }
                     )
+                    step_index += 1
             if execution["status"] == "live-agent-started":
                 execution["status"] = "live-agent-completed"
     except Exception as exc:  # noqa: BLE001 - direct Playwright capture remains the fallback path.
@@ -421,6 +441,10 @@ def _initial_navigate_call(plan: dict[str, Any], request: Any, available_tools: 
     if not target_url or "browser_navigate" not in available_tools:
         return None
     return {"tool": "browser_navigate", "arguments": {"url": target_url}}
+
+
+def _is_sso_wait_action(action: dict[str, Any]) -> bool:
+    return str(action.get("type") or "") == "wait" and str(action.get("reason") or "") == "sso_auth_redirect_wait"
 
 
 def _observe_with_mcp(client: Any, available_tools: set[str]) -> dict[str, Any]:
