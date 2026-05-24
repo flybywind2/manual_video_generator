@@ -477,6 +477,7 @@ MANUAL_AGENT_LOGIN_PASSWORD
 MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS
 MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS
 MANUAL_AGENT_BROWSER_CHANNEL
+MANUAL_AGENT_USER_DATA_DIR
 MANUAL_AGENT_BROWSER_USER_DATA_DIR
 MANUAL_AGENT_AUTH_SERVER_ALLOWLIST
 MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST
@@ -569,12 +570,12 @@ AD 기반 SSO를 사용하는 사내 PC에서는 내가 평소 쓰는 브라우�
 ```env
 MANUAL_AGENT_LOGIN_MODE=sso_profile
 MANUAL_AGENT_BROWSER_CHANNEL=msedge
-MANUAL_AGENT_BROWSER_USER_DATA_DIR=C:\AppBundle\manualgen\browser-profile
+MANUAL_AGENT_USER_DATA_DIR=C:\AppBundle\manualgen\browser-profile
 MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=*.company.local
 MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.company.local
 ```
 
-처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`을 재사용합니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
+처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_USER_DATA_DIR`을 재사용합니다. 기존 설정명 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`도 별칭으로 지원하지만, 둘 다 설정되어 있으면 `MANUAL_AGENT_USER_DATA_DIR`이 우선입니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
 
 직접 시연 모드에서도 `sso_profile`은 유지됩니다. 이 모드에서는 수동 로그인용 `로그인 완료` 버튼을 쓰지 않고, 사용자가 실제 업무 흐름을 끝낸 뒤 `시연 완료` 신호만 누르면 됩니다.
 

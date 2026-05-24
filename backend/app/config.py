@@ -346,7 +346,7 @@ def load_settings(
         password=_get(env, "LOGIN_PASSWORD"),
         manual_timeout_seconds=_get_float(env, "LOGIN_MANUAL_TIMEOUT_SECONDS", 120.0),
         credentials_timeout_seconds=_get_float(env, "LOGIN_CREDENTIALS_TIMEOUT_SECONDS", 30.0),
-        sso_profile_dir=_get(env, "BROWSER_USER_DATA_DIR", str(Path("runtime") / "browser-profile")),
+        sso_profile_dir=_get_first(env, ("USER_DATA_DIR", "BROWSER_USER_DATA_DIR"), str(Path("runtime") / "browser-profile")),
         browser_channel=_normalize_browser_channel(_get(env, "BROWSER_CHANNEL")),
         auth_server_allowlist=_get(env, "AUTH_SERVER_ALLOWLIST"),
         auth_negotiate_delegate_allowlist=_get(env, "AUTH_NEGOTIATE_DELEGATE_ALLOWLIST"),
@@ -424,6 +424,14 @@ def _settings_env_file(*, env_file: Path | None, environ: Mapping[str, str]) -> 
 
 def _get(env: Mapping[str, str], suffix: str, default: str = "") -> str:
     return env.get(f"{APP_PREFIX}{suffix}", default).strip()
+
+
+def _get_first(env: Mapping[str, str], suffixes: tuple[str, ...], default: str = "") -> str:
+    for suffix in suffixes:
+        value = _get(env, suffix)
+        if value:
+            return value
+    return default
 
 
 def _get_bool(env: Mapping[str, str], suffix: str, default: bool) -> bool:

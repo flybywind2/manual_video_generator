@@ -17,6 +17,7 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_SUPERTONIC_LANG=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=" in env_example
     assert "MANUAL_AGENT_BROWSER_CHANNEL=" in env_example
+    assert "MANUAL_AGENT_USER_DATA_DIR=" in env_example
     assert "MANUAL_AGENT_BROWSER_USER_DATA_DIR=" in env_example
     assert "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=" in env_example
     assert "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=" in env_example
@@ -308,6 +309,27 @@ def test_load_settings_reads_manual_agent_env_file_pointer(tmp_path: Path):
     assert settings.llm.model == "file-pointer-model"
     assert settings.output_dir == "D:\\manual-output"
     assert settings.enable_opencode is True
+
+
+def test_user_data_dir_alias_takes_precedence_for_sso_profile():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\sso-profile",
+            "MANUAL_AGENT_BROWSER_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\legacy-profile",
+        }
+    )
+
+    assert settings.login.sso_profile_dir == "C:\\AppBundle\\manualgen\\sso-profile"
+
+
+def test_legacy_browser_user_data_dir_still_sets_sso_profile():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_BROWSER_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\legacy-profile",
+        }
+    )
+
+    assert settings.login.sso_profile_dir == "C:\\AppBundle\\manualgen\\legacy-profile"
 
 
 def test_process_environment_overrides_manual_agent_env_file_pointer(tmp_path: Path):
