@@ -385,9 +385,12 @@ def _is_demonstration_mode(request: PipelineInput) -> bool:
 
 def _requires_login_before_mcp_rehearsal(request: PipelineInput, settings: Any) -> bool:
     login = _resolve_login_options(request, settings)
+    login_mode = str(login.get("mode") or "none").lower()
+    if login_mode == "sso_profile" and not _has_login_or_auth_hint(request):
+        return False
     return (
         _is_demonstration_mode(request)
-        or str(login.get("mode") or "none").lower() in {"manual", "credentials", "sso_profile"}
+        or login_mode in {"manual", "credentials", "sso_profile"}
         or _has_login_or_auth_hint(request)
     )
 
@@ -3111,6 +3114,7 @@ def _execute_browser_agent_actions(
                     **decide_kwargs,
                 )
             )
+            action = _attach_observed_target_to_browser_action(action, observation)
         except Exception as exc:  # noqa: BLE001 - fallback keeps the package inspectable.
             fallback = _execute_capture_actions(page, plan, capture_dir)
             action_log.append(
@@ -3189,6 +3193,67 @@ def _write_browser_agent_trace(package_dir: Path, turns: list[dict[str, Any]]) -
             "turns": redact_sensitive(turns),
         },
     )
+
+
+def _attach_observed_target_to_browser_action(action: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    if action_type == "click_by_text" and not str(action.get("selector") or "").strip():
+        selector = _selector_for_click_texts(observation, _action_text_candidates(action))
+        if selector:
+            return {**action, "selector": selector, "selector_source": "observation.clickables"}
+    if action_type == "fill_by_label" and not str(action.get("selector") or "").strip():
+        selector = _selector_for_field_label(observation, str(action.get("label") or ""))
+        if selector:
+            return {**action, "selector": selector, "selector_source": "observation.fields"}
+    return action
+
+
+def _selector_for_click_texts(observation: dict[str, Any], texts: list[str]) -> str:
+    clickables = observation.get("clickables") if isinstance(observation, dict) else []
+    if not isinstance(clickables, list):
+        return ""
+    for text in texts:
+        text_norm = _compact_action_text(text)
+        if not text_norm:
+            continue
+        matches = []
+        for item in clickables:
+            if not isinstance(item, dict):
+                continue
+            item_text = str(item.get("text") or item.get("href") or "").strip()
+            selector = str(item.get("selector") or "").strip()
+            if not item_text or not selector:
+                continue
+            item_norm = _compact_action_text(item_text)
+            if text_norm == item_norm or text_norm in item_norm or item_norm in text_norm:
+                matches.append(selector)
+        if matches:
+            return matches[0]
+    return ""
+
+
+def _selector_for_field_label(observation: dict[str, Any], label: str) -> str:
+    fields = observation.get("fields") if isinstance(observation, dict) else []
+    if not isinstance(fields, list):
+        return ""
+    label_norm = _compact_action_text(label)
+    if not label_norm:
+        return ""
+    for item in fields:
+        if not isinstance(item, dict):
+            continue
+        selector = str(item.get("selector") or "").strip()
+        if not selector:
+            continue
+        field_label = str(item.get("label") or item.get("placeholder") or item.get("name") or "").strip()
+        field_norm = _compact_action_text(field_label)
+        if field_norm and (label_norm == field_norm or label_norm in field_norm or field_norm in label_norm):
+            return selector
+    return ""
+
+
+def _compact_action_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
 
 
 def _capture_action_log_status(action_log: list[dict[str, Any]], *, failed_reason: str) -> tuple[str, str]:
@@ -3364,26 +3429,40 @@ def _execute_single_browser_agent_action(
     try:
         if action_type == "fill_by_label":
             log_entry["label"] = str(action.get("label") or "")
+            selector = str(action.get("selector") or "").strip()
+            log_entry["selector"] = selector
+            log_entry["selector_source"] = str(action.get("selector_source") or "action.selector")
             log_entry["selector_candidates"] = [
                 _input_selector_for_name(candidate) for candidate in _semantic_label_candidates(str(action.get("label") or ""))
             ]
             _apply_step_overlay(page, step, action)
-            method = _fill_by_label(page, str(action.get("label") or ""), str(action.get("value") or ""))
-            log_entry["method"] = method
-            selector = _selector_from_action_method(method)
             if selector:
-                log_entry["selector"] = selector
-                log_entry["selector_source"] = "resolved_method"
+                page.locator(selector).fill(str(action.get("value") or ""))
+                method = f"locator:{selector}"
+            else:
+                method = _fill_by_label(page, str(action.get("label") or ""), str(action.get("value") or ""))
+            log_entry["method"] = method
+            resolved_selector = _selector_from_action_method(method)
+            if resolved_selector:
+                log_entry["selector"] = resolved_selector
+                log_entry["selector_source"] = log_entry.get("selector_source") or "resolved_method"
             page.wait_for_timeout(300)
         elif action_type == "click_by_text":
             log_entry["texts"] = _action_text_candidates(action)
+            selector = str(action.get("selector") or "").strip()
+            log_entry["selector"] = selector
+            log_entry["selector_source"] = str(action.get("selector_source") or "action.selector")
             _apply_step_overlay(page, step, action)
-            method = _click_by_text(page, _action_text_candidates(action))
-            log_entry["method"] = method
-            selector = _selector_from_action_method(method)
             if selector:
-                log_entry["selector"] = selector
-                log_entry["selector_source"] = "resolved_method"
+                page.locator(selector).click()
+                method = f"locator:{selector}"
+            else:
+                method = _click_by_text(page, _action_text_candidates(action))
+            log_entry["method"] = method
+            resolved_selector = _selector_from_action_method(method)
+            if resolved_selector:
+                log_entry["selector"] = resolved_selector
+                log_entry["selector_source"] = log_entry.get("selector_source") or "resolved_method"
             page.wait_for_timeout(700)
         elif action_type == "press_key":
             _apply_step_overlay(page, step, action)

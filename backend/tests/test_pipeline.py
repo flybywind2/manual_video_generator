@@ -22,6 +22,7 @@ from backend.app.pipeline import (
     _make_dirs,
     _playwright_launch_kwargs,
     _prepare_capture_page,
+    _requires_login_before_mcp_rehearsal,
     _render_subtitles,
     _raise_if_login_failed,
     _resolve_login_options,
@@ -387,6 +388,26 @@ def test_pipeline_draft_defers_live_mcp_when_login_is_required(tmp_path, monkeyp
     package_dir = Path(body["package_dir"])
     assert (package_dir / "playwright_mcp_calls.json").exists()
     assert not (package_dir / "playwright_mcp_execution.json").exists()
+
+
+def test_sso_profile_does_not_defer_mcp_rehearsal_as_prelogin():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+            "MANUAL_AGENT_USER_DATA_DIR": "C:\\AppBundle\\manualgen\\browser-profile",
+            "MANUAL_AGENT_BROWSER_CHANNEL": "msedge",
+        }
+    )
+    request = PipelineInput(
+        request_text="모달창을 확인하고 닫기",
+        target_url="http://internal.example.local/app",
+        role="사용자",
+        completion_condition="모달이 닫히면 완료",
+        execution_mode="ai",
+        login_mode="sso_profile",
+    )
+
+    assert _requires_login_before_mcp_rehearsal(request, settings) is False
 
 
 def test_pipeline_draft_defers_live_mcp_for_auth_url_even_without_login_mode(tmp_path, monkeypatch):
@@ -1576,6 +1597,65 @@ def test_execute_browser_agent_actions_uses_local_policy_when_llm_is_not_configu
     assert result["action_log"][0]["type"] == "fill_by_label"
     assert ("fill", "LOT-001") in calls
     assert not any(call == ("click", "button.search") for call in calls)
+
+
+def test_browser_agent_clicks_observed_selector_instead_of_reselecting_by_text(tmp_path):
+    calls = []
+
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        def click(self):
+            calls.append(("locator_click", self.selector))
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def locator(self, selector):
+            calls.append(("locator", selector))
+            return Locator(selector)
+
+        def get_by_role(self, role, name, exact=False):
+            raise AssertionError("browser agent must use the observed selector before text lookup")
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="모달창 내용을 확인하고 닫기",
+        target_url="http://internal.example.local",
+        role="사용자",
+        completion_condition="모달이 닫히면 완료",
+        agent_brief={"safe_click_intents": ["닫기"]},
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
+    observations = [
+        {
+            "fields": [],
+            "clickables": [{"text": "닫기", "selector": "#modal-close"}],
+            "body_text": "공지 모달 닫기",
+        },
+        {"fields": [], "clickables": [], "body_text": "메인 화면"},
+    ]
+
+    result = _execute_browser_agent_actions(
+        FakePage(),
+        request,
+        {"steps": [], "actions": []},
+        tmp_path,
+        settings,
+        observe_page=lambda _page: observations.pop(0) if observations else {"body_text": "메인 화면"},
+    )
+
+    assert result["status"] == "ok"
+    assert ("locator_click", "#modal-close") in calls
+    assert result["action_log"][0]["selector"] == "#modal-close"
+    assert result["action_log"][0]["selector_source"] == "observation.clickables"
 
 
 def test_resolve_login_options_prefers_request_mode_and_env_credentials():
