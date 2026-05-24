@@ -2242,6 +2242,87 @@ def test_playwright_mcp_live_agent_click_by_text_falls_back_to_browser_evaluate(
     assert execution["turns"][0]["result"].get("status") != "skipped"
 
 
+def test_playwright_mcp_live_agent_fill_by_label_falls_back_to_browser_evaluate_for_chat_input(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="대화 입력창에 질문 입력",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="입력 완료",
+        input_values={"대화 입력창": "테스트 질문"},
+        agent_brief={"task_type": "chat_prompt"},
+    )
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_evaluate"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            function = arguments.get("function", "")
+            if name == "browser_evaluate" and "body_text" in function:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "body_text": "챗봇 화면",
+                                    "fields": [{"label": "대화 입력창", "selector": "[role='textbox']", "type": "textbox", "value": ""}],
+                                    "clickables": [],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {
+            "status": "ok",
+            "type": "fill_by_label",
+            "label": "대화 입력창",
+            "value": "테스트 질문",
+            "value_key": "대화 입력창",
+            "reason": "대화 입력창이 보이므로 입력값을 채운다",
+        },
+        {"status": "ok", "type": "finish", "reason": "입력 완료"},
+    ]
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=lambda *_args, **_kwargs: decisions.pop(0),
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    evaluate_functions = [args["function"] for name, args in calls if name == "browser_evaluate"]
+    assert any("대화 입력창" in function and "테스트 질문" in function for function in evaluate_functions)
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["turns"][0]["tool"] == "browser_evaluate"
+    assert execution["turns"][0]["result"].get("status") != "skipped"
+
+
 def test_playwright_mcp_live_agent_clicks_icon_only_plus_controls(tmp_path: Path):
     settings = load_settings(
         environ={

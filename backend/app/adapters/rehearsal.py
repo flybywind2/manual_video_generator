@@ -653,13 +653,13 @@ async (page) => {
       if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
       return el.tagName.toLowerCase();
     };
-    const fields = Array.from(document.querySelectorAll('input, textarea, select')).filter(visible).slice(0, 40).map((el) => ({
+    const fields = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="textbox"]')).filter(visible).slice(0, 60).map((el) => ({
       selector: selectorFor(el),
       label: labelFor(el),
       name: el.name || '',
       placeholder: el.getAttribute('placeholder') || '',
-      type: el.getAttribute('type') || el.tagName.toLowerCase(),
-      value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
+      type: el.getAttribute('type') || el.getAttribute('role') || (el.isContentEditable ? 'contenteditable' : el.tagName.toLowerCase()),
+      value: el.type === 'password' ? '<redacted>' : String(el.value || el.innerText || '').slice(0, 80),
     }));
     const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [onclick], [class*="icon-"]')).filter(visible).slice(0, 60).map((el) => ({
       selector: selectorFor(el),
@@ -722,13 +722,13 @@ def _mcp_observe_function() -> str:
     if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
     return el.tagName.toLowerCase();
   };
-  const fields = Array.from(document.querySelectorAll('input, textarea, select')).filter(visible).slice(0, 40).map((el) => ({
+  const fields = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="textbox"]')).filter(visible).slice(0, 60).map((el) => ({
     selector: selectorFor(el),
     label: labelFor(el),
     name: el.name || '',
     placeholder: el.getAttribute('placeholder') || '',
-    type: el.getAttribute('type') || el.tagName.toLowerCase(),
-    value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
+    type: el.getAttribute('type') || el.getAttribute('role') || (el.isContentEditable ? 'contenteditable' : el.tagName.toLowerCase()),
+    value: el.type === 'password' ? '<redacted>' : String(el.value || el.innerText || '').slice(0, 80),
   }));
   const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [aria-label], [title], [onclick], [class*="icon-"]')).filter(visible).slice(0, 80).map((el) => ({
     selector: selectorFor(el),
@@ -865,6 +865,11 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
                 "tool": tool,
                 "arguments": {"code": _fill_by_label_code(str(action.get("label") or ""), str(action.get("value") or ""))},
             }
+        if "browser_evaluate" in available_tools:
+            return {
+                "tool": "browser_evaluate",
+                "arguments": {"function": _fill_by_label_function(str(action.get("label") or ""), str(action.get("value") or ""))},
+            }
         return None
     if action_type == "click_by_text":
         tool = _run_code_tool(available_tools)
@@ -938,7 +943,19 @@ def _run_code_tool(available_tools: set[str]) -> str:
 def _fill_by_label_code(label: str, value: str) -> str:
     return (
         "async (page) => { "
-        f"await page.getByLabel({_js(label)}, {{ exact: false }}).fill({_js(value)}); "
+        f"const label = {_js(label)}; "
+        f"const value = {_js(value)}; "
+        "const filledByDom = await page.evaluate(({ label, value }) => { "
+        "const norm = (item) => String(item || '').replace(/\\s+/g, ' ').trim().toLowerCase(); "
+        "const target = norm(label); "
+        "const visible = (el) => { const style = window.getComputedStyle(el); const rect = el.getBoundingClientRect(); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0; }; "
+        "const labelFor = (el) => { const labels = Array.from(el.labels || []).map((item) => item.innerText).filter(Boolean); const explicit = el.id ? document.querySelector(`label[for=\"${CSS.escape(el.id)}\"]`) : null; return norm([...labels, explicit?.innerText, el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.name, el.getAttribute('title'), el.innerText].filter(Boolean).join(' ')); }; "
+        "const candidates = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable=\"true\"], [role=\"textbox\"]')).filter(visible); "
+        "for (const el of candidates) { const candidateLabel = labelFor(el); if (!candidateLabel || !(candidateLabel.includes(target) || target.includes(candidateLabel))) continue; if (el.isContentEditable || el.getAttribute('role') === 'textbox') { el.focus(); el.textContent = value; el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); el.dispatchEvent(new Event('change', { bubbles: true })); return `filled:${label}`; } el.focus(); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return `filled:${label}`; } "
+        "return ''; "
+        "}, { label, value }); "
+        "if (filledByDom) return filledByDom; "
+        "await page.getByLabel(label, { exact: false }).fill(value); "
         "return 'filled_by_label'; "
         "}"
     )
@@ -994,6 +1011,45 @@ def _fill_function(selector: str, value: str) -> str:
     )
 
 
+def _fill_by_label_function(label: str, value: str) -> str:
+    return (
+        "() => { "
+        f"const label = {_js(label)}; "
+        f"const value = {_js(value)}; "
+        "const norm = (item) => String(item || '').replace(/\\s+/g, ' ').trim().toLowerCase(); "
+        "const target = norm(label); "
+        "const visible = (el) => { "
+        "const style = window.getComputedStyle(el); "
+        "const rect = el.getBoundingClientRect(); "
+        "return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0; "
+        "}; "
+        "const labelFor = (el) => { "
+        "const labels = Array.from(el.labels || []).map((item) => item.innerText).filter(Boolean); "
+        "const explicit = el.id ? document.querySelector(`label[for=\"${CSS.escape(el.id)}\"]`) : null; "
+        "return norm([...labels, explicit?.innerText, el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.name, el.getAttribute('title'), el.innerText].filter(Boolean).join(' ')); "
+        "}; "
+        "const candidates = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable=\"true\"], [role=\"textbox\"]')).filter(visible); "
+        "for (const el of candidates) { "
+        "const candidateLabel = labelFor(el); "
+        "if (!candidateLabel || !(candidateLabel.includes(target) || target.includes(candidateLabel))) continue; "
+        "if (el.isContentEditable || el.getAttribute('role') === 'textbox') { "
+        "el.focus(); "
+        "el.textContent = value; "
+        "el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); "
+        "el.dispatchEvent(new Event('change', { bubbles: true })); "
+        "return `filled:${label}`; "
+        "} "
+        "el.focus(); "
+        "el.value = value; "
+        "el.dispatchEvent(new Event('input', { bubbles: true })); "
+        "el.dispatchEvent(new Event('change', { bubbles: true })); "
+        "return `filled:${label}`; "
+        "} "
+        "throw new Error(`field not found: ${label}`); "
+        "}"
+    )
+
+
 def _click_function(selector: str) -> str:
     return (
         "() => { "
@@ -1041,7 +1097,7 @@ def _click_by_text_function(texts: list[str]) -> str:
 
 
 def _js(value: str) -> str:
-    return json.dumps(value)
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _js_array(values: list[str]) -> str:
