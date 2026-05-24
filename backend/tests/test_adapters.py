@@ -1533,6 +1533,23 @@ def test_playwright_mcp_live_mode_calls_mcp_client_and_writes_execution_log(tmp_
 
         def call_tool(self, name, arguments):
             calls.append((name, arguments))
+            function = arguments.get("function", "")
+            if name == "browser_evaluate" and "body_text" in function:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "body_text": "공지 모달",
+                                    "fields": [],
+                                    "clickables": [{"text": "닫기", "selector": "button.close"}],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
             return {"content": [{"type": "text", "text": f"{name} ok"}]}
 
     result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
@@ -1574,6 +1591,23 @@ def test_playwright_mcp_live_mode_executes_semantic_planner_actions(tmp_path: Pa
 
         def call_tool(self, name, arguments):
             calls.append((name, arguments))
+            function = arguments.get("function", "")
+            if name == "browser_evaluate" and "body_text" in function:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "body_text": "공지 모달",
+                                    "fields": [],
+                                    "clickables": [{"text": "닫기", "selector": "button.close"}],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
             return {"content": [{"type": "text", "text": f"{name} ok"}]}
 
     result = rehearse_plan(plan, settings, tmp_path, mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient())
@@ -2126,6 +2160,86 @@ def test_playwright_mcp_manifest_mode_is_explicitly_not_rehearsed(tmp_path: Path
     assert result["requires_live_mode"] is True
     assert [call["action_id"] for call in calls] == ["a1", "a2"]
     assert all(call["tool"] == "browser_run_code" for call in calls)
+
+
+def test_playwright_mcp_live_agent_click_by_text_falls_back_to_browser_evaluate(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="모달창을 확인하고 닫기",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="모달창 닫기",
+        input_values={},
+        agent_brief={"safe_click_intents": ["닫기", "창닫기"]},
+    )
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_evaluate"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            function = arguments.get("function", "")
+            if name == "browser_evaluate" and "body_text" in function:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "body_text": "공지 모달",
+                                    "fields": [],
+                                    "clickables": [{"text": "닫기", "selector": "button.close"}],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {"status": "ok", "type": "click_by_text", "texts": ["닫기", "창닫기"], "reason": "모달창 닫기"},
+        {"status": "ok", "type": "finish", "reason": "모달창을 닫았습니다."},
+    ]
+
+    def decide_next(*_args, **_kwargs):
+        return decisions.pop(0)
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=decide_next,
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    evaluate_functions = [args["function"] for name, args in calls if name == "browser_evaluate"]
+    assert any("querySelectorAll" in function for function in evaluate_functions)
+    assert any("닫기" in function for function in evaluate_functions)
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["turns"][0]["observation"]["clickables"] == [{"text": "닫기", "selector": "button.close"}]
+    assert execution["turns"][0]["tool"] == "browser_evaluate"
+    assert execution["turns"][0]["result"]["content"][0]["text"] == "browser_evaluate ok"
+    assert execution["turns"][0]["result"].get("status") != "skipped"
 
 
 def test_playwright_mcp_manifest_redacts_sensitive_fill_values(tmp_path: Path):

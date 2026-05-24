@@ -454,7 +454,7 @@ def _effective_mcp_command(settings: AppSettings) -> str:
     if str(getattr(login, "mode", "") or "").lower() != "sso_profile":
         return command
 
-    tokens = [token for token in shlex.split(command, posix=False) if token and token != "--headless"]
+    tokens = [token for token in _split_mcp_command(command) if token and token != "--headless"]
     browser_channel = str(getattr(login, "browser_channel", "") or "").strip()
     if browser_channel and not _has_cli_option(tokens, "--browser"):
         tokens.extend(["--browser", browser_channel])
@@ -469,6 +469,13 @@ def _effective_mcp_command(settings: AppSettings) -> str:
 def _has_cli_option(tokens: list[str], option: str) -> bool:
     option_prefix = f"{option}="
     return any(token == option or token.startswith(option_prefix) for token in tokens)
+
+
+def _split_mcp_command(command: str) -> list[str]:
+    try:
+        return shlex.split(command, posix=False)
+    except ValueError:
+        return command.split()
 
 
 def _quote_cli_value(value: str) -> str:
@@ -543,6 +550,11 @@ def _is_sso_wait_action(action: dict[str, Any]) -> bool:
 def _observe_with_mcp(client: Any, available_tools: set[str]) -> dict[str, Any]:
     tool = _run_code_tool(available_tools)
     if not tool:
+        if "browser_evaluate" in available_tools:
+            result = client.call_tool("browser_evaluate", {"function": _mcp_observe_function()})
+            parsed = _parse_mcp_observation(result)
+            if parsed:
+                return parsed
         if "browser_snapshot" in available_tools:
             result = client.call_tool("browser_snapshot", {})
             return {"body_text": _flatten_mcp_result_text(result), "fields": [], "clickables": []}
@@ -656,6 +668,64 @@ async (page) => {
       body_text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 4000),
     };
   });
+}
+""".strip()
+
+
+def _mcp_observe_function() -> str:
+    return """
+() => {
+  const visible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+  const labelFor = (el) => {
+    const labels = Array.from(el.labels || []).map((label) => label.innerText.trim()).filter(Boolean);
+    if (labels.length) return labels.join(' ');
+    const id = el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`) : null;
+    return (id?.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '').trim();
+  };
+  const cssEscape = (value) => {
+    try { return CSS.escape(String(value)); } catch { return String(value).replace(/"/g, '\\"'); }
+  };
+  const selectorFor = (el) => {
+    if (!el || !el.tagName) return '';
+    if (el.id) return `#${cssEscape(el.id)}`;
+    const testId = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-action');
+    if (testId) return `[${el.getAttribute('data-testid') ? 'data-testid' : el.getAttribute('data-test') ? 'data-test' : 'data-action'}="${cssEscape(testId)}"]`;
+    const name = el.getAttribute('name');
+    if (name) return `${el.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
+    const aria = el.getAttribute('aria-label');
+    if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
+    return el.tagName.toLowerCase();
+  };
+  const fields = Array.from(document.querySelectorAll('input, textarea, select')).filter(visible).slice(0, 40).map((el) => ({
+    selector: selectorFor(el),
+    label: labelFor(el),
+    name: el.name || '',
+    placeholder: el.getAttribute('placeholder') || '',
+    type: el.getAttribute('type') || el.tagName.toLowerCase(),
+    value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
+  }));
+  const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [aria-label], [title]')).filter(visible).slice(0, 80).map((el) => ({
+    selector: selectorFor(el),
+    text: textOf(el).slice(0, 120),
+    role: el.getAttribute('role') || el.tagName.toLowerCase(),
+    href: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') || '' : '',
+  })).filter((item) => item.text || item.href);
+  const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]')).filter(visible).slice(0, 20).map((el) => textOf(el).slice(0, 160)).filter(Boolean);
+  return {
+    marker: true,
+    url: location.href,
+    title: document.title,
+    headings,
+    fields,
+    clickables,
+    body_text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 4000),
+  };
 }
 """.strip()
 
@@ -780,6 +850,8 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
         tool = _run_code_tool(available_tools)
         if tool:
             return {"tool": tool, "arguments": {"code": _click_by_text_code(_text_candidates(action))}}
+        if "browser_evaluate" in available_tools:
+            return {"tool": "browser_evaluate", "arguments": {"function": _click_by_text_function(_text_candidates(action))}}
         return None
     if action_type == "fill":
         selector = action.get("selector", "")
@@ -899,6 +971,31 @@ def _click_function(selector: str) -> str:
         "if (!el) throw new Error('selector not found'); "
         "el.click(); "
         "return 'clicked'; "
+        "}"
+    )
+
+
+def _click_by_text_function(texts: list[str]) -> str:
+    return (
+        "() => { "
+        f"const texts = {_js_array(texts)}; "
+        "const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); "
+        "const visible = (el) => { "
+        "const style = window.getComputedStyle(el); "
+        "const rect = el.getBoundingClientRect(); "
+        "return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0; "
+        "}; "
+        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], a, input[type=\"button\"], input[type=\"submit\"], [aria-label], [title]')); "
+        "for (const text of texts) { "
+        "const target = norm(text); "
+        "if (!target) continue; "
+        "for (const el of candidates) { "
+        "if (!visible(el)) continue; "
+        "const label = norm(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title')); "
+        "if (label && (label.includes(target) || target.includes(label))) { el.click(); return `clicked:${text}`; } "
+        "} "
+        "} "
+        "throw new Error(`text not found: ${texts.join(', ')}`); "
         "}"
     )
 
