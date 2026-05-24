@@ -683,6 +683,40 @@ def test_browser_agent_waits_on_sso_profile_auth_interstitial_instead_of_finishi
     assert action["reason"] == "sso_auth_redirect_wait"
 
 
+def test_browser_agent_does_not_wait_on_app_home_with_auth_words_after_sso():
+    request = PipelineInput(
+        request_text="사내 시스템 홈에서 공지 확인",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="홈 화면 확인",
+        input_values={},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+        }
+    )
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": "http://internal.example.local/home",
+            "title": "사내 시스템 홈",
+            "body_text": "홈 대시보드 권한 인증 관리 사용자 메뉴 공지사항",
+            "headings": ["홈"],
+            "fields": [],
+            "clickables": [{"text": "공지사항"}, {"text": "사용자 인증 관리"}],
+        },
+        history=[],
+        step_index=2,
+        http_post=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be required")),
+    )
+
+    assert action["reason"] != "sso_auth_redirect_wait"
+
+
 def test_extension_bridge_client_uses_observe_act_verify_contract():
     calls = []
 

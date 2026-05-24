@@ -458,29 +458,43 @@ def _is_sso_profile_auth_interstitial(settings: AppSettings, observation: dict[s
     login_mode = str(getattr(getattr(settings, "login", None), "mode", "") or "").lower()
     if login_mode != "sso_profile":
         return False
-    text = " ".join(
-        [
-            str(observation.get("url") or ""),
-            str(observation.get("title") or ""),
-            str(observation.get("body_text") or ""),
-            " ".join(str(item) for item in observation.get("headings", []) or []),
-        ]
-    ).lower()
-    if not text:
+    url_title = " ".join([str(observation.get("url") or ""), str(observation.get("title") or "")]).lower()
+    body_text = str(observation.get("body_text") or "").lower()
+    heading_text = " ".join(str(item) for item in observation.get("headings", []) or []).lower()
+    if not (url_title or body_text or heading_text):
         return False
-    markers = [
-        "sso",
+    strong_url_markers = [
+        "saml",
+        "adfs",
+        "/sso",
+        "sso/",
+        "single sign-on",
+        "single sign on",
+        "windows authentication",
+        "samlrequest",
+        "wa=wsignin",
+    ]
+    if any(marker in url_title for marker in strong_url_markers):
+        return True
+
+    body = f"{heading_text} {body_text}"
+    redirect_markers = ["redirecting", "redirect", "리디렉션", "이동 중", "잠시만", "자동 로그인"]
+    auth_context_markers = [
         "saml",
         "adfs",
         "single sign-on",
         "single sign on",
         "windows authentication",
-        "redirecting",
-        "redirect",
-        "자동 로그인",
-        "인증",
+        "sso 인증",
+        "sso login",
     ]
-    return any(marker in text for marker in markers)
+    has_password_field = any(
+        isinstance(field, dict) and str(field.get("type") or "").lower() == "password"
+        for field in observation.get("fields", []) or []
+    )
+    if has_password_field and any(marker in body for marker in auth_context_markers):
+        return True
+    return any(marker in body for marker in redirect_markers) and any(marker in body for marker in auth_context_markers)
 
 
 def _positive_int(value: Any, *, default: int) -> int:
