@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any, Callable
 
@@ -99,13 +100,14 @@ def _run_live_mcp(
     decide_next: Any = decide_browser_agent_action,
 ) -> dict[str, Any]:
     execution_path = package_dir / "playwright_mcp_execution.json"
+    effective_command = _effective_mcp_command(settings)
     actions = [action for action in plan.get("actions", []) if isinstance(action, dict)]
     client_factory = mcp_client_factory or (
         lambda command, timeout_seconds: StdioMcpClient(command=command, timeout_seconds=timeout_seconds, cwd=package_dir)
     )
     execution: dict[str, Any] = {
         "status": "live-started",
-        "command": settings.playwright_mcp_command,
+        "command": effective_command,
         "calls_path": str(calls_path),
         "executed": True,
         "attempted_actions": len(actions),
@@ -124,9 +126,10 @@ def _run_live_mcp(
             request=request,
             decide_next=decide_next,
             sso_profile_mode=sso_profile_mode,
+            effective_command=effective_command,
         )
     try:
-        with client_factory(settings.playwright_mcp_command, settings.request_timeout_seconds) as client:
+        with client_factory(effective_command, settings.request_timeout_seconds) as client:
             execution["initialize"] = client.initialize()
             available_tools = client.list_tools()
             execution["available_tools"] = sorted(available_tools)
@@ -176,7 +179,7 @@ def _run_live_mcp(
             "attempted_actions": execution.get("attempted_actions", 0),
             "executed_actions": execution.get("executed_actions", 0),
             "skipped_actions": execution.get("skipped_actions", []),
-            "command": settings.playwright_mcp_command,
+            "command": effective_command,
             "calls_path": str(calls_path),
             "execution_path": str(execution_path),
             "observations": ["Playwright MCP live session이 action plan을 실행했습니다."],
@@ -193,7 +196,7 @@ def _run_live_mcp(
             "attempted_actions": execution.get("attempted_actions", 0),
             "executed_actions": execution.get("executed_actions", 0),
             "skipped_actions": execution.get("skipped_actions", []),
-            "command": settings.playwright_mcp_command,
+            "command": effective_command,
             "calls_path": str(calls_path),
             "execution_path": str(execution_path),
             "observations": [
@@ -213,7 +216,7 @@ def _run_live_mcp(
         "attempted_actions": execution.get("attempted_actions", 0),
         "executed_actions": execution.get("executed_actions", 0),
         "skipped_actions": execution.get("skipped_actions", []),
-        "command": settings.playwright_mcp_command,
+        "command": effective_command,
         "calls_path": str(calls_path),
         "execution_path": str(execution_path),
         "observations": [
@@ -236,6 +239,7 @@ def _run_live_mcp_browser_agent(
     request: Any,
     decide_next: Any,
     sso_profile_mode: bool,
+    effective_command: str,
 ) -> dict[str, Any]:
     execution_path = package_dir / "playwright_mcp_execution.json"
     client_factory = mcp_client_factory or (
@@ -245,7 +249,7 @@ def _run_live_mcp_browser_agent(
         "status": "live-agent-started",
         "adapter": "playwright-mcp-live-agent",
         "contract": "observe-act-verify",
-        "command": settings.playwright_mcp_command,
+        "command": effective_command,
         "calls_path": str(calls_path),
         "executed": True,
         "attempted_actions": 0,
@@ -259,7 +263,7 @@ def _run_live_mcp_browser_agent(
     max_sso_wait_turns = 30 if sso_profile_mode else 0
 
     try:
-        with client_factory(settings.playwright_mcp_command, settings.request_timeout_seconds) as client:
+        with client_factory(effective_command, settings.request_timeout_seconds) as client:
             execution["initialize"] = client.initialize()
             available_tools = client.list_tools()
             execution["available_tools"] = sorted(available_tools)
@@ -388,7 +392,7 @@ def _run_live_mcp_browser_agent(
             "requires_live_mode": True,
             "attempted_actions": execution.get("attempted_actions", 0),
             "executed_actions": execution.get("executed_actions", 0),
-            "command": settings.playwright_mcp_command,
+            "command": effective_command,
             "calls_path": str(calls_path),
             "execution_path": str(execution_path),
             "observations": [
@@ -407,7 +411,7 @@ def _run_live_mcp_browser_agent(
             "requires_live_mode": False,
             "attempted_actions": execution.get("attempted_actions", 0),
             "executed_actions": execution.get("executed_actions", 0),
-            "command": settings.playwright_mcp_command,
+            "command": effective_command,
             "calls_path": str(calls_path),
             "execution_path": str(execution_path),
             "observations": [
@@ -425,7 +429,7 @@ def _run_live_mcp_browser_agent(
         "requires_live_mode": False,
         "attempted_actions": execution.get("attempted_actions", 0),
         "executed_actions": execution.get("executed_actions", 0),
-        "command": settings.playwright_mcp_command,
+        "command": effective_command,
         "calls_path": str(calls_path),
         "execution_path": str(execution_path),
         "observations": ["Playwright MCP browser agent가 observe-act-verify 방식으로 요구사항을 단계별 실행했습니다."],
@@ -442,6 +446,37 @@ def _initial_navigate_call(plan: dict[str, Any], request: Any, available_tools: 
     if not target_url or "browser_navigate" not in available_tools:
         return None
     return {"tool": "browser_navigate", "arguments": {"url": target_url}}
+
+
+def _effective_mcp_command(settings: AppSettings) -> str:
+    command = str(settings.playwright_mcp_command or "").strip()
+    login = getattr(settings, "login", None)
+    if str(getattr(login, "mode", "") or "").lower() != "sso_profile":
+        return command
+
+    tokens = [token for token in shlex.split(command, posix=False) if token and token != "--headless"]
+    browser_channel = str(getattr(login, "browser_channel", "") or "").strip()
+    if browser_channel and not _has_cli_option(tokens, "--browser"):
+        tokens.extend(["--browser", browser_channel])
+
+    user_data_dir = str(getattr(login, "sso_profile_dir", "") or "").strip()
+    if user_data_dir and not _has_cli_option(tokens, "--user-data-dir"):
+        tokens.extend(["--user-data-dir", _quote_cli_value(user_data_dir)])
+
+    return " ".join(tokens)
+
+
+def _has_cli_option(tokens: list[str], option: str) -> bool:
+    option_prefix = f"{option}="
+    return any(token == option or token.startswith(option_prefix) for token in tokens)
+
+
+def _quote_cli_value(value: str) -> str:
+    if not value or value.startswith('"') and value.endswith('"'):
+        return value
+    if any(ch.isspace() for ch in value):
+        return f'"{value.replace(chr(34), chr(92) + chr(34))}"'
+    return value
 
 
 def _maybe_hold_mcp_browser_for_auth_debug(
