@@ -218,6 +218,8 @@ def _infer_task_type(text: str) -> str:
 
 def _infer_safe_click_intents(text: str, task_type: str) -> list[str]:
     intents: list[str] = []
+    if any(keyword in text for keyword in ("모달", "팝업", "popup", "modal", "닫", "close")):
+        intents.extend(["닫기", "확인", "Close", "OK"])
     if task_type == "chat_prompt":
         intents.extend(["전송", "Send", "Enter"])
     if "조회" in text or "검색" in text or task_type == "lookup":
@@ -240,13 +242,14 @@ def _inferred_success_criterion(task_type: str) -> str:
 
 
 def _autonomy_guidance(task_type: str) -> str:
+    modal_guidance = "모달창이나 팝업이 보이고 요청에 닫기/확인이 포함되어 있으면 본 작업보다 먼저 안전한 닫기/확인 버튼을 선택한다. "
     if task_type == "chat_prompt":
-        return "질문 입력칸을 찾아 프롬프트를 입력하고 전송 또는 Enter로 제출한 뒤 답변이 나타날 때까지 기다린다."
+        return modal_guidance + "질문 입력칸을 찾아 프롬프트를 입력하고 전송 또는 Enter로 제출한 뒤 답변이 나타날 때까지 기다린다."
     if task_type == "lookup":
-        return "업무 입력값을 가장 관련 있는 검색/조회 필드에 입력하고 조회 또는 검색 버튼을 누른 뒤 결과 화면을 확인한다."
+        return modal_guidance + "업무 입력값을 가장 관련 있는 검색/조회 필드에 입력하고 조회 또는 검색 버튼을 누른 뒤 결과 화면을 확인한다."
     if task_type == "detail_review":
-        return "목록 또는 결과 화면에서 상세 보기 성격의 안전한 링크나 버튼을 선택하고 상세 내용이 나타나는지 확인한다."
-    return "화면의 제목, 입력 필드, 버튼 텍스트를 기준으로 다음 안전한 읽기 중심 행동을 선택한다."
+        return modal_guidance + "목록 또는 결과 화면에서 상세 보기 성격의 안전한 링크나 버튼을 선택하고 상세 내용이 나타나는지 확인한다."
+    return modal_guidance + "화면의 제목, 입력 필드, 버튼 텍스트를 기준으로 다음 안전한 읽기 중심 행동을 선택한다."
 
 
 def _redact_sensitive_free_text(value: str) -> str:

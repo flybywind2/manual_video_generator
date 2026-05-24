@@ -1220,7 +1220,7 @@ def _complete_pipeline_execution(
         },
     )
     replay_result: dict[str, Any] | None = None
-    if capture_browser and _should_replay_demonstration(effective_request, capture_result.get("action_log", [])):
+    if capture_browser and _should_replay_with_tts_timing(effective_request, capture_result.get("action_log", [])):
         _update_workflow_state(
             dirs.package,
             status=WorkflowStatus.RUNNING,
@@ -1233,7 +1233,7 @@ def _complete_pipeline_execution(
             actor="replay",
             status="started",
             details={
-                "source": "direct-demonstration-events",
+                "source": media_plan.get("source") or "browser-events",
                 "audio_count": len(tts_result.audio_paths),
             },
         )
@@ -1257,7 +1257,7 @@ def _complete_pipeline_execution(
             actor="replay",
             status=str(replay_result.get("status") or "ok"),
             input_data={
-                "source": "direct-demonstration-events",
+                "source": media_plan.get("source") or "browser-events",
                 "event_count": len(_demonstration_events_for_media(capture_result.get("action_log", []))),
             },
             output_data={
@@ -2323,6 +2323,10 @@ def _execute_demonstration_capture(
 
 def _should_replay_demonstration(request: PipelineInput, action_log: list[dict[str, Any]]) -> bool:
     return _is_demonstration_mode(request) and bool(_demonstration_events_for_media(action_log))
+
+
+def _should_replay_with_tts_timing(request: PipelineInput, action_log: list[dict[str, Any]]) -> bool:
+    return (_is_demonstration_mode(request) or _execution_mode(request) == "ai") and bool(_demonstration_events_for_media(action_log))
 
 
 def _replay_demonstration_with_playwright(
@@ -4575,10 +4579,22 @@ def _media_plan_for_outputs(
     plan: dict[str, Any],
     action_log: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    if not _is_demonstration_mode(request):
-        return plan
-
     events = _demonstration_events_for_media(action_log)
+    if not _is_demonstration_mode(request):
+        if not events:
+            return plan
+        steps = [_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1)]
+        return {
+            "source": "browser-agent-media-plan",
+            "request_text": request.request_text,
+            "target_url": request.target_url,
+            "role": request.role,
+            "completion_condition": request.completion_condition,
+            "steps": steps,
+            "actions": [],
+            "browser_event_count": len(events),
+        }
+
     if not events:
         return plan
 
@@ -4830,16 +4846,53 @@ def _demonstration_events_for_media(action_log: list[dict[str, Any]]) -> list[di
     for raw_event in candidates:
         if not isinstance(raw_event, dict):
             continue
-        event_type = str(raw_event.get("type") or "")
-        if event_type not in {"input", "click", "key"}:
+        normalized_event = _normalize_replayable_event(raw_event)
+        if normalized_event is None:
             continue
         status = str(raw_event.get("status") or "ok")
         if status in {"failed", "skipped", "blocked"}:
             continue
-        events.append(redact_sensitive(raw_event))
+        events.append(redact_sensitive(normalized_event))
         if len(events) >= 40:
             break
     return events
+
+
+def _normalize_replayable_event(raw_event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(raw_event.get("type") or "")
+    if event_type in {"input", "click", "key"}:
+        return dict(raw_event)
+    if event_type == "fill_by_label":
+        return {
+            "type": "input",
+            "label": str(raw_event.get("label") or ""),
+            "value": str(raw_event.get("value") or ""),
+            "selector": str(raw_event.get("selector") or ""),
+            "selector_candidates": raw_event.get("selector_candidates") or [],
+            "selector_source": raw_event.get("selector_source") or "",
+            "status": raw_event.get("status", "ok"),
+        }
+    if event_type == "click_by_text":
+        texts = raw_event.get("texts") or []
+        text = str(texts[0] if isinstance(texts, list) and texts else raw_event.get("text") or raw_event.get("reason") or "")
+        return {
+            "type": "click",
+            "text": text,
+            "label": text,
+            "selector": str(raw_event.get("selector") or ""),
+            "selector_candidates": raw_event.get("selector_candidates") or [],
+            "selector_source": raw_event.get("selector_source") or "",
+            "status": raw_event.get("status", "ok"),
+        }
+    if event_type == "press_key":
+        return {
+            "type": "key",
+            "key": str(raw_event.get("key") or "Enter"),
+            "label": str(raw_event.get("label") or ""),
+            "selector": str(raw_event.get("selector") or ""),
+            "status": raw_event.get("status", "ok"),
+        }
+    return None
 
 
 def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str, str]:

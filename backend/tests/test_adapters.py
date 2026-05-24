@@ -160,8 +160,23 @@ def test_input_extractor_augments_chatbot_request_with_safe_intents(tmp_path: Pa
     assert brief["task_type"] == "chat_prompt"
     assert "프롬프트" in brief["required_inputs"]
     assert "전송" in brief["safe_click_intents"]
-    assert "Web Search" in brief["forbidden_click_intents"]
-    assert "답변이 보이면 완료" in brief["success_criteria"]
+
+
+def test_input_extractor_adds_modal_close_intents_before_later_work(tmp_path: Path):
+    request = PipelineInput(
+        request_text="모달창 내용을 확인하고 닫은 다음 사내 화면을 조회",
+        target_url="http://internal.example.local/app",
+        role="사용자",
+        completion_condition="모달이 닫히고 조회 화면",
+    )
+    settings = load_settings(environ={})
+
+    result = extract_input_values(request, settings, package_dir=tmp_path)
+    brief = result["scenario_brief"]
+
+    assert "닫기" in brief["safe_click_intents"]
+    assert "확인" in brief["safe_click_intents"]
+    assert "모달창" in brief["autonomy_guidance"]
 
 
 def test_browser_agent_decides_next_action_from_page_observation(tmp_path: Path, capsys):

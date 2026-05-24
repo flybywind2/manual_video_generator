@@ -242,6 +242,7 @@ def _call_llm_planner(
                     "브라우저 화면마다 달라지는 CSS selector보다 fill_by_label, click_by_text, press_key, capture_step 같은 의미 기반 action을 우선한다. "
                     "입력값은 input_values의 key를 value_key로 참조하고, 화면의 실제 필드명은 label에 넣는다. "
                     "조회/검색/전송 뒤에는 capture_step을 넣고, 완료 조건 확인 단계도 포함한다. "
+                    "요청문에 모달창/팝업 확인 또는 닫기가 포함되어 있으면 본 작업 전에 닫기/확인 click_by_text 단계를 먼저 둔다. "
                     "웹 검색, web search, 모델 선택, 도구 선택, 기능 토글 같은 선택형 UI는 클릭하지 않는다."
                 ),
             },

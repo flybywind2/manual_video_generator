@@ -66,6 +66,7 @@ def decide_browser_agent_action(
                     "Return JSON only. Allowed types: fill_by_label, click_by_text, press_key, wait, capture_step, finish. "
                     "Use fill_by_label only with provided input_values; if the visible field label differs from the input key, map the closest field to the value. "
                     "Use click_by_text only for navigation/search/detail/read/send actions listed in safe_click_intents or clearly required by the objective. "
+                    "If a modal or popup is visible and the objective mentions checking or closing it, close/confirm that modal before continuing with later work. "
                     "Use press_key only for Enter after a chat/search input has already been filled and needs submission. "
                     "If the previous action failed, do not repeat the same label/text; pick another visible candidate or finish with a clear reason. "
                     "Capture meaningful milestones after data entry, after search/send, and before finish. "

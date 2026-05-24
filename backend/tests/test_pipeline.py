@@ -2799,6 +2799,34 @@ def test_demonstration_events_drive_media_plan_and_subtitles(tmp_path):
     assert "클릭: 답변 복사" in subtitle_text
 
 
+def test_ai_browser_action_log_drives_media_plan_for_tts_sync(tmp_path):
+    request = PipelineInput(
+        request_text="모달창 내용을 확인하고 닫은 다음 조회",
+        target_url="http://internal.example.local/app",
+        role="사용자",
+        completion_condition="조회 결과",
+        execution_mode="ai",
+    )
+    base_plan = {
+        "steps": [{"id": "planned_later", "title": "이후 작업", "caption": "이후 작업", "narration": "이후 작업"}],
+        "actions": [],
+    }
+    action_log = [
+        {"type": "click_by_text", "status": "ok", "texts": ["닫기"], "selector": "#modal-close"},
+        {"type": "fill_by_label", "status": "ok", "label": "검색어", "value": "LOT-001", "selector": "#search"},
+        {"type": "press_key", "status": "ok", "key": "Enter"},
+    ]
+
+    media_plan = _media_plan_for_outputs(request, base_plan, action_log)
+    subtitles = _render_subtitles(media_plan, tmp_path)
+    titles = [step["title"] for step in media_plan["steps"]]
+
+    assert media_plan["source"] == "browser-agent-media-plan"
+    assert "이후 작업" not in json.dumps(media_plan, ensure_ascii=False)
+    assert titles == ["클릭: 닫기", "입력: 검색어", "Enter 입력"]
+    assert "클릭: 닫기" in subtitles.read_text(encoding="utf-8")
+
+
 def test_demonstration_pipeline_uses_recorded_events_for_outputs(tmp_path, monkeypatch):
     def fake_capture(request, plan, dirs, settings):
         import base64
@@ -2956,6 +2984,95 @@ def test_demonstration_pipeline_replays_events_after_tts_for_final_video(tmp_pat
     assert calls["render_fallback"].name == "manual_video_agent_usage.webm"
     assert calls["render_fallback"].read_bytes() == b"playwright-replay"
     assert result.artifacts.video.read_bytes() == b"playwright-replay"
+
+
+def test_ai_browser_pipeline_replays_action_log_after_tts_for_sync(tmp_path, monkeypatch):
+    def fake_capture(request, plan, dirs, settings):
+        import base64
+
+        capture = dirs.captures / "ai_capture.png"
+        capture.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+            )
+        )
+        video = dirs.package / "manual_video_agent_usage.webm"
+        video.write_bytes(b"webm")
+        action_log = [
+            {"type": "click_by_text", "status": "ok", "texts": ["닫기"], "selector": "#modal-close"},
+            {"type": "capture_step", "status": "ok", "capture": str(capture)},
+        ]
+        action_log_path = dirs.package / "capture_action_log.json"
+        action_log_path.write_text(json.dumps({"status": "completed", "entries": action_log}, ensure_ascii=False), encoding="utf-8")
+        return {
+            "captures": [capture],
+            "masked_names": [capture.name],
+            "video": video,
+            "final_frame": capture,
+            "action_log": action_log,
+            "action_log_path": action_log_path,
+            "status": "ok",
+            "degrade_reason": "",
+        }
+
+    calls = {}
+
+    def fake_replay(request, media_plan, action_log, dirs, settings, *, tts_audio, storage_state=None, run_id="", terminal=None):
+        calls["replay"] = {
+            "source": media_plan.get("source"),
+            "audio_count": len(tts_audio),
+            "event_count": len(pipeline_module._demonstration_events_for_media(action_log)),
+        }
+        replay_capture = dirs.captures / "ai_replay.png"
+        replay_capture.write_bytes((dirs.captures / "ai_capture.png").read_bytes())
+        replay_video = dirs.package / "manual_video_agent_usage.webm"
+        replay_video.write_bytes(b"ai-replay")
+        return {
+            "status": "ok",
+            "degrade_reason": "",
+            "video": replay_video,
+            "captures": [replay_capture],
+            "masked_names": [replay_capture.name],
+            "final_frame": replay_capture,
+            "action_log": [{"type": "demonstration_replay", "status": "ok", "event_count": 1}],
+        }
+
+    class FakeVideoRender:
+        def __init__(self, package_dir: Path, fallback_video: Path):
+            self.video_path = package_dir / "final.mp4"
+            self.video_path.write_bytes(fallback_video.read_bytes())
+            self.metadata_path = package_dir / "video_render.json"
+            self.metadata_path.write_text(json.dumps({"used_fallback": True}), encoding="utf-8")
+            self.composition_dir = package_dir / "hyperframes"
+            self.composition_dir.mkdir()
+            (self.composition_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            self.used_fallback = True
+            self.skills_metadata_path = None
+
+    monkeypatch.setattr(pipeline_module, "_capture_with_playwright", fake_capture)
+    monkeypatch.setattr(pipeline_module, "_replay_demonstration_with_playwright", fake_replay, raising=False)
+    monkeypatch.setattr(
+        pipeline_module,
+        "render_final_video",
+        lambda *, plan, package_dir, preview_html, fallback_video, settings, tts_audio: FakeVideoRender(package_dir, fallback_video),
+    )
+
+    result = run_pipeline(
+        PipelineInput(
+            request_text="모달창을 확인하고 닫기",
+            target_url="http://internal.example.local/app",
+            role="사용자",
+            completion_condition="모달이 닫히면 완료",
+            execution_mode="ai",
+        ),
+        base_dir=tmp_path,
+        capture_browser=True,
+    )
+
+    assert calls["replay"]["source"] == "browser-agent-media-plan"
+    assert calls["replay"]["audio_count"] > 0
+    assert calls["replay"]["event_count"] == 1
+    assert result.artifacts.video.read_bytes() == b"ai-replay"
 
 
 def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkeypatch):
