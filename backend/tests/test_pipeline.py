@@ -924,6 +924,23 @@ def test_playwright_launch_kwargs_uses_browser_channel_only_when_requested():
     ]
 
 
+def test_playwright_launch_kwargs_does_not_discover_chromium_when_browser_channel_is_used(tmp_path):
+    cached_chromium = tmp_path / "chromium-9999" / "chrome-win" / "chrome.exe"
+    cached_chromium.parent.mkdir(parents=True)
+    cached_chromium.write_text("", encoding="utf-8")
+    settings = load_settings(environ={"MANUAL_AGENT_BROWSER_CHANNEL": "msedge"})
+
+    launch_kwargs = _playwright_launch_kwargs(
+        settings,
+        interactive=True,
+        use_browser_channel=True,
+        browser_roots=[tmp_path],
+    )
+
+    assert launch_kwargs["channel"] == "msedge"
+    assert "executable_path" not in launch_kwargs
+
+
 def test_playwright_launch_kwargs_uses_configured_executable_path(tmp_path):
     chrome = tmp_path / "chrome.exe"
     chrome.write_text("", encoding="utf-8")
@@ -3169,6 +3186,114 @@ def test_demonstration_replay_uses_cdp_context_when_configured(tmp_path, monkeyp
     assert result["status"] == "degraded"
     assert result["degrade_reason"] == "demonstration_replay_recording_missing"
     assert any(entry.get("reason") == "cdp_attach_existing_context_no_video_recording" for entry in result["action_log"])
+
+
+def test_demonstration_replay_uses_sso_profile_edge_channel(tmp_path, monkeypatch):
+    import playwright.sync_api as sync_api
+
+    events = []
+
+    class FakePage:
+        def set_default_timeout(self, timeout):
+            events.append(("set_default_timeout", timeout))
+
+        def set_default_navigation_timeout(self, timeout):
+            events.append(("set_default_navigation_timeout", timeout))
+
+        def goto(self, url, wait_until):
+            events.append(("goto", url, wait_until))
+
+        def wait_for_load_state(self, state, timeout):
+            events.append(("wait_for_load_state", state, timeout))
+
+        def wait_for_function(self, expression, timeout):
+            events.append(("wait_for_function", timeout))
+
+        def add_style_tag(self, content):
+            events.append(("add_style_tag",))
+
+        def evaluate(self, script, *args):
+            events.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            events.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            events.append(("screenshot", Path(path).name, full_page))
+            Path(path).write_bytes(b"png")
+
+        def get_by_role(self, role, *args, **kwargs):
+            class Locator:
+                def click(self):
+                    events.append(("click", role, kwargs.get("name") or ""))
+
+            return Locator()
+
+    class FakePersistentContext:
+        pages = [FakePage()]
+
+        def close(self):
+            raw_dir = Path(self.record_video_dir)
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / "edge-replay.webm").write_bytes(b"edge-replay")
+            events.append(("persistent_close",))
+
+    class FakeChromium:
+        def launch_persistent_context(self, user_data_dir, **kwargs):
+            events.append(("launch_persistent_context", user_data_dir, kwargs.get("channel"), kwargs.get("headless")))
+            context = FakePersistentContext()
+            context.record_video_dir = kwargs["record_video_dir"]
+            return context
+
+        def launch(self, **kwargs):
+            events.append(("launch", kwargs))
+            raise AssertionError("sso_profile replay must not launch bundled Chromium")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        browser_runner = "playwright"
+        request_timeout_seconds = 60.0
+
+        class login:
+            mode = "sso_profile"
+            sso_profile_dir = str(tmp_path / "edge-profile")
+            browser_channel = "msedge"
+            auth_server_allowlist = "*.corp.local"
+            auth_negotiate_delegate_allowlist = "*.corp.local"
+
+    dirs = _make_dirs(tmp_path / "package")
+    result = pipeline_module._replay_demonstration_with_playwright(
+        PipelineInput(
+            request_text="SSO replay",
+            target_url="http://internal.example.local/app",
+            role="사용자",
+            completion_condition="완료",
+            execution_mode="demonstration",
+            login_mode="sso_profile",
+        ),
+        {"steps": [{"id": "demo_start", "title": "시작", "caption": "시작"}]},
+        [{"type": "demonstration", "status": "ok"}, {"type": "click", "text": "조회"}],
+        dirs,
+        Settings(),
+        tts_audio=[],
+        storage_state={"cookies": [{"name": "sid", "value": "unused"}]},
+    )
+
+    assert any(event[0] == "launch_persistent_context" and event[2] == "msedge" and event[3] is False for event in events)
+    assert not any(event[0] == "launch" for event in events)
+    assert result["status"] == "ok"
+    assert result["video"].read_bytes() == b"edge-replay"
 
 
 def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_missing(tmp_path, monkeypatch):

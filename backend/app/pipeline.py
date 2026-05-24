@@ -1899,7 +1899,7 @@ def _playwright_launch_kwargs(
     auth_args = _playwright_integrated_auth_args(settings) if use_browser_channel else []
     if auth_args:
         launch_kwargs["args"] = auth_args
-    if executable_path:
+    if executable_path or "channel" in launch_kwargs:
         return launch_kwargs
     discovered = _discover_playwright_chromium(browser_roots=browser_roots)
     if discovered:
@@ -2361,7 +2361,17 @@ def _replay_demonstration_with_playwright(
     durations = _step_audio_durations(media_plan, tts_audio)
     steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
     runner_mode = _browser_runner_mode(settings)
-    launch_kwargs = _playwright_launch_kwargs(settings, interactive=False) if runner_mode != "cdp_attach" else {}
+    login = _resolve_login_options(request, settings)
+    use_sso_profile = login["mode"] == "sso_profile"
+    launch_kwargs = (
+        _playwright_launch_kwargs(
+            settings,
+            interactive=use_sso_profile,
+            use_browser_channel=use_sso_profile,
+        )
+        if runner_mode != "cdp_attach"
+        else {}
+    )
     default_timeout_ms = _replay_default_timeout_ms(settings)
     navigation_timeout_ms = _replay_navigation_timeout_ms(settings)
     _record_replay_terminal(
@@ -2389,6 +2399,17 @@ def _replay_demonstration_with_playwright(
                 context = _cdp_context(browser)
                 close_context = False
                 page = _first_context_page(context)
+            elif use_sso_profile:
+                context_options = {
+                    "viewport": {"width": 1280, "height": 800},
+                    "record_video_dir": str(replay_dir),
+                    "record_video_size": {"width": 1280, "height": 800},
+                }
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=_sso_profile_dir(login, settings),
+                    **{**launch_kwargs, **context_options},
+                )
+                page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
             else:
                 browser = p.chromium.launch(**launch_kwargs)
                 context_options: dict[str, Any] = {
