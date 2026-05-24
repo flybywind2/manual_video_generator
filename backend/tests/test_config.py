@@ -13,6 +13,7 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
     assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
     assert "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=" in env_example
+    assert "MANUAL_AGENT_AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_VOICE=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_LANG=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=" in env_example
@@ -99,6 +100,7 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
                 "MANUAL_AGENT_OPENCODE_MODEL=openai/gpt-5",
                 "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=900",
                 "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=720",
+                "MANUAL_AGENT_AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS=300",
                 "MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true",
                 "MANUAL_AGENT_STRICT_MODE=true",
             ]
@@ -161,6 +163,8 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.opencode_model == "openai/gpt-5"
     assert settings.opencode_timeout_seconds == 900
     assert settings.demonstration_timeout_seconds == 720
+    assert settings.auth_debug_keep_browser_open_seconds == 300
+    assert runtime_status["auth_debug_keep_browser_open_seconds"] == 300
     assert settings.enable_terminal_logs is True
     assert settings.strict_mode is True
     assert settings.llm.is_configured is True

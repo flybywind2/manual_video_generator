@@ -1774,6 +1774,71 @@ def test_playwright_mcp_live_agent_extends_loop_for_sso_waits(tmp_path: Path):
     assert execution["sso_wait_turns"] == 2
 
 
+def test_playwright_mcp_live_agent_can_hold_browser_open_after_sso_wait(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "1",
+            "MANUAL_AGENT_LOGIN_MODE": "sso_profile",
+            "MANUAL_AGENT_AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS": "120",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="SSO 경유 후 챗봇에 질문",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="답변 확인",
+        input_values={"프롬프트": "테스트"},
+        agent_brief={"task_type": "chat_prompt", "safe_click_intents": ["전송"]},
+    )
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("closed", {}))
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_run_code" and "manualMcpObserve" in arguments.get("code", ""):
+                return {"content": [{"type": "text", "text": json.dumps({"body_text": "SAML SSO redirecting"}, ensure_ascii=False)}]}
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {"status": "ok", "type": "wait", "timeout_ms": 1000, "reason": "sso_auth_redirect_wait"},
+        {"status": "ok", "type": "finish", "reason": "SSO 경유 완료"},
+    ]
+
+    def decide_next(*_args, **_kwargs):
+        return decisions.pop(0)
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=decide_next,
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    wait_codes = [args["code"] for name, args in calls if name == "browser_run_code" and "waitForTimeout" in args["code"]]
+    assert any("120000" in code for code in wait_codes)
+    assert calls[-1] == ("closed", {})
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["debug_keep_browser_open_seconds"] == 120
+
+
 def test_playwright_mcp_live_mode_can_be_deferred_until_after_login(tmp_path: Path):
     settings = load_settings(environ={"MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live"})
     plan = {

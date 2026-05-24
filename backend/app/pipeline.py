@@ -1690,6 +1690,8 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
         signal_page = None
         context = None
         close_context = True
+        capture_result: dict[str, Any] = {"action_log": []}
+        page = None
         try:
             if _browser_runner_mode(settings) == "cdp_attach":
                 browser = p.chromium.connect_over_cdp(_cdp_endpoint(settings))
@@ -1751,6 +1753,7 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
                 except Exception:
                     capture_result["storage_state"] = None
         finally:
+            _maybe_hold_playwright_page_for_auth_debug(page, settings, capture_result)
             if context is not None and close_context:
                 context.close()
             if signal_context is not None:
@@ -1794,6 +1797,34 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
         "degrade_reason": capture_result.get("degrade_reason", ""),
         "storage_state": capture_result.get("storage_state"),
     }
+
+
+def _maybe_hold_playwright_page_for_auth_debug(page: Any, settings: Any, capture_result: dict[str, Any]) -> None:
+    seconds = _bounded_debug_hold_seconds(getattr(settings, "auth_debug_keep_browser_open_seconds", 0.0))
+    if page is None or seconds <= 0 or not _action_log_touched_auth_boundary(capture_result.get("action_log", [])):
+        return
+    try:
+        page.wait_for_timeout(int(seconds * 1000))
+    except Exception:
+        return
+
+
+def _action_log_touched_auth_boundary(action_log: list[dict[str, Any]]) -> bool:
+    for entry in action_log:
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("reason") or "")
+        if reason in {"sso_auth_redirect_wait", "sso_auth_redirect_timeout", "login_required"}:
+            return True
+    return False
+
+
+def _bounded_debug_hold_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(max(seconds, 0.0), 3600.0)
 
 
 def _capture_with_extension_bridge(

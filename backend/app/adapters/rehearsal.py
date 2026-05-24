@@ -359,6 +359,7 @@ def _run_live_mcp_browser_agent(
                     step_index += 1
             if execution["status"] == "live-agent-started":
                 execution["status"] = "live-agent-completed"
+            _maybe_hold_mcp_browser_for_auth_debug(client, available_tools, settings, execution)
     except Exception as exc:  # noqa: BLE001 - direct Playwright capture remains the fallback path.
         execution["status"] = "live-failed"
         execution["error"] = f"{type(exc).__name__}: {exc}"
@@ -441,6 +442,63 @@ def _initial_navigate_call(plan: dict[str, Any], request: Any, available_tools: 
     if not target_url or "browser_navigate" not in available_tools:
         return None
     return {"tool": "browser_navigate", "arguments": {"url": target_url}}
+
+
+def _maybe_hold_mcp_browser_for_auth_debug(
+    client: Any,
+    available_tools: set[str],
+    settings: AppSettings,
+    execution: dict[str, Any],
+) -> None:
+    seconds = _bounded_debug_hold_seconds(getattr(settings, "auth_debug_keep_browser_open_seconds", 0.0))
+    if seconds <= 0 or not _execution_touched_auth_boundary(execution):
+        return
+    timeout_ms = int(seconds * 1000)
+    tool = _run_code_tool(available_tools)
+    live_call = (
+        {
+            "tool": tool,
+            "arguments": {"code": f"async (page) => {{ await page.waitForTimeout({timeout_ms}); return 'debug_hold:{timeout_ms}'; }}"},
+        }
+        if tool
+        else None
+    )
+    if live_call is None:
+        execution["debug_keep_browser_open_seconds"] = seconds
+        execution["debug_keep_browser_open_status"] = "unsupported"
+        return
+    try:
+        result = client.call_tool(live_call["tool"], live_call["arguments"])
+        execution["debug_keep_browser_open_seconds"] = seconds
+        execution["debug_keep_browser_open_status"] = "ok"
+        execution["debug_keep_browser_open_result"] = result
+    except Exception as exc:  # noqa: BLE001 - debug hold failure should not hide the original run.
+        execution["debug_keep_browser_open_seconds"] = seconds
+        execution["debug_keep_browser_open_status"] = "failed"
+        execution["debug_keep_browser_open_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _execution_touched_auth_boundary(execution: dict[str, Any]) -> bool:
+    if execution.get("auth_interstitials") or execution.get("sso_wait_turns"):
+        return True
+    blocked_reason = str(execution.get("blocked_reason") or "")
+    if blocked_reason in {"login_required", "sso_auth_redirect_timeout"}:
+        return True
+    for turn in execution.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        action = turn.get("action") if isinstance(turn.get("action"), dict) else {}
+        if str(action.get("reason") or "") == "sso_auth_redirect_wait":
+            return True
+    return False
+
+
+def _bounded_debug_hold_seconds(value: Any) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(max(seconds, 0.0), 3600.0)
 
 
 def _is_sso_wait_action(action: dict[str, Any]) -> bool:
