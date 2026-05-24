@@ -622,7 +622,17 @@ async (page) => {
       const rect = el.getBoundingClientRect();
       return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
     };
-    const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+    const iconTextOf = (el) => {
+      const classText = [el.className, ...Array.from(el.querySelectorAll('[class]')).map((child) => child.className)].join(' ').toLowerCase();
+      const tokens = [];
+      if (classText.includes('plus') || classText.includes('add')) tokens.push('+', '추가', 'plus', 'add');
+      if (classText.includes('close') || classText.includes('times') || classText.includes('xmark')) tokens.push('닫기', 'close', 'x');
+      if (classText.includes('search')) tokens.push('검색', 'search');
+      if (classText.includes('edit') || classText.includes('pencil')) tokens.push('수정', 'edit');
+      if (classText.includes('delete') || classText.includes('trash')) tokens.push('삭제', 'delete');
+      return tokens.join(' ');
+    };
+    const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || iconTextOf(el) || '').trim();
     const labelFor = (el) => {
       const labels = Array.from(el.labels || []).map((label) => label.innerText.trim()).filter(Boolean);
       if (labels.length) return labels.join(' ');
@@ -651,7 +661,7 @@ async (page) => {
       type: el.getAttribute('type') || el.tagName.toLowerCase(),
       value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
     }));
-    const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a')).filter(visible).slice(0, 60).map((el) => ({
+    const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [onclick], [class*="icon-"]')).filter(visible).slice(0, 60).map((el) => ({
       selector: selectorFor(el),
       text: textOf(el).slice(0, 120),
       role: el.getAttribute('role') || el.tagName.toLowerCase(),
@@ -681,7 +691,17 @@ def _mcp_observe_function() -> str:
     const rect = el.getBoundingClientRect();
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   };
-  const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+  const iconTextOf = (el) => {
+    const classText = [el.className, ...Array.from(el.querySelectorAll('[class]')).map((child) => child.className)].join(' ').toLowerCase();
+    const tokens = [];
+    if (classText.includes('plus') || classText.includes('add')) tokens.push('+', '추가', 'plus', 'add');
+    if (classText.includes('close') || classText.includes('times') || classText.includes('xmark')) tokens.push('닫기', 'close', 'x');
+    if (classText.includes('search')) tokens.push('검색', 'search');
+    if (classText.includes('edit') || classText.includes('pencil')) tokens.push('수정', 'edit');
+    if (classText.includes('delete') || classText.includes('trash')) tokens.push('삭제', 'delete');
+    return tokens.join(' ');
+  };
+  const textOf = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || iconTextOf(el) || '').trim();
   const labelFor = (el) => {
     const labels = Array.from(el.labels || []).map((label) => label.innerText.trim()).filter(Boolean);
     if (labels.length) return labels.join(' ');
@@ -710,7 +730,7 @@ def _mcp_observe_function() -> str:
     type: el.getAttribute('type') || el.tagName.toLowerCase(),
     value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
   }));
-  const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [aria-label], [title]')).filter(visible).slice(0, 80).map((el) => ({
+  const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, [aria-label], [title], [onclick], [class*="icon-"]')).filter(visible).slice(0, 80).map((el) => ({
     selector: selectorFor(el),
     text: textOf(el).slice(0, 120),
     role: el.getAttribute('role') || el.tagName.toLowerCase(),
@@ -928,6 +948,16 @@ def _click_by_text_code(texts: list[str]) -> str:
     return (
         "async (page) => { "
         f"const texts = {_js_array(texts)}; "
+        "const clickedByDom = await page.evaluate((texts) => { "
+        "const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); "
+        "const visible = (el) => { const style = window.getComputedStyle(el); const rect = el.getBoundingClientRect(); return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0; }; "
+        "const iconTextOf = (el) => { const classText = [el.className, ...Array.from(el.querySelectorAll('[class]')).map((child) => child.className)].join(' ').toLowerCase(); const tokens = []; if (classText.includes('plus') || classText.includes('add')) tokens.push('+', '추가', 'plus', 'add'); if (classText.includes('close') || classText.includes('times') || classText.includes('xmark')) tokens.push('닫기', 'close', 'x'); if (classText.includes('search')) tokens.push('검색', 'search'); if (classText.includes('edit') || classText.includes('pencil')) tokens.push('수정', 'edit'); if (classText.includes('delete') || classText.includes('trash')) tokens.push('삭제', 'delete'); return tokens.join(' '); }; "
+        "const labelOf = (el) => norm(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || iconTextOf(el)); "
+        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], a, input[type=\"button\"], input[type=\"submit\"], [aria-label], [title], [onclick], [class*=\"icon-\"]')); "
+        "for (const text of texts) { const target = norm(text); if (!target) continue; for (const el of candidates) { if (!visible(el)) continue; const label = labelOf(el); if (label && (label.includes(target) || target.includes(label))) { el.click(); return `clicked:${text}`; } } } "
+        "return ''; "
+        "}, texts); "
+        "if (clickedByDom) return clickedByDom; "
         "for (const text of texts) { "
         "const locators = ["
         "page.getByRole('button', { name: text, exact: false }), "
@@ -985,13 +1015,23 @@ def _click_by_text_function(texts: list[str]) -> str:
         "const rect = el.getBoundingClientRect(); "
         "return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0; "
         "}; "
-        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], a, input[type=\"button\"], input[type=\"submit\"], [aria-label], [title]')); "
+        "const iconTextOf = (el) => { "
+        "const classText = [el.className, ...Array.from(el.querySelectorAll('[class]')).map((child) => child.className)].join(' ').toLowerCase(); "
+        "const tokens = []; "
+        "if (classText.includes('plus') || classText.includes('add')) tokens.push('+', '추가', 'plus', 'add'); "
+        "if (classText.includes('close') || classText.includes('times') || classText.includes('xmark')) tokens.push('닫기', 'close', 'x'); "
+        "if (classText.includes('search')) tokens.push('검색', 'search'); "
+        "if (classText.includes('edit') || classText.includes('pencil')) tokens.push('수정', 'edit'); "
+        "if (classText.includes('delete') || classText.includes('trash')) tokens.push('삭제', 'delete'); "
+        "return tokens.join(' '); "
+        "}; "
+        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], a, input[type=\"button\"], input[type=\"submit\"], [aria-label], [title], [onclick], [class*=\"icon-\"]')); "
         "for (const text of texts) { "
         "const target = norm(text); "
         "if (!target) continue; "
         "for (const el of candidates) { "
         "if (!visible(el)) continue; "
-        "const label = norm(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title')); "
+        "const label = norm(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || iconTextOf(el)); "
         "if (label && (label.includes(target) || target.includes(label))) { el.click(); return `clicked:${text}`; } "
         "} "
         "} "
