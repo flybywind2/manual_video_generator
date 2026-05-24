@@ -692,9 +692,30 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
         if "browser_evaluate" in available_tools:
             return {"tool": "browser_evaluate", "arguments": {"function": _click_function(selector)}}
         return None
+    if action_type == "wait":
+        timeout_ms = _bounded_wait_timeout_ms(action.get("timeout_ms", action.get("timeout", 1000)))
+        tool = _run_code_tool(available_tools)
+        if tool:
+            return {
+                "tool": tool,
+                "arguments": {
+                    "code": f"async (page) => {{ await page.waitForTimeout({timeout_ms}); return 'waited:{timeout_ms}'; }}"
+                },
+            }
+        if "browser_wait_for" in available_tools:
+            return {"tool": "browser_wait_for", "arguments": {"time": timeout_ms / 1000}}
+        return None
     if action_type == "capture_step" and "browser_snapshot" in available_tools:
         return {"tool": "browser_snapshot", "arguments": {}}
     return None
+
+
+def _bounded_wait_timeout_ms(value: Any) -> int:
+    try:
+        timeout_ms = int(value)
+    except (TypeError, ValueError):
+        timeout_ms = 1000
+    return min(max(timeout_ms, 0), 30000)
 
 
 def _run_code_tool(available_tools: set[str]) -> str:
