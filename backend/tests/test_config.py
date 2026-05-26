@@ -256,6 +256,29 @@ def test_vlm_api_key_falls_back_to_openai_api_key_for_authorization():
     assert settings.vlm.is_configured is True
 
 
+def test_vlm_chat_headers_generate_fresh_message_ids_each_call():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VLM_PROVIDER": "internal",
+            "MANUAL_AGENT_VLM_API_KEY": "vlm-secret",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://api.net/vl/v1",
+            "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_VLM_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_VLM_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_VLM_USER_ID": "USER01",
+            "MANUAL_AGENT_VLM_USER_TYPE": "AD_ID",
+        }
+    )
+
+    first = settings.vlm.chat_headers()
+    second = settings.vlm.chat_headers()
+
+    assert first["Prompt-Msg-Id"] != second["Prompt-Msg-Id"]
+    assert first["Completion-Msg-Id"] != second["Completion-Msg-Id"]
+    assert first["Authorization"] == "Bearer vlm-secret"
+    assert second["Authorization"] == "Bearer vlm-secret"
+
+
 def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text(

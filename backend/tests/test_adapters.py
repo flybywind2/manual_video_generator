@@ -787,10 +787,14 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
-            "MANUAL_AGENT_VLM_PROVIDER": "generic",
+            "MANUAL_AGENT_VLM_PROVIDER": "internal",
             "MANUAL_AGENT_VLM_API_KEY": "vlm-token",
             "MANUAL_AGENT_VLM_BASE_URL": "http://vlm.net/v1",
             "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_VLM_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_VLM_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_VLM_USER_ID": "USER01",
+            "MANUAL_AGENT_VLM_USER_TYPE": "AD_ID",
             "MANUAL_AGENT_LLM_PROVIDER": "openai",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://llm.net/v1",
@@ -803,6 +807,8 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
         calls.append({"url": url, "payload": payload})
         assert url == "http://vlm.net/v1/chat/completions"
         assert headers["Authorization"] == "Bearer vlm-token"
+        assert headers["Prompt-Msg-Id"]
+        assert headers["Completion-Msg-Id"]
         assert "extra_body" not in payload
         assert len(payload["messages"]) == 1
         content = payload["messages"][0]["content"]
