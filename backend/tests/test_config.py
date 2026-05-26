@@ -214,6 +214,48 @@ def test_ollama_llm_provider_uses_openai_compatible_endpoint_without_internal_he
     assert status["llm"]["dep_ticket_set"] is False
 
 
+def test_vlm_chat_headers_include_authorization_from_vlm_api_key():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VLM_PROVIDER": "internal",
+            "MANUAL_AGENT_VLM_API_KEY": "vlm-secret",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://api.net/vl/v1",
+            "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_VLM_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_VLM_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_VLM_USER_ID": "USER01",
+            "MANUAL_AGENT_VLM_USER_TYPE": "AD_ID",
+        }
+    )
+
+    headers = settings.vlm.chat_headers()
+    assert headers["Authorization"] == "Bearer vlm-secret"
+    assert headers["x-dep-ticket"] == "credential:TICKET-123"
+    assert headers["Send-System-Name"] == "manual-video-agent"
+    assert headers["User-Id"] == "USER01"
+    assert headers["User-Type"] == "AD_ID"
+    assert settings.vlm.is_configured is True
+
+
+def test_vlm_api_key_falls_back_to_openai_api_key_for_authorization():
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_OPENAI_API_KEY": "shared-secret",
+            "MANUAL_AGENT_VLM_PROVIDER": "internal",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://api.net/vl/v1",
+            "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_VLM_DEP_TICKET": "credential:TICKET-123",
+            "MANUAL_AGENT_VLM_SEND_SYSTEM_NAME": "manual-video-agent",
+            "MANUAL_AGENT_VLM_USER_ID": "USER01",
+            "MANUAL_AGENT_VLM_USER_TYPE": "AD_ID",
+        }
+    )
+
+    assert settings.vlm.api_key == "shared-secret"
+    assert settings.vlm.chat_headers()["Authorization"] == "Bearer shared-secret"
+    assert settings.vlm.is_configured is True
+
+
 def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text(

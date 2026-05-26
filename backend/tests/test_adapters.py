@@ -788,6 +788,7 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
             "MANUAL_AGENT_VLM_PROVIDER": "generic",
+            "MANUAL_AGENT_VLM_API_KEY": "vlm-token",
             "MANUAL_AGENT_VLM_BASE_URL": "http://vlm.net/v1",
             "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
             "MANUAL_AGENT_LLM_PROVIDER": "openai",
@@ -801,6 +802,7 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
     def fake_post(url, headers, payload, timeout_seconds):
         calls.append({"url": url, "payload": payload})
         assert url == "http://vlm.net/v1/chat/completions"
+        assert headers["Authorization"] == "Bearer vlm-token"
         assert "extra_body" not in payload
         assert len(payload["messages"]) == 1
         content = payload["messages"][0]["content"]
