@@ -770,6 +770,144 @@ def test_browser_agent_accepts_explicit_click_by_selector_from_llm():
     assert action["selector"] == ".icon-plus-bold"
 
 
+def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+        )
+    )
+    request = PipelineInput(
+        request_text="화면의 + 버튼을 클릭",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="추가 화면 확인",
+        input_values={},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_VLM_PROVIDER": "generic",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://vlm.net/v1",
+            "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_LLM_PROVIDER": "openai",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://llm.net/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "payload": payload})
+        assert url == "http://vlm.net/v1/chat/completions"
+        content = payload["messages"][1]["content"]
+        assert content[0]["type"] == "text"
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "click_by_selector", "selector": ".icon-plus-bold", "reason": "스크린샷의 + 아이콘 클릭"},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": request.target_url,
+            "body_text": "홈",
+            "fields": [],
+            "clickables": [{"text": "+ 추가 plus add", "selector": ".icon-plus-bold"}],
+            "screenshot": {"status": "ok", "path": str(screenshot), "filename": "mcp_step_01_before.png"},
+        },
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    assert action["source"] == "browser-agent-vlm"
+    assert action["vlm_used"] is True
+    assert action["type"] == "click_by_selector"
+    assert action["selector"] == ".icon-plus-bold"
+    assert len(calls) == 1
+    llm_log = (tmp_path / "llm_responses.jsonl").read_text(encoding="utf-8")
+    assert "browser_agent_vlm" in llm_log
+
+
+def test_browser_agent_falls_back_to_dom_llm_when_vlm_fails(tmp_path: Path):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+        )
+    )
+    request = PipelineInput(
+        request_text="닫기 버튼 클릭",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="모달 닫기",
+        input_values={},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_VLM_PROVIDER": "generic",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://vlm.net/v1",
+            "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
+            "MANUAL_AGENT_LLM_PROVIDER": "openai",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://llm.net/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append(url)
+        if url.startswith("http://vlm.net/"):
+            raise RuntimeError("vlm timeout")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"type": "click_by_text", "texts": ["닫기"], "reason": "DOM 기준 닫기"}, ensure_ascii=False)
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": request.target_url,
+            "body_text": "공지 모달 닫기",
+            "fields": [],
+            "clickables": [{"text": "닫기"}],
+            "screenshot": {"status": "ok", "path": str(screenshot), "filename": "mcp_step_01_before.png"},
+        },
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    assert calls == ["http://vlm.net/v1/chat/completions", "http://llm.net/v1/chat/completions"]
+    assert action["type"] == "click_by_text"
+    assert action["vlm_error"].startswith("RuntimeError: vlm timeout")
+    llm_log = (tmp_path / "llm_responses.jsonl").read_text(encoding="utf-8")
+    assert '"status": "failed"' in llm_log
+
+
 def test_extension_bridge_client_uses_observe_act_verify_contract():
     calls = []
 

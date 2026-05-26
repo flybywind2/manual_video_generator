@@ -36,7 +36,7 @@
 | 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
 | `playwright-mcp` | 어댑터 구현 | manifest 생성 또는 live stdio JSON-RPC 실행 |
 | 내부 LLM/RAG/Reranker | 어댑터 구현 | `.env`로 켜면 RAG/Reranker context와 LLM JSON planner 호출 |
-| VLM | 설정 준비 | `.env`와 상태 API만 준비, 화면 검수 호출은 다음 단계 |
+| VLM | 어댑터 구현 | MCP 단계별 사전 캡처 이미지를 VLM에 전달해 action 결정을 보강, 실패 시 DOM LLM/로컬 판단 fallback |
 | Supertonic 3 TTS | 어댑터 구현 | preset voice만 사용, OpenRAIL-M/AI 음성 고지를 metadata와 manual에 기록 |
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
 | HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
@@ -834,15 +834,14 @@ python -m pytest -q --basetemp .pytest_tmp
 
 ## 다음 구현 순서
 
-1. VLM 기반 화면 검수 어댑터
-2. Action JSON 검수 및 편집 UI
-3. 시스템별 selector 학습/고정
-4. HyperFrames 렌더 템플릿 고도화
-5. MP4 변환 및 `ffmpeg` 검증
-6. PDF 정식 렌더러
-7. 실제 사내 시스템별 SSO/세션 처리 정책
-8. 시스템별 마스킹 룰과 검수 UI
-9. 운영계 위험 액션 승인 게이트
+1. Action JSON 검수 및 편집 UI
+2. 시스템별 selector 학습/고정
+3. HyperFrames 렌더 템플릿 고도화
+4. MP4 변환 및 `ffmpeg` 검증
+5. PDF 정식 렌더러
+6. 실제 사내 시스템별 SSO/세션 처리 정책
+7. 시스템별 마스킹 룰과 검수 UI
+8. 운영계 위험 액션 승인 게이트
 
 ## 참고 자료
 

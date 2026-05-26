@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -55,10 +57,38 @@ def decide_browser_agent_action(
         }
     if _has_login_blocker(observation):
         return {"status": "blocked", "type": "finish", "reason": "login_required"}
-    if not settings.llm.is_configured:
-        return _decide_local_browser_action(request, observation, history, step_index=step_index, source="browser-agent-local")
-
     post = post_json if http_post is None else http_post
+    vlm_error = ""
+    if settings.vlm.is_configured and _screenshot_path_from_observation(observation):
+        try:
+            return _decide_vlm_browser_action(
+                request,
+                settings,
+                observation,
+                history,
+                step_index=step_index,
+                post=post,
+                package_dir=package_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - DOM LLM/local fallback keeps the agent usable when VLM is unavailable.
+            if getattr(settings, "strict_mode", False):
+                raise
+            vlm_error = f"{type(exc).__name__}: {exc}"
+            record_llm_response(
+                component="browser_agent_vlm",
+                model=settings.vlm.model,
+                response={"error": vlm_error},
+                content=vlm_error,
+                terminal_enabled=settings.enable_terminal_logs,
+                package_dir=package_dir,
+                status="failed",
+            )
+    if not settings.llm.is_configured:
+        action = _decide_local_browser_action(request, observation, history, step_index=step_index, source="browser-agent-local")
+        if vlm_error:
+            action["vlm_error"] = vlm_error
+        return action
+
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
     headers = settings.llm.chat_headers()
     payload = {
@@ -128,7 +158,10 @@ def decide_browser_agent_action(
             terminal_enabled=settings.enable_terminal_logs,
             package_dir=package_dir,
         )
-        return _normalize_browser_agent_action(_parse_json_content(content), request)
+        action = _normalize_browser_agent_action(_parse_json_content(content), request)
+        if vlm_error:
+            action["vlm_error"] = vlm_error
+        return action
     except Exception as exc:  # noqa: BLE001 - local policy keeps autonomous mode useful when LLM is flaky.
         if getattr(settings, "strict_mode", False):
             raise
@@ -140,7 +173,122 @@ def decide_browser_agent_action(
             source="browser-agent-local-fallback",
         )
         action["llm_error"] = f"{type(exc).__name__}: {exc}"
+        if vlm_error:
+            action["vlm_error"] = vlm_error
         return action
+
+
+def _decide_vlm_browser_action(
+    request: Any,
+    settings: AppSettings,
+    observation: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    step_index: int,
+    post: HttpPost,
+    package_dir: Path | None,
+) -> dict[str, Any]:
+    screenshot_path = _screenshot_path_from_observation(observation)
+    if not screenshot_path:
+        raise ValueError("VLM screenshot path is missing")
+    image_url = _image_data_url(Path(screenshot_path))
+    url = f"{settings.vlm.base_url.rstrip('/')}/chat/completions"
+    headers = settings.vlm.chat_headers()
+    payload = {
+        "model": settings.vlm.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a vision-capable browser automation agent for an internal system manual video. "
+                    "Use the screenshot first, then cross-check the DOM observation and recent history. "
+                    "Choose exactly one next safe action that can be executed by MCP. "
+                    "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
+                    "Prefer click_by_selector when the screenshot target matches an observation selector or the user provided a CSS selector/class/id. "
+                    "Use fill_by_label for visible input fields using provided input_values. "
+                    "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "step_index": step_index,
+                                "request_text": request.request_text,
+                                "target_url": request.target_url,
+                                "role": request.role,
+                                "completion_condition": request.completion_condition,
+                                "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
+                                "input_values": request.input_values,
+                                "agent_brief": getattr(request, "agent_brief", {}) or {},
+                                "observation": _vlm_safe_observation(observation),
+                                "history": history[-8:],
+                                "output_schema": {
+                                    "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
+                                    "label": "field label for fill_by_label",
+                                    "value_key": "key from input_values",
+                                    "texts": ["button/link text candidates for click_by_text"],
+                                    "selector": "CSS selector for click_by_selector",
+                                    "key": "Enter for press_key",
+                                    "timeout_ms": "wait duration for wait",
+                                    "reason": "short Korean reason",
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ],
+        "temperature": 0.1,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    response = post(url, headers, payload, settings.llm_timeout_seconds)
+    content = response["choices"][0]["message"]["content"]
+    record_llm_response(
+        component="browser_agent_vlm",
+        model=settings.vlm.model,
+        response=response,
+        content=content,
+        terminal_enabled=settings.enable_terminal_logs,
+        package_dir=package_dir,
+    )
+    action = _normalize_browser_agent_action(_parse_json_content(content), request)
+    action["source"] = "browser-agent-vlm"
+    action["vlm_used"] = True
+    action["screenshot_path"] = screenshot_path
+    return action
+
+
+def _screenshot_path_from_observation(observation: dict[str, Any]) -> str:
+    screenshot = observation.get("screenshot")
+    if not isinstance(screenshot, dict):
+        return ""
+    if str(screenshot.get("status") or "") != "ok":
+        return ""
+    path = str(screenshot.get("path") or "").strip()
+    return path if path and Path(path).exists() else ""
+
+
+def _image_data_url(path: Path) -> str:
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    return f"data:{mime_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _vlm_safe_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(observation)
+    screenshot = safe.get("screenshot")
+    if isinstance(screenshot, dict):
+        safe["screenshot"] = {
+            "status": screenshot.get("status"),
+            "filename": screenshot.get("filename"),
+            "path": screenshot.get("path"),
+        }
+    return safe
 
 
 def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[str, Any]:
