@@ -718,6 +718,58 @@ def test_browser_agent_does_not_wait_on_app_home_with_auth_words_after_sso():
     assert action["reason"] != "sso_auth_redirect_wait"
 
 
+def test_browser_agent_accepts_explicit_click_by_selector_from_llm():
+    request = PipelineInput(
+        request_text="화면의 .icon-plus-bold 클래스를 click_by_selector로 클릭",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="추가 창 확인",
+        input_values={},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_PROVIDER": "openai",
+            "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
+            "MANUAL_AGENT_LLM_MODEL": "QWEN3",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        assert "click_by_selector" in payload["messages"][0]["content"]
+        assert "selector" in payload["messages"][1]["content"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "click_by_selector", "selector": ".icon-plus-bold", "reason": "사용자가 class selector 클릭을 지시함"},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": request.target_url,
+            "body_text": "홈",
+            "fields": [],
+            "clickables": [{"text": "+ 추가 plus add", "selector": ".icon-plus-bold"}],
+        },
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+    )
+
+    assert action["type"] == "click_by_selector"
+    assert action["selector"] == ".icon-plus-bold"
+
+
 def test_extension_bridge_client_uses_observe_act_verify_contract():
     calls = []
 
@@ -2463,6 +2515,66 @@ def test_playwright_mcp_live_agent_clicks_icon_only_plus_controls(tmp_path: Path
     assert "icon-" in click_codes[0]
     assert "plus" in click_codes[0]
     assert "추가" in click_codes[0]
+
+
+def test_playwright_mcp_live_agent_executes_click_by_selector(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="화면의 .icon-plus-bold를 click_by_selector로 클릭",
+        target_url="http://internal.example.local/home",
+        role="사용자",
+        completion_condition="추가 화면 확인",
+        input_values={},
+        agent_brief={},
+    )
+    calls = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_run_code" and "manualMcpObserve" in arguments.get("code", ""):
+                return {"content": [{"type": "text", "text": json.dumps({"body_text": "홈", "fields": [], "clickables": []}, ensure_ascii=False)}]}
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {"status": "ok", "type": "click_by_selector", "selector": ".icon-plus-bold", "reason": "사용자 요청 selector 클릭"},
+        {"status": "ok", "type": "finish", "reason": "추가 화면 확인"},
+    ]
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=lambda *_args, **_kwargs: decisions.pop(0),
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    click_codes = [args["code"] for name, args in calls if name == "browser_run_code" and "clicked_by_selector" in args.get("code", "")]
+    assert click_codes
+    assert ".icon-plus-bold" in click_codes[0]
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["turns"][0]["tool"] == "browser_run_code"
+    assert execution["turns"][0]["arguments"]["code"] == click_codes[0]
 
 
 def test_playwright_mcp_manifest_redacts_sensitive_fill_values(tmp_path: Path):

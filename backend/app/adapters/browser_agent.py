@@ -13,7 +13,7 @@ from backend.app.llm_logging import record_llm_response
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
 
-_ALLOWED_ACTION_TYPES = {"fill_by_label", "click_by_text", "press_key", "wait", "capture_step", "finish"}
+_ALLOWED_ACTION_TYPES = {"fill_by_label", "click_by_text", "click_by_selector", "press_key", "wait", "capture_step", "finish"}
 _DANGEROUS_CLICK_KEYWORDS = {
     "삭제",
     "저장",
@@ -71,9 +71,10 @@ def decide_browser_agent_action(
                     "Inspect the current Playwright page observation, the augmented agent brief, and the recent history. "
                     "Choose exactly one next safe action that moves the user objective forward. "
                     "Each turn will be executed as observe -> act -> verify, so choose an action that can be verified from the next page state. "
-                    "Return JSON only. Allowed types: fill_by_label, click_by_text, press_key, wait, capture_step, finish. "
+                    "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
                     "Use fill_by_label only with provided input_values; if the visible field label differs from the input key, map the closest field to the value. "
                     "Use click_by_text only for navigation/search/detail/read/send actions listed in safe_click_intents or clearly required by the objective. "
+                    "Use click_by_selector when the user explicitly provides a CSS selector/class/id or the observation includes a reliable selector for the intended element. "
                     "If a modal or popup is visible and the objective mentions checking or closing it, close/confirm that modal before continuing with later work. "
                     "Use press_key only for Enter after a chat/search input has already been filled and needs submission. "
                     "If the previous action failed, do not repeat the same label/text; pick another visible candidate or finish with a clear reason. "
@@ -99,10 +100,11 @@ def decide_browser_agent_action(
                         "history": history[-8:],
                         "recent_failures": [item for item in history[-8:] if item.get("status") in {"failed", "blocked", "degraded"}],
                         "output_schema": {
-                            "type": "fill_by_label|click_by_text|press_key|wait|capture_step|finish",
+                            "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
                             "label": "field label for fill_by_label",
                             "value_key": "key from input_values",
                             "texts": ["button/link text candidates for click_by_text"],
+                            "selector": "CSS selector for click_by_selector, such as .icon-plus-bold or button[data-action='add']",
                             "key": "Enter for press_key",
                             "timeout_ms": "wait duration for wait",
                             "reason": "short Korean reason",
@@ -176,6 +178,11 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
         if is_disallowed_click_texts(texts):
             return {"status": "blocked", "type": "finish", "reason": "disallowed_click_text", "texts": texts}
         action["texts"] = texts
+    elif action_type == "click_by_selector":
+        selector = str(data.get("selector") or data.get("css_selector") or data.get("target") or "").strip()
+        if not selector:
+            return {"status": "failed", "type": "finish", "reason": "missing_click_selector"}
+        action["selector"] = selector
     elif action_type == "press_key":
         key = str(data.get("key") or "").strip()
         if key.lower() not in {"enter", "return"}:

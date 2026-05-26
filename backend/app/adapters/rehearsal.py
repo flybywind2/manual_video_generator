@@ -894,6 +894,12 @@ def _action_to_mcp_call(action: dict[str, Any]) -> dict[str, Any] | None:
             "arguments": {"code": _click_by_text_code(_text_candidates(action))},
             "action_id": action.get("id"),
         }
+    if action_type == "click_by_selector":
+        return {
+            "tool": "browser_run_code",
+            "arguments": {"code": _click_by_selector_code(str(action.get("selector") or ""))},
+            "action_id": action.get("id"),
+        }
     if action_type == "click":
         return {
             "tool": "browser_click",
@@ -943,6 +949,16 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
             return {"tool": tool, "arguments": {"code": _click_by_text_code(_text_candidates(action))}}
         if "browser_evaluate" in available_tools:
             return {"tool": "browser_evaluate", "arguments": {"function": _click_by_text_function(_text_candidates(action))}}
+        return None
+    if action_type == "click_by_selector":
+        selector = str(action.get("selector") or "").strip()
+        if not selector:
+            return None
+        tool = _run_code_tool(available_tools)
+        if tool:
+            return {"tool": tool, "arguments": {"code": _click_by_selector_code(selector)}}
+        if "browser_evaluate" in available_tools:
+            return {"tool": "browser_evaluate", "arguments": {"function": _click_function(selector)}}
         return None
     if action_type == "fill":
         selector = action.get("selector", "")
@@ -1052,6 +1068,15 @@ def _click_by_text_code(texts: list[str]) -> str:
         "} "
         "} "
         "throw new Error(`text not found: ${texts.join(', ')}`); "
+        "}"
+    )
+
+
+def _click_by_selector_code(selector: str) -> str:
+    return (
+        "async (page) => { "
+        f"await page.locator({_js(selector)}).first().click(); "
+        "return 'clicked_by_selector'; "
         "}"
     )
 
