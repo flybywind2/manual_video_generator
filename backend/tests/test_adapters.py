@@ -801,8 +801,11 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
     def fake_post(url, headers, payload, timeout_seconds):
         calls.append({"url": url, "payload": payload})
         assert url == "http://vlm.net/v1/chat/completions"
-        content = payload["messages"][1]["content"]
+        assert "extra_body" not in payload
+        assert len(payload["messages"]) == 1
+        content = payload["messages"][0]["content"]
         assert content[0]["type"] == "text"
+        assert "CONTEXT_JSON" in content[0]["text"]
         assert content[1]["type"] == "image_url"
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
         return {

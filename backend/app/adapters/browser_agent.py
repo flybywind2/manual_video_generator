@@ -198,54 +198,17 @@ def _decide_vlm_browser_action(
         "model": settings.vlm.model,
         "messages": [
             {
-                "role": "system",
-                "content": (
-                    "You are a vision-capable browser automation agent for an internal system manual video. "
-                    "Use the screenshot first, then cross-check the DOM observation and recent history. "
-                    "Choose exactly one next safe action that can be executed by MCP. "
-                    "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
-                    "Prefer click_by_selector when the screenshot target matches an observation selector or the user provided a CSS selector/class/id. "
-                    "Use fill_by_label for visible input fields using provided input_values. "
-                    "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
-                ),
-            },
-            {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps(
-                            {
-                                "step_index": step_index,
-                                "request_text": request.request_text,
-                                "target_url": request.target_url,
-                                "role": request.role,
-                                "completion_condition": request.completion_condition,
-                                "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
-                                "input_values": request.input_values,
-                                "agent_brief": getattr(request, "agent_brief", {}) or {},
-                                "observation": _vlm_safe_observation(observation),
-                                "history": history[-8:],
-                                "output_schema": {
-                                    "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
-                                    "label": "field label for fill_by_label",
-                                    "value_key": "key from input_values",
-                                    "texts": ["button/link text candidates for click_by_text"],
-                                    "selector": "CSS selector for click_by_selector",
-                                    "key": "Enter for press_key",
-                                    "timeout_ms": "wait duration for wait",
-                                    "reason": "short Korean reason",
-                                },
-                            },
-                            ensure_ascii=False,
-                        ),
+                        "text": _vlm_prompt_text(request, settings, observation, history, step_index=step_index),
                     },
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ],
             },
         ],
         "temperature": 0.1,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
@@ -277,6 +240,48 @@ def _screenshot_path_from_observation(observation: dict[str, Any]) -> str:
 def _image_data_url(path: Path) -> str:
     mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
     return f"data:{mime_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _vlm_prompt_text(
+    request: Any,
+    settings: AppSettings,
+    observation: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    step_index: int,
+) -> str:
+    instructions = (
+        "You are a vision-capable browser automation agent for an internal system manual video. "
+        "Use the screenshot first, then cross-check the DOM observation and recent history. "
+        "Choose exactly one next safe action that can be executed by MCP. "
+        "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
+        "Prefer click_by_selector when the screenshot target matches an observation selector or the user provided a CSS selector/class/id. "
+        "Use fill_by_label for visible input fields using provided input_values. "
+        "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
+    )
+    context = {
+        "step_index": step_index,
+        "request_text": request.request_text,
+        "target_url": request.target_url,
+        "role": request.role,
+        "completion_condition": request.completion_condition,
+        "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
+        "input_values": request.input_values,
+        "agent_brief": getattr(request, "agent_brief", {}) or {},
+        "observation": _vlm_safe_observation(observation),
+        "history": history[-8:],
+        "output_schema": {
+            "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
+            "label": "field label for fill_by_label",
+            "value_key": "key from input_values",
+            "texts": ["button/link text candidates for click_by_text"],
+            "selector": "CSS selector for click_by_selector",
+            "key": "Enter for press_key",
+            "timeout_ms": "wait duration for wait",
+            "reason": "short Korean reason",
+        },
+    }
+    return f"{instructions}\n\nCONTEXT_JSON:\n{json.dumps(context, ensure_ascii=False)}"
 
 
 def _vlm_safe_observation(observation: dict[str, Any]) -> dict[str, Any]:
