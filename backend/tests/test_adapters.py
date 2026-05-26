@@ -1,6 +1,7 @@
 import json
 import subprocess
 import wave
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2321,6 +2322,74 @@ def test_playwright_mcp_live_agent_fill_by_label_falls_back_to_browser_evaluate_
     execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
     assert execution["turns"][0]["tool"] == "browser_evaluate"
     assert execution["turns"][0]["result"].get("status") != "skipped"
+
+
+def test_playwright_mcp_live_agent_captures_screenshot_before_each_action(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="대화 입력창에 질문 입력",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="입력 완료",
+        input_values={"대화 입력창": "테스트 질문"},
+        agent_brief={"task_type": "chat_prompt"},
+    )
+    calls = []
+    png_1x1 = base64.b64encode(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+        b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    ).decode("ascii")
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code", "browser_take_screenshot"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_take_screenshot":
+                return {"content": [{"type": "image", "mimeType": "image/png", "data": png_1x1}]}
+            if name == "browser_run_code" and "manualMcpObserve" in arguments.get("code", ""):
+                return {"content": [{"type": "text", "text": json.dumps({"body_text": "챗봇", "fields": [], "clickables": []}, ensure_ascii=False)}]}
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    decisions = [
+        {"status": "ok", "type": "capture_step", "reason": "현재 화면 확인"},
+        {"status": "ok", "type": "finish", "reason": "입력 완료"},
+    ]
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=lambda *_args, **_kwargs: decisions.pop(0),
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    screenshot_calls = [arguments for name, arguments in calls if name == "browser_take_screenshot"]
+    assert screenshot_calls[0]["filename"] == "mcp_step_01_before.png"
+    assert screenshot_calls[1]["filename"] == "mcp_step_02_before.png"
+    execution = json.loads((tmp_path / "playwright_mcp_execution.json").read_text(encoding="utf-8"))
+    assert execution["turns"][0]["screenshot_before"]["status"] == "ok"
+    assert execution["turns"][0]["observation"]["screenshot"]["filename"] == "mcp_step_01_before.png"
+    assert (tmp_path / "mcp_screenshots" / "mcp_step_01_before.png").exists()
 
 
 def test_playwright_mcp_live_agent_clicks_icon_only_plus_controls(tmp_path: Path):

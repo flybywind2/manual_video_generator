@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import base64
 from pathlib import Path
 from typing import Any, Callable
 
@@ -285,6 +286,9 @@ def _run_live_mcp_browser_agent(
                 sso_wait_turns = 0
                 while functional_steps < max_steps and step_index <= max_steps + max_sso_wait_turns:
                     observation = _observe_with_mcp(client, available_tools)
+                    screenshot_before = _take_mcp_step_screenshot(client, available_tools, package_dir, step_index)
+                    if screenshot_before:
+                        observation["screenshot"] = screenshot_before
                     decide_kwargs: dict[str, Any] = {"step_index": step_index}
                     if decide_next is decide_browser_agent_action:
                         decide_kwargs["package_dir"] = package_dir
@@ -294,6 +298,7 @@ def _run_live_mcp_browser_agent(
                     turn: dict[str, Any] = {
                         "step": step_index,
                         "observation": observation,
+                        "screenshot_before": screenshot_before,
                         "action": redact_sensitive(action),
                     }
                     execution["attempted_actions"] += 1
@@ -577,6 +582,67 @@ def _verify_mcp_agent_turn(client: Any, available_tools: set[str], before_observ
         "changed": _mcp_observation_signature(after) != _mcp_observation_signature(before_observation),
         "reason": "observed_after_action",
     }
+
+
+def _take_mcp_step_screenshot(
+    client: Any,
+    available_tools: set[str],
+    package_dir: Path,
+    step_index: int,
+) -> dict[str, Any]:
+    if "browser_take_screenshot" not in available_tools:
+        return {"status": "unsupported", "reason": "browser_take_screenshot_unavailable"}
+    screenshots_dir = package_dir / "mcp_screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"mcp_step_{step_index:02d}_before.png"
+    target_path = screenshots_dir / filename
+    result: Any
+    try:
+        result = client.call_tool("browser_take_screenshot", {"filename": filename})
+    except Exception as exc:  # noqa: BLE001 - screenshot is diagnostic context, not the action itself.
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}", "filename": filename}
+
+    saved_path = _save_mcp_screenshot_content(result, target_path)
+    metadata: dict[str, Any] = {
+        "status": "ok",
+        "tool": "browser_take_screenshot",
+        "filename": filename,
+        "path": str(saved_path) if saved_path else "",
+        "result": redact_sensitive(result),
+    }
+    if not saved_path:
+        metadata["status"] = "captured_by_mcp"
+        metadata["reason"] = "no_inline_image_content"
+    return metadata
+
+
+def _save_mcp_screenshot_content(result: Any, target_path: Path) -> Path | None:
+    image_data = _find_mcp_image_data(result)
+    if not image_data:
+        return None
+    try:
+        target_path.write_bytes(base64.b64decode(image_data))
+    except Exception:  # noqa: BLE001 - malformed image payload should still leave MCP result metadata.
+        return None
+    return target_path
+
+
+def _find_mcp_image_data(value: Any) -> str:
+    if isinstance(value, dict):
+        mime_type = str(value.get("mimeType") or value.get("mime_type") or "")
+        data = value.get("data")
+        if isinstance(data, str) and mime_type.startswith("image/"):
+            return data
+        for item in value.values():
+            found = _find_mcp_image_data(item)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_mcp_image_data(item)
+            if found:
+                return found
+    return ""
 
 
 def _mcp_observation_signature(observation: dict[str, Any]) -> tuple[Any, ...]:
