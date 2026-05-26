@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -193,7 +194,23 @@ def _decide_vlm_browser_action(
         raise ValueError("VLM screenshot path is missing")
     image_url = _image_data_url(Path(screenshot_path))
     url = f"{settings.vlm.base_url.rstrip('/')}/chat/completions"
-    headers = settings.vlm.chat_headers()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if settings.vlm.provider == "internal":
+        headers.update(
+            {
+                "x-dep-ticket": settings.vlm.dep_ticket,
+                "Send-System-Name": settings.vlm.send_system_name,
+                "User-Id": settings.vlm.user_id,
+                "User-Type": settings.vlm.user_type,
+                "Prompt-Msg-Id": str(uuid.uuid4()),
+                "Completion-Msg-Id": str(uuid.uuid4()),
+            }
+        )
+    if settings.vlm.api_key:
+        headers["Authorization"] = f"Bearer {settings.vlm.api_key}"
     payload = {
         "model": settings.vlm.model,
         "messages": [
