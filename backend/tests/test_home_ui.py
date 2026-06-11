@@ -67,6 +67,7 @@ def test_static_app_exposes_review_artifact_links():
     assert 'login_mode.value = "none";' not in body
     assert "login_success_selector" in body
     assert "/api/pipeline/draft" in body
+    assert "/api/generation/scenario-drafts/discover" in body
     assert "/api/pipeline/continue/" in body
     assert "renderPlanReview" in body
     assert "continue-workflow" in body

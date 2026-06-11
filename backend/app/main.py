@@ -8,6 +8,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from backend.app.adapters.browser_use_discovery import (
+    BrowserUseDiscoveryInput,
+    create_browser_use_discovery,
+    discovery_response,
+)
 from backend.app.config import load_settings
 from backend.app.pipeline import (
     PipelineInput,
@@ -166,6 +171,13 @@ def run_pipeline_api(payload: PipelineInput, capture_browser: bool = True) -> di
 def create_pipeline_draft_api(payload: PipelineInput, capture_browser: bool = True) -> dict:
     result = create_pipeline_draft(payload, capture_browser=capture_browser)
     return draft_response(result)
+
+
+@app.post("/api/generation/scenario-drafts/discover")
+def browser_use_discovery_api(payload: BrowserUseDiscoveryInput) -> dict:
+    output_dir = Path(load_settings().output_dir).resolve()
+    result = create_browser_use_discovery(payload, output_dir=output_dir)
+    return discovery_response(result, output_dir=output_dir)
 
 
 @app.post("/api/pipeline/continue/{job_id}")

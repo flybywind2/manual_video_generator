@@ -1,5 +1,6 @@
 const form = document.querySelector("#job-form");
 const sampleButton = document.querySelector("#load-sample");
+const discoverButton = document.querySelector("#discover-scenario");
 const navLinks = Array.from(document.querySelectorAll(".nav-links a[href^='#']"));
 const panelState = document.querySelector(".panel-state");
 const workflowSteps = Array.from(document.querySelectorAll(".step-list .step"));
@@ -187,6 +188,38 @@ form?.addEventListener("submit", async (event) => {
   }
 });
 
+discoverButton?.addEventListener("click", async () => {
+  clearWorkflowPoll();
+  currentDraft = null;
+  setButtonLoading(discoverButton, true, "탐색 중...");
+  setWorkflowStep(0);
+  setPipelineProgress(0);
+  setStatus("Discovery");
+  setArtifactLoading("browser-use 탐색 초안을 생성 중입니다. 최종 실행은 하지 않습니다.");
+
+  try {
+    const response = await fetch("/api/generation/scenario-drafts/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(createDiscoveryPayload()),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Discovery failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    setStatus("Discovery draft");
+    renderDiscoveryArtifacts(result);
+  } catch (error) {
+    setStatus("Failed");
+    setArtifactMessage(error.message || "browser-use 탐색 중 오류가 발생했습니다.");
+  } finally {
+    setButtonLoading(discoverButton, false);
+    setBusy(false);
+  }
+});
+
 artifactLinks?.addEventListener("click", async (event) => {
   const editorButton = event.target?.closest("[data-action='edit-artifact']");
   if (editorButton) {
@@ -254,6 +287,19 @@ function createPipelinePayload() {
     login_success_selector: form.elements.login_success_selector.value.trim(),
     execution_mode: form.elements.execution_mode.value,
     input_values: readInputValues(),
+  };
+}
+
+function createDiscoveryPayload() {
+  return {
+    request_text: form.elements.request.value.trim(),
+    target_url: form.elements.url.value.trim(),
+    role: form.elements.role.value.trim(),
+    completion_condition: form.elements.done.value.trim(),
+    input_values: readInputValues(),
+    viewport_mode: "desktop",
+    max_steps: 8,
+    auth_profile: form.elements.login_mode.value === "sso_profile" ? "sso_profile" : "",
   };
 }
 
@@ -583,6 +629,30 @@ function renderArtifacts(result, message = "") {
     ${renderDegradationPanel(result.degradations || [])}
     <div class="artifact-link-grid">
       ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
+    </div>
+  `;
+}
+
+function renderDiscoveryArtifacts(result) {
+  artifactStatus.textContent = `browser-use 탐색 초안 ${result.job_id}이 생성되었습니다. 관리자 검토 후 Playwright 실행 계획으로 승격해야 합니다.`;
+  artifactLinks?.removeAttribute("aria-busy");
+  const links = [
+    ["Discovery Manifest", result.artifacts?.manifest],
+    ["Scenario Draft", result.artifacts?.scenario_draft],
+    ["Candidate Action Plan", result.artifacts?.candidate_action_plan],
+  ].filter(([, url]) => Boolean(url));
+  const actions = result.manifest?.candidate_actions || [];
+  const inputs = result.manifest?.candidate_inputs || [];
+  artifactLinks.innerHTML = `
+    <div class="plan-review">
+      <div class="review-summary">
+        <span><strong>${inputs.length}</strong> 후보 입력</span>
+        <span><strong>${actions.length}</strong> 후보 액션</span>
+        <span><strong>검토 필요</strong> draft-only</span>
+      </div>
+      <div class="review-links">
+        ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
+      </div>
     </div>
   `;
 }
