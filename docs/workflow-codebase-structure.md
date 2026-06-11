@@ -68,6 +68,7 @@ flowchart TB
 
 - API: `POST /api/pipeline/draft`
 - Entry point: `create_pipeline_draft()` in `backend/app/pipeline.py`
+- Optional discovery note: `docs/BROWSER_USE_DISCOVERY.md`
 - Output:
   - `request.json`
   - `input_extraction.json`
@@ -78,6 +79,8 @@ flowchart TB
   - `workflow_state.json`
 - Current workflow state:
   - `status=awaiting_plan_review`
+
+`browser-use`를 도입할 경우 이 단계 앞 또는 옆에 `BrowserUseDiscoveryAdapter`를 둔다. 이 어댑터는 데스크톱/모바일 viewport에서 후보 업무 흐름, 후보 selector, 후보 마스킹 대상, 캡처, DOM 요약을 `DiscoveryManifest`로 수집하는 역할만 한다. 최종 실행, 촬영, 재현은 기존 Playwright action plan 경로를 유지하고, discovery 결과는 관리자 검토 전 자동 활성화하지 않는다.
   - `current_step=plan_review`
   - `can_continue=true`
 

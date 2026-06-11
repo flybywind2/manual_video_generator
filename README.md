@@ -119,6 +119,8 @@ fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=tr
 
 사내 PC에서 Codex를 사용할 수 없고 OpenCode만 허용되는 배포 기준은 [OpenCode Only 사내 배포 메모](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 따릅니다.
 
+`browser-use`는 최종 실행 엔진이 아니라 시나리오 초안 생성을 돕는 탐색 어댑터로만 둡니다. 데스크톱/모바일 viewport에서 후보 메뉴, 입력 필드, selector, 마스킹 대상을 수집한 뒤 `DiscoveryManifest`로 넘기고, 관리자 검토 후 기존 Playwright 기반 실행 경로로 승격합니다. 자세한 경계는 [Browser-Use Discovery Adapter](docs/BROWSER_USE_DISCOVERY.md)를 따릅니다.
+
 ## 환경 준비
 
 이 프로젝트의 Python 표준 버전은 `3.10.19`입니다. Python 3.11 이상을 전제로 설치하지 않습니다.
