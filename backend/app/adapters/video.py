@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,12 @@ def render_final_video(
         "composition_duration_source": duration_source,
         "used_fallback": True,
     }
+    has_tts_timeline = duration_source == "tts_audio" and _positive_float(plan.get("target_duration_seconds")) > 0
+    mux_target_duration_seconds = (
+        duration_seconds
+        if duration_source == "target_video_duration" or has_tts_timeline
+        else 0.0
+    )
     skills = ensure_hyperframes_skills(settings, package_dir)
     metadata["skills_metadata"] = str(skills.metadata_path)
     metadata["skills_status"] = skills.status
@@ -73,6 +80,7 @@ def render_final_video(
             ffmpeg_path=shutil.which("ffmpeg"),
             runner=runner,
             metadata=metadata,
+            target_duration_seconds=mux_target_duration_seconds,
         )
         metadata["video"] = str(final_video)
         _write_metadata(metadata_path, metadata)
@@ -94,6 +102,7 @@ def render_final_video(
             ffmpeg_path=shutil.which("ffmpeg"),
             runner=runner,
             metadata=metadata,
+            target_duration_seconds=mux_target_duration_seconds,
         )
         metadata["video"] = str(final_video)
         _write_metadata(metadata_path, metadata)
@@ -130,6 +139,7 @@ def render_final_video(
                 ffmpeg_path=ffmpeg_path,
                 runner=runner,
                 metadata=metadata,
+                target_duration_seconds=mux_target_duration_seconds,
             )
             metadata["video"] = str(final_video)
             _write_metadata(metadata_path, metadata)
@@ -147,6 +157,7 @@ def render_final_video(
         ffmpeg_path=ffmpeg_path,
         runner=runner,
         metadata=metadata,
+        target_duration_seconds=mux_target_duration_seconds,
     )
     metadata["video"] = str(final_video)
     _write_metadata(metadata_path, metadata)
@@ -161,6 +172,7 @@ def _mux_tts_audio(
     ffmpeg_path: str | None,
     runner: CommandRunner,
     metadata: dict[str, Any],
+    target_duration_seconds: float = 0.0,
 ) -> Path:
     existing_audio = [path for path in audio_paths if path.exists() and path.stat().st_size > 0]
     if not existing_audio:
@@ -215,9 +227,51 @@ def _mux_tts_audio(
         output_path = package_dir / "manual_video_agent_usage.mp4"
         mux_output = package_dir / "manual_video_agent_usage.audio.tmp.mp4" if video_path.resolve() == output_path.resolve() else output_path
         video_codec_args = ["-c:v", "copy"] if video_path.suffix.lower() == ".mp4" else ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        video_duration = _probe_media_duration_seconds(video_path)
+        audio_duration = _probe_media_duration_seconds(narration_wav)
+        leading_trim = _detect_leading_blank_seconds(
+            video_path=video_path,
+            ffmpeg_path=ffmpeg_path,
+            package_dir=package_dir,
+            runner=runner,
+            video_duration_seconds=video_duration,
+        )
+        effective_video_duration = max(0.0, video_duration - leading_trim) if video_duration > 0 else 0.0
+        requested_target_duration = _positive_float(target_duration_seconds)
+        if requested_target_duration > 0:
+            mux_target_duration = requested_target_duration
+        else:
+            mux_target_duration = max(effective_video_duration, audio_duration)
+        video_extension_duration = max(0.0, mux_target_duration - effective_video_duration)
+        audio_metadata["video_duration_seconds"] = round(video_duration, 3) if video_duration > 0 else None
+        audio_metadata["audio_duration_seconds"] = round(audio_duration, 3) if audio_duration > 0 else None
+        audio_metadata["video_leading_trim_seconds"] = round(leading_trim, 3)
+        audio_metadata["mux_target_duration_seconds"] = round(mux_target_duration, 3) if mux_target_duration > 0 else None
+        video_input_args = []
+        if leading_trim > 0:
+            video_input_args.extend(["-ss", f"{leading_trim:.3f}"])
+        video_filters = []
+        if video_extension_duration > 0.05:
+            video_filters.append(f"tpad=stop_mode=clone:stop_duration={video_extension_duration:.3f}")
+            video_codec_args = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        subtitles_path = package_dir / "subtitles.vtt"
+        subtitles_burned_in = subtitles_path.exists() and subtitles_path.stat().st_size > 0
+        if subtitles_burned_in:
+            video_filters.append("drawbox=x=0:y=ih-150:w=iw:h=150:color=white@1.0:t=fill")
+            video_filters.append(_subtitles_filter(subtitles_path, package_dir=package_dir))
+            video_codec_args = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        video_filter_args = ["-vf", ",".join(video_filters)] if video_filters else []
+        audio_metadata["subtitles_burned_in"] = subtitles_burned_in
+        audio_filter_args = []
+        output_duration_args = []
+        if mux_target_duration > 0 and audio_duration > 0 and audio_duration < mux_target_duration:
+            audio_filter_args.extend(["-af", "apad"])
+        if mux_target_duration > 0 and (requested_target_duration > 0 or audio_filter_args):
+            output_duration_args.extend(["-t", f"{mux_target_duration:.3f}"])
         mux_args = [
             ffmpeg_path,
             "-y",
+            *video_input_args,
             "-i",
             str(video_path),
             "-i",
@@ -226,14 +280,17 @@ def _mux_tts_audio(
             "0:v:0",
             "-map",
             "1:a:0",
+            *video_filter_args,
             *video_codec_args,
             "-c:a",
             "aac",
-            "-shortest",
+            *audio_filter_args,
+            *output_duration_args,
             "-movflags",
             "+faststart",
             str(mux_output),
         ]
+        audio_metadata["mux_command"] = mux_args
         mux_completed = runner(mux_args, cwd=str(package_dir), capture_output=True, text=True, timeout=600)
         audio_metadata["mux_returncode"] = mux_completed.returncode
         audio_metadata["mux_stdout"] = mux_completed.stdout[-2000:] if mux_completed.stdout else ""
@@ -261,6 +318,107 @@ def _mux_tts_audio(
         return video_path
 
 
+def _probe_media_duration_seconds(path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not path.exists() or path.stat().st_size <= 0:
+        return 0.0
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except Exception:
+        return 0.0
+    if completed.returncode != 0:
+        return 0.0
+    try:
+        return max(0.0, float(completed.stdout.strip()))
+    except ValueError:
+        return 0.0
+
+
+def _detect_leading_blank_seconds(
+    *,
+    video_path: Path,
+    ffmpeg_path: str,
+    package_dir: Path,
+    runner: CommandRunner,
+    video_duration_seconds: float,
+) -> float:
+    if runner is not subprocess.run or video_duration_seconds <= 2.0:
+        return 0.0
+    try:
+        from PIL import Image, ImageStat
+    except Exception:
+        return 0.0
+
+    probe_dir = package_dir / "audio_mix" / "video_probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    max_scan = min(video_duration_seconds, 60.0)
+    sample_times = _blank_probe_times(max_scan)
+    first_nonblank: float | None = None
+    with tempfile.TemporaryDirectory(dir=str(probe_dir)) as temp_dir:
+        temp_path = Path(temp_dir)
+        for index, sample_time in enumerate(sample_times):
+            frame_path = temp_path / f"frame_{index:03d}.png"
+            args = [
+                ffmpeg_path,
+                "-y",
+                "-ss",
+                f"{sample_time:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+                str(frame_path),
+            ]
+            try:
+                completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=30)
+            except Exception:
+                continue
+            if completed.returncode != 0 or not frame_path.exists() or frame_path.stat().st_size <= 0:
+                continue
+            try:
+                with Image.open(frame_path) as image:
+                    stat = ImageStat.Stat(image.convert("RGB").resize((64, 36)))
+                    mean = sum(stat.mean) / len(stat.mean)
+                    variance = sum(stat.var) / len(stat.var)
+            except Exception:
+                continue
+            if not _is_visually_blank_frame(mean=mean, variance=variance):
+                first_nonblank = sample_time
+                break
+    if first_nonblank is None or first_nonblank < 1.0:
+        return 0.0
+    return max(0.0, min(first_nonblank - 0.5, video_duration_seconds - 0.5))
+
+
+def _blank_probe_times(max_scan_seconds: float) -> list[float]:
+    times: list[float] = []
+    current = 0.0
+    while current <= max_scan_seconds:
+        times.append(round(current, 3))
+        current += 1.0 if current < 8.0 else 2.0
+    return times
+
+
+def _is_visually_blank_frame(*, mean: float, variance: float) -> bool:
+    return variance < 4.0 and (mean > 244.0 or mean < 12.0)
+
+
 def _record_audio_mux_skip(metadata: dict[str, Any], audio_paths: list[Path], *, reason: str) -> None:
     metadata["audio"] = {
         "status": "failed" if audio_paths else "skipped",
@@ -268,6 +426,17 @@ def _record_audio_mux_skip(metadata: dict[str, Any], audio_paths: list[Path], *,
         "input_count": len(audio_paths),
         "inputs": [str(path) for path in audio_paths],
     }
+
+
+def _subtitles_filter(path: Path, *, package_dir: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(package_dir.resolve())
+        filter_path = relative.as_posix()
+    except ValueError:
+        filter_path = path.resolve().as_posix().replace(":", "\\:")
+    filter_path = filter_path.replace("\\", "/").replace("'", "\\'")
+    style = "FontName=Arial,FontSize=20,Outline=2,Shadow=1,MarginV=36,Alignment=2"
+    return f"subtitles='{filter_path}':force_style='{style}'"
 
 
 def _concat_file_line(path: Path) -> str:
@@ -278,6 +447,21 @@ def _concat_file_line(path: Path) -> str:
 def _composition_timing(plan: dict[str, Any], audio_paths: list[Path]) -> tuple[float, str, list[float]]:
     steps = [step for step in plan.get("steps", []) if isinstance(step, dict)]
     step_count = max(1, len(steps))
+    planned_durations = [_positive_float(step.get("duration_seconds")) for step in steps]
+    target_duration = _positive_float(plan.get("target_duration_seconds"))
+    if any(duration > 0 for duration in planned_durations):
+        durations = [round(duration if duration > 0 else 1.0, 3) for duration in planned_durations]
+        duration_seconds = round(max(target_duration, sum(durations), 1.0), 3)
+        if target_duration > 0:
+            duration_delta = duration_seconds - sum(durations)
+            if durations:
+                durations[-1] = round(max(0.1, durations[-1] + duration_delta), 3)
+        source = str(plan.get("duration_source") or "media_plan_duration")
+        return duration_seconds, source, durations
+    if target_duration > 0:
+        durations = _distribute_duration_seconds(target_duration, step_count)
+        source = str(plan.get("duration_source") or "target_video_duration")
+        return round(target_duration, 3), source, durations
     audio_durations = [_wav_duration_seconds(path) for path in audio_paths]
     if any(duration > 0 for duration in audio_durations):
         durations = [
@@ -289,6 +473,23 @@ def _composition_timing(plan: dict[str, Any], audio_paths: list[Path]) -> tuple[
         return round(max(1.0, sum(durations)), 3), "tts_audio", durations
     fallback_duration = float(max(6, min(90, step_count * 4)))
     return fallback_duration, "step_count", [round(fallback_duration / step_count, 3)] * step_count
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+def _distribute_duration_seconds(total_seconds: float, count: int) -> list[float]:
+    count = max(1, count)
+    base = float(total_seconds) / float(count)
+    durations = [round(base, 3)] * count
+    correction = round(float(total_seconds) - sum(durations), 3)
+    durations[-1] = round(durations[-1] + correction, 3)
+    return durations
 
 
 def _wav_duration_seconds(path: Path) -> float:

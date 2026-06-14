@@ -160,6 +160,16 @@ def decide_browser_agent_action(
             package_dir=package_dir,
         )
         action = _normalize_browser_agent_action(_parse_json_content(content), request)
+        if action.get("status") == "failed":
+            normalization_error = str(action.get("reason") or "llm_action_normalization_failed")
+            action = _decide_local_browser_action(
+                request,
+                observation,
+                history,
+                step_index=step_index,
+                source="browser-agent-local-fallback",
+            )
+            action["llm_error"] = normalization_error
         if vlm_error:
             action["vlm_error"] = vlm_error
         return action
@@ -314,7 +324,9 @@ def _vlm_safe_observation(observation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[str, Any]:
-    action_type = str(data.get("type") or "").strip().lower()
+    action_type = str(data.get("type") or data.get("action") or "").strip().lower()
+    if not action_type and isinstance(data.get("output_schema"), dict):
+        action_type = str(data["output_schema"].get("type") or "").strip().lower()
     if action_type not in _ALLOWED_ACTION_TYPES:
         return {"status": "failed", "type": "finish", "reason": "unsupported_action_type", "raw_type": action_type}
 
@@ -500,6 +512,11 @@ def _best_field_for_input(
         label_norm = _compact_text(_field_label(field))
         if key_norm and label_norm and (key_norm in label_norm or label_norm in key_norm):
             return field
+    key_aliases = _input_key_aliases(key)
+    for field in editable:
+        label_norm = _compact_text(_field_label(field))
+        if label_norm and any(alias in label_norm or label_norm in alias for alias in key_aliases):
+            return field
     value_hint = _input_value_hint(value)
     for field in editable:
         label_norm = _compact_text(_field_label(field))
@@ -510,6 +527,18 @@ def _best_field_for_input(
     if len(input_values) == 1:
         return editable[0]
     return None
+
+
+def _input_key_aliases(key: str) -> list[str]:
+    normalized = _compact_text(key)
+    aliases: list[str] = []
+    if any(token in normalized for token in ("검색", "조회", "search", "query", "keyword")):
+        aliases.extend(["search", "query", "keyword", "publishedwikipages", "wikipages"])
+    if any(token in normalized for token in ("질문", "프롬프트", "prompt", "question", "chat", "대화")):
+        aliases.extend(["ask", "question", "prompt", "groundedquestion", "compiledcompanyknowledge"])
+    if any(token in normalized for token in ("권한", "그룹", "acl", "permission", "group")):
+        aliases.extend(["permission", "permissions", "group", "groups", "acl"])
+    return list(dict.fromkeys(_compact_text(item) for item in aliases if _compact_text(item)))
 
 
 def _field_label(field: dict[str, Any]) -> str:

@@ -1,4 +1,5 @@
 import json
+import wave
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ from backend.app.pipeline import (
     _capture_with_playwright,
     _execute_capture_actions,
     _execute_browser_agent_actions,
+    _execute_single_browser_agent_action,
+    _media_plan_with_tts_durations,
     _media_plan_for_outputs,
     _handle_login,
     _install_manual_login_signal,
@@ -23,9 +26,11 @@ from backend.app.pipeline import (
     _playwright_launch_kwargs,
     _prepare_capture_page,
     _requires_login_before_mcp_rehearsal,
+    _render_capture_slideshow_video,
     _render_subtitles,
     _raise_if_login_failed,
     _resolve_login_options,
+    _step_audio_durations,
     _write_selector_trace,
     rerender_pipeline_package,
     run_pipeline,
@@ -67,6 +72,141 @@ def test_run_pipeline_creates_package_artifacts(tmp_path):
     assert '"skills_metadata"' in manifest
     assert '"opencode_metadata"' in manifest
     assert "config_status" in result.plan
+
+
+def test_playwright_launch_kwargs_falls_back_to_installed_chrome(tmp_path, monkeypatch):
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_text("fake", encoding="utf-8")
+    monkeypatch.setenv("CHROME_PATH", str(chrome))
+
+    class Settings:
+        playwright_executable_path = ""
+        login = type("Login", (), {"browser_channel": ""})()
+
+    kwargs = _playwright_launch_kwargs(Settings(), browser_roots=[])
+
+    assert kwargs["executable_path"] == str(chrome)
+
+
+def test_execute_capture_actions_supports_scroll_action(tmp_path):
+    calls = []
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    plan = {
+        "steps": [{"id": "s1", "title": "스크롤", "caption": "아래 내용을 확인합니다."}],
+        "actions": [
+            {"id": "a1", "type": "scroll", "step_id": "s1", "direction": "down", "amount": 640},
+            {"id": "a2", "type": "capture_step", "step_id": "s1"},
+        ],
+    }
+
+    result = _execute_capture_actions(FakePage(), plan, tmp_path)
+
+    assert result["status"] == "ok"
+    assert any(call[0] == "evaluate" and call[1] == (640,) for call in calls)
+    assert result["captures"][0].exists()
+
+
+def test_browser_agent_executes_click_by_selector_action(tmp_path):
+    calls = []
+
+    class FakeLocator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        def click(self):
+            calls.append(("click", self.selector))
+
+    class FakePage:
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+        def locator(self, selector):
+            return FakeLocator(selector)
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+    request = PipelineInput(
+        request_text="텍스트 없는 더하기 아이콘을 누른 뒤 화면 캡처",
+        target_url="http://127.0.0.1:8000",
+        role="관리자",
+        completion_condition="모달 확인",
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true", "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2"})
+    observations = [
+        {
+            "url": request.target_url,
+            "title": "sample",
+            "headings": ["sample"],
+            "fields": [],
+            "clickables": [{"selector": "i.icon.icon-plus-bold", "class_name": "icon icon-plus-bold"}],
+            "body_text": "sample",
+        },
+        {
+            "url": request.target_url,
+            "title": "sample",
+            "headings": ["modal"],
+            "fields": [],
+            "clickables": [],
+            "body_text": "modal opened",
+        },
+    ]
+
+    def observe(page):
+        return observations[min(len([call for call in calls if call[0] == "observe"]), len(observations) - 1)]
+
+    def decide_next(request, settings, observation, history, *, step_index):
+        calls.append(("observe", step_index))
+        if step_index == 1:
+            return {
+                "status": "ok",
+                "source": "test",
+                "type": "click_by_selector",
+                "selector": "i.icon.icon-plus-bold",
+                "reason": "더하기 아이콘을 클릭합니다.",
+            }
+        return {"status": "ok", "source": "test", "type": "finish", "reason": "완료"}
+
+    result = _execute_browser_agent_actions(
+        FakePage(),
+        request,
+        {"steps": [], "actions": []},
+        tmp_path,
+        settings,
+        decide_next=decide_next,
+        observe_page=observe,
+    )
+
+    assert result["status"] == "ok"
+    assert ("click", "i.icon.icon-plus-bold") in calls
+    assert result["action_log"][0]["method"] == "locator:i.icon.icon-plus-bold"
+    assert result["captures"]
+
+
+def test_capture_slideshow_video_replaces_invalid_recording(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    capture = tmp_path / "capture.png"
+    Image.new("RGB", (320, 180), "white").save(capture)
+
+    video = _render_capture_slideshow_video(tmp_path, [capture])
+
+    assert video.exists()
+    assert video.stat().st_size > 1024
 
 
 def test_pipeline_passes_tts_audio_to_video_renderer(tmp_path, monkeypatch):
@@ -281,7 +421,7 @@ def test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
     body = response.json()
     assert body["status"] == "completed"
     assert body["artifacts"]["html_preview_url"].endswith("/preview.html")
-    assert body["artifacts"]["video_url"].endswith("/manual_video_agent_usage.webm")
+    assert body["artifacts"]["video_url"].endswith(("/manual_video_agent_usage.webm", "/manual_video_agent_usage.mp4"))
     assert body["artifacts"]["rehearsal_log_url"].endswith("/rehearsal_log.json")
     assert body["artifacts"]["planner_trace_url"].endswith("/planner_trace.json")
     assert body["artifacts"]["mcp_calls_url"].endswith("/playwright_mcp_calls.json")
@@ -457,7 +597,7 @@ def test_pipeline_continue_api_runs_after_draft_plan_review(tmp_path, monkeypatc
     body = response.json()
     assert body["status"] == "completed"
     assert body["job_id"] == draft["job_id"]
-    assert body["artifacts"]["video_url"].endswith("/manual_video_agent_usage.webm")
+    assert body["artifacts"]["video_url"].endswith(("/manual_video_agent_usage.webm", "/manual_video_agent_usage.mp4"))
     assert body["artifacts"]["html_preview_url"].endswith("/preview.html")
     assert client.get(body["artifacts"]["capture_action_log_url"]).json()["status"] == "skipped"
     workflow_state = json.loads((Path(body["package_dir"]) / "workflow_state.json").read_text(encoding="utf-8"))
@@ -2748,7 +2888,7 @@ def test_demonstration_mode_preserves_sso_profile_browser_context(tmp_path, monk
     assert not any(event[0] == "launch" for event in events)
     assert any(event == ("storage_state",) for event in events)
     assert result["storage_state"]["cookies"][0]["name"] == "sso"
-    assert result["video"].name == "direct_demonstration_source.webm"
+    assert result["video"].name in {"direct_demonstration_source.webm", "manual_video_agent_usage.webm"}
 
 
 def test_demonstration_recorder_records_events_without_burned_in_captions():
@@ -2847,8 +2987,8 @@ def test_demonstration_events_drive_media_plan_and_subtitles(tmp_path):
     assert titles == ["직접 시연 시작", "입력: 질문", "Enter 입력", "클릭: 답변 복사"]
     assert "st.form과 st.input 차이" in captions[1]
     assert "WEBVTT" in subtitle_text
-    assert "입력: 질문" in subtitle_text
-    assert "클릭: 답변 복사" in subtitle_text
+    assert "질문에 st.form과 st.input 차이 값을 입력합니다." in subtitle_text
+    assert "답변 복사을 클릭합니다." in subtitle_text
 
 
 def test_ai_browser_action_log_drives_media_plan_for_tts_sync(tmp_path):
@@ -2876,7 +3016,347 @@ def test_ai_browser_action_log_drives_media_plan_for_tts_sync(tmp_path):
     assert media_plan["source"] == "browser-agent-media-plan"
     assert "이후 작업" not in json.dumps(media_plan, ensure_ascii=False)
     assert titles == ["클릭: 닫기", "입력: 검색어", "Enter 입력"]
-    assert "클릭: 닫기" in subtitles.read_text(encoding="utf-8")
+    assert "닫기을 클릭합니다." in subtitles.read_text(encoding="utf-8")
+
+
+def test_ai_browser_media_plan_uses_actual_inputs_and_natural_timing_despite_five_minute_text(tmp_path):
+    request = PipelineInput(
+        request_text="사내 위키 검색과 질문 입력 흐름을 5분짜리 영상으로 만들어줘",
+        target_url="http://internal.example.local/wiki",
+        role="관리자",
+        completion_condition="질문 결과 확인",
+        execution_mode="ai",
+        input_values={"검색어": "Company LLM Wiki", "질문": "st.form과 st.input의 입력 차이점"},
+    )
+    base_plan = {"steps": [{"id": "planned", "title": "기존 계획"}], "actions": []}
+    action_log = [
+        {"type": "click_by_selector", "status": "ok", "reason": "Search 메뉴로 이동합니다.", "selector": "button[title='Search']"},
+        {
+            "type": "fill_by_label",
+            "status": "ok",
+            "label": "Search published Wiki pages",
+            "value": "Company LLM Wiki",
+            "selector": "#search",
+        },
+        {"type": "click_by_selector", "status": "ok", "reason": "검색 결과를 확인합니다.", "selector": "#search-button"},
+        {
+            "type": "fill_by_label",
+            "status": "ok",
+            "label": "Ask a grounded question about compiled company knowledge.",
+            "value": "st.form과 st.input의 입력 차이점",
+            "selector": "#ask",
+        },
+        {"type": "click_by_selector", "status": "ok", "reason": "Ask 버튼으로 질문을 제출합니다.", "selector": "#ask-button"},
+        {"type": "wait", "status": "ok", "reason": "답변이 표시될 때까지 기다립니다."},
+        {"type": "capture_step", "status": "ok", "reason": "결과 화면을 확인합니다."},
+    ]
+
+    media_plan = _media_plan_for_outputs(request, base_plan, action_log)
+    subtitles = _render_subtitles(media_plan, tmp_path).read_text(encoding="utf-8")
+    serialized = json.dumps(media_plan, ensure_ascii=False)
+
+    assert media_plan["source"] == "browser-agent-media-plan"
+    assert "target_duration_seconds" not in media_plan
+    assert all("duration_seconds" not in step for step in media_plan["steps"])
+    assert "Company LLM Wiki" in serialized
+    assert "st.form과 st.input의 입력 차이점" in serialized
+    assert "답변이 표시될 때까지 기다립니다." in serialized
+    assert "결과 화면을 확인합니다." in serialized
+    assert "00:00:28.000" in subtitles
+
+
+def test_browser_agent_fill_action_log_preserves_entered_value(tmp_path):
+    calls = []
+
+    class Locator:
+        def fill(self, value):
+            calls.append(("fill", value))
+
+    class Page:
+        def locator(self, selector):
+            calls.append(("locator", selector))
+            return Locator()
+
+        def evaluate(self, script, *args):
+            calls.append(("evaluate", args))
+
+        def wait_for_timeout(self, timeout):
+            calls.append(("wait_for_timeout", timeout))
+
+    log_entry = _execute_single_browser_agent_action(
+        Page(),
+        {
+            "id": "ba2",
+            "type": "fill_by_label",
+            "label": "Search published Wiki pages",
+            "value": "Company LLM Wiki",
+            "selector": "#search",
+            "reason": "검색어를 입력합니다.",
+        },
+        tmp_path,
+        set(),
+    )
+
+    assert log_entry["status"] == "ok"
+    assert log_entry["value"] == "Company LLM Wiki"
+    assert ("fill", "Company LLM Wiki") in calls
+
+
+def test_media_plan_uses_explicit_target_duration_only_when_agent_brief_requests_it():
+    request = PipelineInput(
+        request_text="사내 위키 사용법을 5분 영상으로 만들어줘",
+        target_url="http://internal.example.local/wiki",
+        role="관리자",
+        completion_condition="답변 확인",
+        execution_mode="ai",
+        agent_brief={"target_video_duration_seconds": 300},
+    )
+    base_plan = {"steps": [{"id": "planned", "title": "짧은 계획"}], "actions": []}
+    action_log = [
+        {"type": "click_by_text", "status": "ok", "texts": ["Search"], "selector": "#search-tab"},
+        {"type": "fill_by_label", "status": "ok", "label": "검색어", "value": "Company LLM Wiki", "selector": "#search"},
+        {"type": "press_key", "status": "ok", "key": "Enter"},
+        {"type": "fill_by_label", "status": "ok", "label": "질문", "value": "st.form과 st.input 차이", "selector": "#ask"},
+        {"type": "click_by_text", "status": "ok", "texts": ["Ask"], "selector": "#ask-button"},
+    ]
+
+    media_plan = _media_plan_for_outputs(request, base_plan, action_log)
+
+    assert media_plan["target_duration_seconds"] == 300.0
+    assert media_plan["duration_source"] == "target_video_duration"
+    assert round(sum(float(step["duration_seconds"]) for step in media_plan["steps"]), 3) == 300.0
+
+    natural_request = PipelineInput(
+        request_text="사내 위키 사용법을 5분 영상으로 만들어줘",
+        target_url="http://internal.example.local/wiki",
+        role="관리자",
+        completion_condition="답변 확인",
+        execution_mode="ai",
+    )
+    natural_plan = _media_plan_for_outputs(natural_request, base_plan, action_log)
+
+    assert "target_duration_seconds" not in natural_plan
+    assert all("duration_seconds" not in step for step in natural_plan["steps"])
+
+
+def test_render_subtitles_uses_media_plan_step_durations(tmp_path):
+    plan = {
+        "target_duration_seconds": 300.0,
+        "steps": [
+            {"id": "intro", "title": "소개", "caption": "시작", "duration_seconds": 90.0},
+            {"id": "search", "title": "검색", "caption": "검색합니다.", "duration_seconds": 210.0},
+        ],
+    }
+
+    subtitles = _render_subtitles(plan, tmp_path)
+    text = subtitles.read_text(encoding="utf-8")
+
+    assert "00:00:00.000 --> 00:01:30.000" in text
+    assert "00:01:30.000 --> 00:05:00.000" in text
+
+
+def test_render_subtitles_prefers_single_caption_line_without_repeating_title(tmp_path):
+    plan = {
+        "steps": [
+            {
+                "id": "search",
+                "title": "입력: Search published Wiki pages",
+                "caption": "Search published Wiki pages에 Company LLM Wiki 값을 입력합니다.",
+            }
+        ]
+    }
+
+    subtitles = _render_subtitles(plan, tmp_path)
+    text = subtitles.read_text(encoding="utf-8")
+
+    assert "입력: Search published Wiki pages\nSearch published Wiki pages에" not in text
+    assert text.count("Search published Wiki pages") == 1
+    assert "Company LLM Wiki 값을 입력합니다." in text
+
+
+def test_media_plan_with_tts_durations_keeps_subtitles_until_audio_end(tmp_path):
+    def write_wav(path: Path, duration_seconds: float):
+        frame_rate = 8000
+        frame_count = int(frame_rate * duration_seconds)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(frame_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
+
+    audio_1 = tmp_path / "tts" / "01.wav"
+    audio_2 = tmp_path / "tts" / "02.wav"
+    write_wav(audio_1, 2.0)
+    write_wav(audio_2, 5.0)
+    plan = {
+        "source": "browser-agent-media-plan",
+        "steps": [
+            {"id": "one", "title": "검색", "caption": "검색합니다."},
+            {"id": "two", "title": "확인", "caption": "결과를 확인합니다."},
+        ],
+    }
+
+    timed = _media_plan_with_tts_durations(plan, [audio_1, audio_2])
+    subtitles = _render_subtitles(timed, tmp_path).read_text(encoding="utf-8")
+
+    assert timed["duration_source"] == "tts_audio"
+    assert timed["target_duration_seconds"] == 7.0
+    assert timed["steps"][0]["duration_seconds"] == 2.0
+    assert timed["steps"][1]["duration_seconds"] == 5.0
+    assert "00:00:02.000 --> 00:00:07.000" in subtitles
+
+
+def test_replay_durations_prefer_media_plan_timeline_over_short_tts(tmp_path):
+    def write_wav(path: Path, duration_seconds: float):
+        frame_rate = 8000
+        frame_count = int(frame_rate * duration_seconds)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(frame_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
+
+    audio = tmp_path / "tts" / "01_short.wav"
+    write_wav(audio, 1.0)
+    media_plan = {
+        "steps": [
+            {"id": "intro", "title": "소개", "duration_seconds": 75.0},
+            {"id": "search", "title": "검색", "duration_seconds": 225.0},
+        ]
+    }
+
+    assert _step_audio_durations(media_plan, [audio]) == [75.0, 225.0]
+
+
+def test_media_events_include_click_by_selector_before_fill():
+    action_log = [
+        {"type": "click_by_selector", "status": "ok", "selector": "button.secondary-action", "reason": "Ask Wiki 열기"},
+        {"type": "fill_by_label", "status": "ok", "label": "질문", "value": "테스트", "selector": "textarea"},
+    ]
+
+    events = pipeline_module._demonstration_events_for_media(action_log)
+
+    assert [event["type"] for event in events] == ["click", "input"]
+    assert events[0]["selector"] == "button.secondary-action"
+    assert events[0]["text"] == "Ask Wiki 열기"
+
+
+def test_browser_agent_replay_uses_event_durations_without_extra_initial_wait(tmp_path, monkeypatch):
+    import backend.app.pipeline as pipeline_module
+    import playwright.sync_api as sync_api
+
+    waits = []
+
+    class FakePage:
+        keyboard = type("Keyboard", (), {"press": lambda self, key: None})()
+
+        def set_default_timeout(self, timeout):
+            pass
+
+        def set_default_navigation_timeout(self, timeout):
+            pass
+
+        def goto(self, url, wait_until):
+            pass
+
+        def wait_for_load_state(self, state, timeout):
+            pass
+
+        def wait_for_function(self, expression, timeout):
+            return True
+
+        def add_style_tag(self, content):
+            pass
+
+        def add_init_script(self, script):
+            pass
+
+        def evaluate(self, script, *args):
+            pass
+
+        def wait_for_timeout(self, timeout):
+            waits.append(timeout)
+
+        def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+        def locator(self, selector):
+            return type("Locator", (), {"click": lambda self: None, "fill": lambda self, value: None})()
+
+    class FakeContext:
+        def __init__(self, options):
+            self.options = options
+
+        def new_page(self):
+            return FakePage()
+
+        def close(self):
+            raw_dir = Path(self.options["record_video_dir"])
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / "replay.webm").write_bytes(b"replay-webm")
+
+    class FakeBrowser:
+        def new_context(self, **kwargs):
+            return FakeContext(kwargs)
+
+        def close(self):
+            pass
+
+    class FakeChromium:
+        def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: FakePlaywright())
+
+    class Settings:
+        playwright_executable_path = ""
+        request_timeout_seconds = 60.0
+        login = type("Login", (), {"mode": "none"})()
+        browser_runner = "playwright"
+
+    dirs = _make_dirs(tmp_path / "package")
+    media_plan = {
+        "source": "browser-agent-media-plan",
+        "steps": [
+            {"id": "open", "title": "열기", "duration_seconds": 30.0},
+            {"id": "fill", "title": "입력", "duration_seconds": 60.0},
+        ],
+    }
+    action_log = [
+        {"type": "click_by_selector", "status": "ok", "selector": "button.secondary-action", "reason": "Ask Wiki 열기"},
+        {"type": "fill_by_label", "status": "ok", "label": "질문", "value": "테스트", "selector": "textarea"},
+    ]
+
+    result = pipeline_module._replay_demonstration_with_playwright(
+        PipelineInput(
+            request_text="질문 입력",
+            target_url="http://internal.example.local",
+            role="사용자",
+            completion_condition="완료",
+            execution_mode="ai",
+        ),
+        media_plan,
+        action_log,
+        dirs,
+        Settings(),
+        tts_audio=[],
+    )
+
+    assert result["status"] == "ok"
+    assert 30000 not in waits
+    assert result["action_log"][1]["duration_seconds"] == 30.0
+    assert result["action_log"][2]["duration_seconds"] == 60.0
 
 
 def test_demonstration_pipeline_uses_recorded_events_for_outputs(tmp_path, monkeypatch):
@@ -3123,7 +3603,7 @@ def test_ai_browser_pipeline_replays_action_log_after_tts_for_sync(tmp_path, mon
 
     assert calls["replay"]["source"] == "browser-agent-media-plan"
     assert calls["replay"]["audio_count"] > 0
-    assert calls["replay"]["event_count"] == 1
+    assert calls["replay"]["event_count"] == 2
     assert result.artifacts.video.read_bytes() == b"ai-replay"
 
 
@@ -3149,10 +3629,10 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
             self.kind = kind
             self.name = name
 
-        def fill(self, value):
+        def fill(self, value, **kwargs):
             events.append(("fill", self.kind, self.name, value))
 
-        def click(self):
+        def click(self, **kwargs):
             events.append(("click", self.kind, self.name))
 
     class FakeKeyboard:
@@ -3293,7 +3773,7 @@ def test_demonstration_replay_executes_events_with_audio_timing(tmp_path, monkey
     assert result["video"].name == "manual_video_agent_usage.webm"
     assert result["video"].read_bytes() == b"replay-webm"
     assert ("set_default_timeout", 8000) in events
-    assert ("set_default_navigation_timeout", 15000) in events
+    assert ("set_default_navigation_timeout", 60000) in events
     assert ("new_context", {"cookies": [{"name": "sid", "value": "ok"}], "origins": []}, True) in events
     assert ("fill", "label", "질문", "st.form과 st.input 차이") in events
     assert ("click", "button", "전송") in events
@@ -3704,7 +4184,7 @@ def test_capture_with_playwright_creates_degraded_placeholder_when_recording_is_
 
     assert result["video"].exists()
     assert result["status"] == "degraded"
-    assert result["degrade_reason"] == "browser_recording_missing"
+    assert result["degrade_reason"] == "browser_recording_missing_or_invalid"
 
 
 def test_capture_with_playwright_can_attach_to_cdp_browser_context(tmp_path, monkeypatch):
@@ -3806,7 +4286,7 @@ def test_capture_with_playwright_can_attach_to_cdp_browser_context(tmp_path, mon
     assert not any(event[0] == "launch" for event in events)
     assert result["video"].exists()
     assert result["status"] == "degraded"
-    assert result["degrade_reason"] == "browser_recording_missing"
+    assert result["degrade_reason"] == "browser_recording_missing_or_invalid"
 
 
 def test_capture_can_use_extension_bridge_observe_act_verify_runner(tmp_path, monkeypatch):

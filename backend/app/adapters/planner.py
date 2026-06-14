@@ -240,6 +240,7 @@ def _call_llm_planner(
                     "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,target?,label?,value?,value_key?,texts?,requires_approval?}]}. "
                     "사용자 요청이 짧거나 모호하면 agent_brief의 task_type, success_criteria, safe_click_intents를 사용해 필요한 단계를 보강한다. "
                     "브라우저 화면마다 달라지는 CSS selector보다 fill_by_label, click_by_text, press_key, capture_step 같은 의미 기반 action을 우선한다. "
+                    "단, 사용자가 class/id/css selector를 직접 제공했거나 아이콘처럼 텍스트가 없는 컨트롤은 click action의 selector 필드로 지정한다. "
                     "입력값은 input_values의 key를 value_key로 참조하고, 화면의 실제 필드명은 label에 넣는다. "
                     "조회/검색/전송 뒤에는 capture_step을 넣고, 완료 조건 확인 단계도 포함한다. "
                     "요청문에 모달창/팝업 확인 또는 닫기가 포함되어 있으면 본 작업 전에 닫기/확인 click_by_text 단계를 먼저 둔다. "
@@ -304,6 +305,14 @@ def _normalize_plan(data: dict[str, Any], request: Any) -> dict[str, Any]:
         item["id"] = str(item.get("id") or f"a{index}")
         item["type"] = str(item.get("type") or "capture_step")
         item["step_id"] = str(item.get("step_id") or normalized_steps[min(index - 1, len(normalized_steps) - 1)]["id"])
+        if item["type"] == "navigate" and not str(item.get("target") or "").strip():
+            item["target"] = request.target_url
+        if item["type"] in {"fill", "fill_by_label"}:
+            _normalize_fill_value(item, request)
+        if item["type"] == "click_by_selector":
+            item["type"] = "click"
+            if not item.get("selector"):
+                item["selector"] = item.get("css_selector") or item.get("target")
         if item["type"] == "click_by_text" and is_disallowed_click_texts(click_text_candidates(item)):
             item = {
                 "id": item["id"],
@@ -319,6 +328,41 @@ def _normalize_plan(data: dict[str, Any], request: Any) -> dict[str, Any]:
             {"id": "a0", "type": "navigate", "target": request.target_url, "step_id": normalized_steps[0]["id"]},
         )
     return {"steps": normalized_steps, "actions": normalized_actions}
+
+
+def _normalize_fill_value(action: dict[str, Any], request: Any) -> None:
+    if str(action.get("value") or ""):
+        return
+    input_values = getattr(request, "input_values", {}) or {}
+    if not isinstance(input_values, dict) or not input_values:
+        return
+    value_key = str(action.get("value_key") or "").strip()
+    label = str(action.get("label") or action.get("name") or "").strip()
+    if value_key in input_values:
+        action["value"] = input_values[value_key]
+        return
+    if label in input_values:
+        action["value"] = input_values[label]
+        if not value_key:
+            action["value_key"] = label
+        return
+    normalized_label = _compact_text(label)
+    for key, value in input_values.items():
+        normalized_key = _compact_text(str(key))
+        if normalized_key and normalized_label and (normalized_key in normalized_label or normalized_label in normalized_key):
+            action["value"] = value
+            if not value_key:
+                action["value_key"] = str(key)
+            return
+    if len(input_values) == 1:
+        key, value = next(iter(input_values.items()))
+        action["value"] = value
+        if not value_key:
+            action["value_key"] = str(key)
+
+
+def _compact_text(value: str) -> str:
+    return "".join(str(value).split()).lower()
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:

@@ -34,6 +34,7 @@ class TtsResult:
 
 def synthesize_tts(plan: dict[str, Any], settings: AppSettings, tts_dir: Path) -> TtsResult:
     tts_dir.mkdir(parents=True, exist_ok=True)
+    _clean_tts_dir(tts_dir)
     provider = settings.tts_provider.lower()
     use_melotts = provider in {"melotts", "melo", "melo-tts"}
     use_supertonic = provider in {"supertonic", "supertonic-3"}
@@ -65,7 +66,7 @@ def synthesize_tts(plan: dict[str, Any], settings: AppSettings, tts_dir: Path) -
     audio_paths: list[Path] = []
     entries: list[dict[str, Any]] = []
     for index, step in enumerate(plan["steps"], start=1):
-        text = str(step.get("narration") or step.get("caption") or step.get("title") or "")
+        text = _narration_text_for_step(step)
         path = tts_dir / f"{index:02d}_{step['id']}.wav"
         provider_used = "silent-fallback"
         error = load_error
@@ -127,9 +128,47 @@ def synthesize_tts(plan: dict[str, Any], settings: AppSettings, tts_dir: Path) -
     return TtsResult(audio_paths=audio_paths, metadata_path=metadata_path, entries=entries)
 
 
+def _clean_tts_dir(tts_dir: Path) -> None:
+    for pattern in ("*.wav", "*.txt", "tts_metadata.json"):
+        for path in tts_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+
+
 def _supertonic_model_dir() -> Path | None:
     configured = os.environ.get("SUPERTONIC_CACHE_DIR", "").strip()
-    return Path(configured).expanduser() if configured else None
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path.home() / ".cache" / "supertonic3",
+            Path.home() / "Documents" / "New project 5" / "runtime" / "supertonic3",
+        ]
+    )
+    for candidate in candidates:
+        if _has_supertonic_onnx(candidate):
+            return candidate
+    return candidates[0] if candidates else None
+
+
+def _narration_text_for_step(step: dict[str, Any]) -> str:
+    base = str(step.get("narration") or step.get("caption") or step.get("title") or "").strip()
+    return base
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+def _has_supertonic_onnx(path: Path) -> bool:
+    onnx_dir = path / "onnx"
+    required = {"duration_predictor.onnx", "text_encoder.onnx", "vector_estimator.onnx", "vocoder.onnx"}
+    return onnx_dir.exists() and all((onnx_dir / name).exists() for name in required)
 
 
 def _supertonic_runtime_metadata() -> dict[str, str | bool]:
@@ -138,6 +177,7 @@ def _supertonic_runtime_metadata() -> dict[str, str | bool]:
     return {
         "supertonic_cache_dir": str(model_dir) if model_dir else "",
         "supertonic_cache_dir_exists": bool(model_dir and model_dir.exists()),
+        "supertonic_onnx_exists": bool(model_dir and _has_supertonic_onnx(model_dir)),
         "hf_home": hf_home,
         "hf_home_exists": bool(hf_home and Path(hf_home).expanduser().exists()),
     }

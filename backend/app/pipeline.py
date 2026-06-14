@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 import uuid
 import wave
@@ -433,6 +434,16 @@ def _environment_terminal_details(environment: dict[str, str]) -> dict[str, Any]
     }
 
 
+def _request_with_settings_target_duration(request: PipelineInput, settings: Any) -> PipelineInput:
+    configured = _positive_float(getattr(settings, "target_video_duration_seconds", 0.0))
+    if configured <= 0:
+        return request
+    brief = dict(request.agent_brief or {})
+    if _positive_float(brief.get("target_video_duration_seconds")) <= 0:
+        brief["target_video_duration_seconds"] = configured
+    return request.model_copy(update={"agent_brief": brief})
+
+
 def run_pipeline(
     request: PipelineInput,
     *,
@@ -482,6 +493,7 @@ def run_pipeline(
             "agent_brief": input_extraction.get("scenario_brief", {}),
         }
     )
+    effective_request = _request_with_settings_target_duration(effective_request, settings)
     request_payload = redact_sensitive(effective_request.model_dump())
     _record_stage(
         audit,
@@ -653,6 +665,7 @@ def create_pipeline_draft(
             "agent_brief": input_extraction.get("scenario_brief", {}),
         }
     )
+    effective_request = _request_with_settings_target_duration(effective_request, settings)
     request_payload = redact_sensitive(effective_request.model_dump())
     _record_stage(
         audit,
@@ -815,6 +828,7 @@ def continue_pipeline_draft(
 
     dirs = _dirs_from_package(package_dir)
     effective_request = PipelineInput(**state["request"])
+    effective_request = _request_with_settings_target_duration(effective_request, settings)
     plan = json.loads((package_dir / "action_plan.json").read_text(encoding="utf-8"))
     rehearsal = json.loads((package_dir / "rehearsal_log.json").read_text(encoding="utf-8"))
     audit = AuditLog(run_id=job_id, path=package_dir / "audit_log.jsonl", reset=False)
@@ -925,6 +939,9 @@ def rerender_pipeline_package(
         },
     )
     tts_result = synthesize_tts(media_plan, settings, dirs.tts)
+    media_plan = _media_plan_with_tts_durations(media_plan, tts_result.audio_paths)
+    media_plan_path = _write_media_plan(media_plan, package_dir)
+    subtitles_path = _render_subtitles(media_plan, package_dir, redaction=RedactionPipeline(sensitive_values=request.input_values))
     tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
     _record_stage(
         audit,
@@ -1199,6 +1216,9 @@ def _complete_pipeline_execution(
         },
     )
     tts_result = synthesize_tts(media_plan, settings, dirs.tts)
+    media_plan = _media_plan_with_tts_durations(media_plan, tts_result.audio_paths)
+    media_plan_path = _write_media_plan(media_plan, dirs.package)
+    subtitles_path = _render_subtitles(media_plan, dirs.package, redaction=RedactionPipeline(sensitive_values=effective_request.input_values))
     tts_degrade_reason = _tts_degrade_reason(tts_result.entries)
     _record_stage(
         audit,
@@ -1764,19 +1784,19 @@ def _capture_with_playwright(request: PipelineInput, plan: dict[str, Any], dirs:
     videos = sorted(dirs.raw_video.glob("*.webm"), key=lambda path: path.stat().st_mtime, reverse=True)
     video_name = "direct_demonstration_source.webm" if demonstration_mode else "manual_video_agent_usage.webm"
     video = dirs.package / video_name
-    if videos:
+    if videos and _is_valid_video(videos[0]):
         shutil.copy2(videos[0], video)
     else:
-        video = _render_placeholder_video(dirs.package)
+        video = _render_capture_slideshow_video(dirs.package, captures) if captures else _render_placeholder_video(dirs.package)
         capture_result.setdefault("action_log", []).append(
             {
                 "type": "record_video",
                 "status": "degraded",
-                "reason": "browser_recording_missing",
+                "reason": "browser_recording_missing_or_invalid",
             }
         )
         capture_result["status"] = "degraded"
-        capture_result["degrade_reason"] = capture_result.get("degrade_reason") or "browser_recording_missing"
+        capture_result["degrade_reason"] = capture_result.get("degrade_reason") or "browser_recording_missing_or_invalid"
     action_log_path = dirs.package / "capture_action_log.json"
     capture_log_status = "completed" if capture_result.get("status", "ok") == "ok" else str(capture_result.get("status"))
     capture_log_payload: dict[str, Any] = {
@@ -1940,6 +1960,10 @@ def _playwright_launch_kwargs(
     discovered = _discover_playwright_chromium(browser_roots=browser_roots)
     if discovered:
         launch_kwargs["executable_path"] = str(discovered)
+        return launch_kwargs
+    installed = _discover_installed_chromium(include_common_paths=browser_roots is None)
+    if installed:
+        launch_kwargs["executable_path"] = str(installed)
     return launch_kwargs
 
 
@@ -2011,6 +2035,26 @@ def _discover_playwright_chromium(browser_roots: list[Path] | None = None) -> Pa
     if not candidates:
         return None
     return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+
+
+def _discover_installed_chromium(*, include_common_paths: bool = True) -> Path | None:
+    candidates = [
+        Path(os.environ.get("CHROME_PATH", "")),
+        Path(os.environ.get("EDGE_PATH", "")),
+    ]
+    if include_common_paths:
+        candidates.extend(
+            [
+                Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+                Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+                Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+                Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            ]
+        )
+    for candidate in candidates:
+        if str(candidate) and candidate.is_file():
+            return candidate
+    return None
 
 
 def _default_playwright_browser_roots() -> list[Path]:
@@ -2274,6 +2318,13 @@ def _execute_capture_actions(
                     page.wait_for_selector(selector, timeout=_action_timeout(action, default=10000))
             elif action_type == "wait":
                 page.wait_for_timeout(_action_timeout(action, default=1000))
+            elif action_type == "scroll":
+                _apply_step_overlay(page, step, action)
+                direction = str(action.get("direction") or "down").lower()
+                amount = int(action.get("amount") or 520)
+                delta = -abs(amount) if direction in {"up", "top"} else abs(amount)
+                page.evaluate("(delta) => window.scrollBy({ top: delta, behavior: 'smooth' })", delta)
+                page.wait_for_timeout(700)
             elif action_type == "capture_step":
                 _apply_step_overlay(page, step, action)
                 page.wait_for_timeout(500)
@@ -2475,7 +2526,8 @@ def _replay_demonstration_with_playwright(
                 "navigate-ok",
                 {"component": "direct-playwright-replay", "is_mcp": False},
             )
-            if durations:
+            use_initial_wait = _replay_uses_initial_intro_wait(media_plan, events)
+            if use_initial_wait and durations:
                 _record_replay_terminal(
                     terminal,
                     run_id,
@@ -2488,8 +2540,9 @@ def _replay_demonstration_with_playwright(
                 )
                 _wait_for_replay_step(page, durations[0])
             for index, event in enumerate(events, start=1):
-                step = steps[index] if index < len(steps) else _demonstration_event_to_step(index, event)
-                duration = durations[index] if index < len(durations) else _fallback_step_duration_seconds(step)
+                duration_index = index if use_initial_wait else index - 1
+                step = steps[duration_index] if duration_index < len(steps) else _demonstration_event_to_step(index, event)
+                duration = durations[duration_index] if duration_index < len(durations) else _fallback_step_duration_seconds(step)
                 _record_replay_terminal(
                     terminal,
                     run_id,
@@ -2581,6 +2634,16 @@ def _replay_demonstration_with_playwright(
     }
 
 
+def _replay_uses_initial_intro_wait(media_plan: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    if str(media_plan.get("source") or "") != "direct-demonstration-media-plan":
+        return False
+    steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
+    if len(steps) <= len(events):
+        return False
+    first_id = str(steps[0].get("id") or "")
+    return first_id == "demo_start"
+
+
 def _record_replay_terminal(
     terminal: TerminalRunLogger | None,
     run_id: str,
@@ -2601,7 +2664,7 @@ def _replay_default_timeout_ms(settings: Any) -> int:
 
 
 def _replay_navigation_timeout_ms(settings: Any) -> int:
-    return _bounded_milliseconds(getattr(settings, "request_timeout_seconds", 10.0), minimum=5.0, maximum=15.0, fallback=10.0)
+    return _bounded_milliseconds(getattr(settings, "request_timeout_seconds", 10.0), minimum=5.0, maximum=60.0, fallback=10.0)
 
 
 def _bounded_milliseconds(value: Any, *, minimum: float, maximum: float, fallback: float) -> int:
@@ -2776,10 +2839,37 @@ def _step_audio_durations(media_plan: dict[str, Any], audio_paths: list[Path]) -
     steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
     durations: list[float] = []
     for index, step in enumerate(steps):
+        planned_duration = _positive_float(step.get("duration_seconds"))
+        if planned_duration > 0:
+            durations.append(planned_duration)
+            continue
         audio_path = audio_paths[index] if index < len(audio_paths) else None
         duration = _wav_duration_seconds(audio_path) if audio_path else 0.0
         durations.append(duration if duration > 0 else _fallback_step_duration_seconds(step))
     return durations
+
+
+def _media_plan_with_tts_durations(media_plan: dict[str, Any], audio_paths: list[Path]) -> dict[str, Any]:
+    steps = [step for step in media_plan.get("steps", []) if isinstance(step, dict)]
+    if not steps or not audio_paths:
+        return media_plan
+    if _positive_float(media_plan.get("target_duration_seconds")) > 0 and str(media_plan.get("duration_source") or "") == "target_video_duration":
+        return media_plan
+    durations = [_wav_duration_seconds(path) for path in audio_paths[: len(steps)]]
+    if not any(duration > 0 for duration in durations):
+        return media_plan
+    if len(durations) < len(steps):
+        durations.extend(_fallback_step_duration_seconds(step) for step in steps[len(durations) :])
+    updated = dict(media_plan)
+    timed_steps: list[dict[str, Any]] = []
+    for step, duration in zip(steps, durations):
+        timed = dict(step)
+        timed["duration_seconds"] = round(max(float(duration), 0.1), 3)
+        timed_steps.append(timed)
+    updated["steps"] = timed_steps
+    updated["target_duration_seconds"] = round(sum(float(step["duration_seconds"]) for step in timed_steps), 3)
+    updated["duration_source"] = "tts_audio"
+    return updated
 
 
 def _wav_duration_seconds(path: Path | None) -> float:
@@ -3284,7 +3374,7 @@ def _selector_for_click_texts(observation: dict[str, Any], texts: list[str]) -> 
         for item in clickables:
             if not isinstance(item, dict):
                 continue
-            item_text = str(item.get("text") or item.get("href") or "").strip()
+            item_text = str(item.get("text") or item.get("title") or item.get("aria") or item.get("href") or item.get("class_name") or "").strip()
             selector = str(item.get("selector") or "").strip()
             if not item_text or not selector:
                 continue
@@ -3369,6 +3459,16 @@ def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
             if (name) return `${el.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
             const aria = el.getAttribute('aria-label');
             if (aria) return `${el.tagName.toLowerCase()}[aria-label="${cssEscape(aria)}"]`;
+            const title = el.getAttribute('title');
+            if (title) return `${el.tagName.toLowerCase()}[title="${cssEscape(title)}"]`;
+            const placeholder = el.getAttribute('placeholder');
+            if (placeholder) return `${el.tagName.toLowerCase()}[placeholder="${cssEscape(placeholder)}"]`;
+            const type = el.getAttribute('type');
+            const className = typeof el.className === 'string' ? el.className.trim() : '';
+            if (className) {
+              const classes = className.split(/\\s+/).filter(Boolean).slice(0, 3).map((item) => `.${cssEscape(item)}`).join('');
+              if (classes) return `${el.tagName.toLowerCase()}${type ? `[type="${cssEscape(type)}"]` : ''}${classes}`;
+            }
             return el.tagName.toLowerCase();
           };
           const fields = Array.from(document.querySelectorAll('input, textarea, select'))
@@ -3382,16 +3482,19 @@ def _observe_browser_for_agent(page: Any) -> dict[str, Any]:
               type: el.getAttribute('type') || el.tagName.toLowerCase(),
               value: el.type === 'password' ? '<redacted>' : String(el.value || '').slice(0, 80),
             }));
-          const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a'))
+          const clickables = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a, i[class*="icon"], svg[aria-label], [class*="icon-button"]'))
             .filter(visible)
             .slice(0, 60)
             .map((el) => ({
               selector: selectorFor(el),
               text: textOf(el).slice(0, 120),
+              title: el.getAttribute('title') || '',
+              aria: el.getAttribute('aria-label') || '',
+              class_name: typeof el.className === 'string' ? el.className : '',
               role: el.getAttribute('role') || el.tagName.toLowerCase(),
               href: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') || '' : '',
             }))
-            .filter((item) => item.text || item.href);
+            .filter((item) => item.text || item.title || item.aria || item.href || item.class_name);
           const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
             .filter(visible)
             .slice(0, 20)
@@ -3437,7 +3540,7 @@ def _verify_browser_agent_action(
             "status": "ok" if value_found else "failed",
             "reason": "field_value_observed" if value_found else "field_value_not_observed",
         }
-    if action_type in {"click_by_text", "press_key", "wait"}:
+    if action_type in {"click_by_text", "click_by_selector", "press_key", "wait"}:
         try:
             after = observe_page(page)
         except Exception:
@@ -3493,6 +3596,7 @@ def _execute_single_browser_agent_action(
     try:
         if action_type == "fill_by_label":
             log_entry["label"] = str(action.get("label") or "")
+            log_entry["value"] = str(action.get("value") or "")
             selector = str(action.get("selector") or "").strip()
             log_entry["selector"] = selector
             log_entry["selector_source"] = str(action.get("selector_source") or "action.selector")
@@ -3528,6 +3632,18 @@ def _execute_single_browser_agent_action(
                 log_entry["selector"] = resolved_selector
                 log_entry["selector_source"] = log_entry.get("selector_source") or "resolved_method"
             page.wait_for_timeout(700)
+        elif action_type == "click_by_selector":
+            selector = str(action.get("selector") or "").strip()
+            log_entry["selector"] = selector
+            log_entry["selector_source"] = str(action.get("selector_source") or "action.selector")
+            if not selector:
+                log_entry["status"] = "skipped"
+                log_entry["reason"] = "missing_selector"
+            else:
+                _apply_step_overlay(page, step, action)
+                page.locator(selector).click()
+                log_entry["method"] = f"locator:{selector}"
+                page.wait_for_timeout(700)
         elif action_type == "press_key":
             _apply_step_overlay(page, step, action)
             key = str(action.get("key") or "Enter")
@@ -3559,11 +3675,11 @@ def _fill_by_label(page: Any, label: str, value: str) -> str:
             if not callable(method):
                 continue
             try:
-                method(candidate, exact=False).fill(value)
+                _locator_fill(method(candidate, exact=False), value, timeout=1800)
                 return f"{method_name}:{candidate}"
             except TypeError:
                 try:
-                    method(candidate).fill(value)
+                    _locator_fill(method(candidate), value, timeout=1800)
                     return f"{method_name}:{candidate}"
                 except Exception as exc:  # noqa: BLE001 - try the next semantic locator.
                     errors.append(f"{method_name}:{type(exc).__name__}")
@@ -3574,13 +3690,20 @@ def _fill_by_label(page: Any, label: str, value: str) -> str:
         for candidate in candidates:
             selector = _input_selector_for_name(candidate)
             try:
-                locator(selector).fill(value)
+                _locator_fill(locator(selector), value, timeout=1800)
                 return f"locator:{selector}"
             except Exception as exc:  # noqa: BLE001 - collect evidence then fail after all candidates.
                 errors.append(f"locator:{type(exc).__name__}")
     if _text_value_visible(page, value):
         return f"value_visible:{value}"
     raise RuntimeError(f"no editable field found for label {label!r}: {'; '.join(errors)}")
+
+
+def _locator_fill(locator: Any, value: str, *, timeout: int) -> None:
+    try:
+        locator.fill(value, timeout=timeout)
+    except TypeError:
+        locator.fill(value)
 
 
 def _text_value_visible(page: Any, value: str) -> bool:
@@ -3611,11 +3734,11 @@ def _click_by_text(page: Any, texts: list[str]) -> str:
         role = getattr(page, "get_by_role", None)
         if callable(role):
             try:
-                role("button", name=text, exact=False).click()
+                _locator_click(role("button", name=text, exact=False), timeout=1800)
                 return f"get_by_role:button:{text}"
             except TypeError:
                 try:
-                    role("button", name=text).click()
+                    _locator_click(role("button", name=text), timeout=1800)
                     return f"get_by_role:button:{text}"
                 except Exception as exc:  # noqa: BLE001 - try text locator next.
                     errors.append(f"get_by_role:{type(exc).__name__}")
@@ -3624,17 +3747,24 @@ def _click_by_text(page: Any, texts: list[str]) -> str:
         by_text = getattr(page, "get_by_text", None)
         if callable(by_text):
             try:
-                by_text(text, exact=False).click()
+                _locator_click(by_text(text, exact=False), timeout=1800)
                 return f"get_by_text:{text}"
             except TypeError:
                 try:
-                    by_text(text).click()
+                    _locator_click(by_text(text), timeout=1800)
                     return f"get_by_text:{text}"
                 except Exception as exc:  # noqa: BLE001 - try the next label.
                     errors.append(f"get_by_text:{type(exc).__name__}")
             except Exception as exc:  # noqa: BLE001 - try the next label.
                 errors.append(f"get_by_text:{type(exc).__name__}")
     raise RuntimeError(f"no clickable element found for texts {texts!r}: {'; '.join(errors)}")
+
+
+def _locator_click(locator: Any, *, timeout: int) -> None:
+    try:
+        locator.click(timeout=timeout)
+    except TypeError:
+        locator.click()
 
 
 def _semantic_label_candidates(label: str) -> list[str]:
@@ -4643,6 +4773,7 @@ def _media_plan_for_outputs(
     if not _is_demonstration_mode(request):
         if not events:
             return plan
+        events = _enrich_media_events(events, request)
         steps = [_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1)]
         return {
             "source": "browser-agent-media-plan",
@@ -4650,7 +4781,8 @@ def _media_plan_for_outputs(
             "target_url": request.target_url,
             "role": request.role,
             "completion_condition": request.completion_condition,
-            "steps": steps,
+            **_duration_fields_for_media_plan(request, steps),
+            "steps": _steps_with_timeline_durations(request, steps),
             "actions": [],
             "browser_event_count": len(events),
         }
@@ -4666,6 +4798,7 @@ def _media_plan_for_outputs(
             "narration": "사용자가 브라우저에서 직접 시연한 절차를 기준으로 영상을 생성합니다.",
         }
     ]
+    events = _enrich_media_events(events, request)
     steps.extend(_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1))
     return {
         "source": "direct-demonstration-media-plan",
@@ -4673,10 +4806,64 @@ def _media_plan_for_outputs(
         "target_url": request.target_url,
         "role": request.role,
         "completion_condition": request.completion_condition,
-        "steps": steps,
+        **_duration_fields_for_media_plan(request, steps),
+        "steps": _steps_with_timeline_durations(request, steps),
         "actions": [],
         "demonstration_event_count": len(events),
     }
+
+
+def _duration_fields_for_media_plan(request: PipelineInput, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    target_duration = _requested_target_video_duration_seconds(request)
+    if target_duration <= 0 or not steps:
+        return {}
+    return {
+        "target_duration_seconds": round(target_duration, 3),
+        "duration_source": "target_video_duration",
+    }
+
+
+def _steps_with_timeline_durations(request: PipelineInput, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    target_duration = _requested_target_video_duration_seconds(request)
+    if target_duration <= 0 or not steps:
+        return steps
+    durations = _distribute_duration_seconds(target_duration, len(steps))
+    timed_steps: list[dict[str, Any]] = []
+    for step, duration in zip(steps, durations):
+        timed = dict(step)
+        timed["duration_seconds"] = round(duration, 3)
+        timed_steps.append(timed)
+    return timed_steps
+
+
+def _requested_target_video_duration_seconds(request: PipelineInput) -> float:
+    agent_brief = request.agent_brief if isinstance(request.agent_brief, dict) else {}
+    for key in ("target_video_duration_seconds", "video_duration_seconds", "duration_seconds"):
+        value = _positive_float(agent_brief.get(key))
+        if value > 0:
+            return _bounded_target_video_duration_seconds(value)
+    return 0.0
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+def _bounded_target_video_duration_seconds(value: float) -> float:
+    return min(max(float(value), 10.0), 900.0)
+
+
+def _distribute_duration_seconds(total_seconds: float, count: int) -> list[float]:
+    count = max(1, count)
+    base = float(total_seconds) / float(count)
+    durations = [base] * count
+    correction = float(total_seconds) - sum(durations)
+    durations[-1] += correction
+    return durations
 
 
 def _write_media_plan(media_plan: dict[str, Any], package_dir: Path) -> Path:
@@ -4927,6 +5114,7 @@ def _normalize_replayable_event(raw_event: dict[str, Any]) -> dict[str, Any] | N
             "type": "input",
             "label": str(raw_event.get("label") or ""),
             "value": str(raw_event.get("value") or ""),
+            "reason": str(raw_event.get("reason") or ""),
             "selector": str(raw_event.get("selector") or ""),
             "selector_candidates": raw_event.get("selector_candidates") or [],
             "selector_source": raw_event.get("selector_source") or "",
@@ -4939,9 +5127,22 @@ def _normalize_replayable_event(raw_event: dict[str, Any]) -> dict[str, Any] | N
             "type": "click",
             "text": text,
             "label": text,
+            "reason": str(raw_event.get("reason") or ""),
             "selector": str(raw_event.get("selector") or ""),
             "selector_candidates": raw_event.get("selector_candidates") or [],
             "selector_source": raw_event.get("selector_source") or "",
+            "status": raw_event.get("status", "ok"),
+        }
+    if event_type == "click_by_selector":
+        text = str(raw_event.get("label") or raw_event.get("text") or raw_event.get("reason") or raw_event.get("selector") or "")
+        return {
+            "type": "click",
+            "text": text,
+            "label": text,
+            "reason": str(raw_event.get("reason") or ""),
+            "selector": str(raw_event.get("selector") or ""),
+            "selector_candidates": raw_event.get("selector_candidates") or [],
+            "selector_source": raw_event.get("selector_source") or "action.selector",
             "status": raw_event.get("status", "ok"),
         }
     if event_type == "press_key":
@@ -4950,9 +5151,58 @@ def _normalize_replayable_event(raw_event: dict[str, Any]) -> dict[str, Any] | N
             "key": str(raw_event.get("key") or "Enter"),
             "label": str(raw_event.get("label") or ""),
             "selector": str(raw_event.get("selector") or ""),
+            "reason": str(raw_event.get("reason") or ""),
+            "status": raw_event.get("status", "ok"),
+        }
+    if event_type == "wait":
+        return {
+            "type": "wait",
+            "reason": str(raw_event.get("reason") or "화면 변화가 완료될 때까지 기다립니다."),
+            "status": raw_event.get("status", "ok"),
+        }
+    if event_type == "capture_step":
+        return {
+            "type": "capture",
+            "reason": str(raw_event.get("reason") or "현재 결과 화면을 확인합니다."),
             "status": raw_event.get("status", "ok"),
         }
     return None
+
+
+def _enrich_media_events(events: list[dict[str, Any]], request: PipelineInput) -> list[dict[str, Any]]:
+    input_values = request.input_values if isinstance(request.input_values, dict) else {}
+    if not input_values:
+        return events
+    enriched: list[dict[str, Any]] = []
+    for event in events:
+        current = dict(event)
+        if current.get("type") == "input" and not str(current.get("value") or "").strip():
+            inferred = _infer_media_input_value(current, input_values)
+            if inferred:
+                current["value"] = inferred
+        enriched.append(current)
+    return enriched
+
+
+def _infer_media_input_value(event: dict[str, Any], input_values: dict[str, Any]) -> str:
+    haystack = " ".join(
+        str(event.get(key) or "")
+        for key in ("label", "reason", "text", "selector")
+    ).lower()
+    for key, value in input_values.items():
+        key_text = str(key or "").strip()
+        value_text = str(value or "").strip()
+        if key_text and value_text and key_text.lower() in haystack:
+            return value_text
+    if "search" in haystack or "검색" in haystack:
+        for key, value in input_values.items():
+            if "검색" in str(key):
+                return str(value)
+    if "ask" in haystack or "question" in haystack or "질문" in haystack:
+        for key, value in input_values.items():
+            if "질문" in str(key):
+                return str(value)
+    return ""
 
 
 def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str, str]:
@@ -4974,13 +5224,26 @@ def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str,
     elif event_type == "click":
         target = _event_target_label(event, fallback="화면 요소")
         title = f"클릭: {target}"
-        caption = f"{target}을 클릭합니다."
+        caption = target if _looks_like_sentence(target) else f"{target}을 클릭합니다."
+    elif event_type == "wait":
+        reason = _compact_text(str(event.get("reason") or "화면 변화가 완료될 때까지 기다립니다."))
+        title = "대기: 화면 응답 확인"
+        caption = reason
+    elif event_type == "capture":
+        reason = _compact_text(str(event.get("reason") or "현재 결과 화면을 확인합니다."))
+        title = "확인: 결과 화면"
+        caption = reason
     else:
         title = "시연 동작"
         caption = "사용자가 직접 수행한 동작을 확인합니다."
     title = _compact_text(title, limit=80)
     caption = _compact_text(caption, limit=180)
     return {"id": step_id, "title": title, "caption": caption, "narration": caption}
+
+
+def _looks_like_sentence(value: str) -> bool:
+    text = value.strip()
+    return text.endswith((".", "다.", "요.", "함.", "됨.", "합니다."))
 
 
 def _event_target_label(event: dict[str, Any], *, fallback: str) -> str:
@@ -5016,16 +5279,19 @@ def _render_subtitles(plan: dict[str, Any], package_dir: Path, redaction: Redact
     if not steps:
         steps = [_first_plan_step(plan)]
     lines = ["WEBVTT", ""]
-    cue_duration_seconds = 4.0
+    step_durations = _subtitle_step_durations(plan, steps)
+    current = 0.0
     for index, step in enumerate(steps):
-        start = index * cue_duration_seconds
-        end = start + cue_duration_seconds
+        duration = step_durations[index] if index < len(step_durations) else 4.0
+        start = current
+        end = start + max(float(duration), 0.1)
+        current = end
         title = str(step.get("title") or f"Step {index + 1}")
         caption = str(step.get("caption") or step.get("narration") or "")
         if redaction is not None:
             title = redaction.redact_text(title)
             caption = redaction.redact_text(caption)
-        text = title if not caption or caption == title else f"{title}\n{caption}"
+        text = caption or title
         lines.extend(
             [
                 f"{_format_vtt_timestamp(start)} --> {_format_vtt_timestamp(end)}",
@@ -5035,6 +5301,16 @@ def _render_subtitles(plan: dict[str, Any], package_dir: Path, redaction: Redact
         )
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _subtitle_step_durations(plan: dict[str, Any], steps: list[dict[str, Any]]) -> list[float]:
+    explicit = [_positive_float(step.get("duration_seconds")) for step in steps]
+    if any(duration > 0 for duration in explicit):
+        return [duration if duration > 0 else 4.0 for duration in explicit]
+    target = _positive_float(plan.get("target_duration_seconds"))
+    if target > 0 and steps:
+        return _distribute_duration_seconds(target, len(steps))
+    return [4.0] * len(steps)
 
 
 def _format_vtt_timestamp(seconds: float) -> str:
@@ -5221,9 +5497,99 @@ def _render_pdf_placeholder(request: PipelineInput, dirs: PipelineDirs) -> Path:
 
 def _render_placeholder_video(package_dir: Path) -> Path:
     path = package_dir / "manual_video_agent_usage.webm"
-    # Test-mode placeholder. Browser capture mode overwrites this with a real Playwright webm.
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        args = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=1280x720:d=6",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "900k",
+            "-c:a",
+            "libopus",
+            "-shortest",
+            str(path),
+        ]
+        completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=60)
+        if completed.returncode == 0 and _is_valid_video(path):
+            return path
     path.write_bytes(base64.b64decode("GkXfo0AgQoaBAUL3gQFC8oEEQvOB"))
     return path
+
+
+def _render_capture_slideshow_video(package_dir: Path, captures: list[Path]) -> Path:
+    path = package_dir / "manual_video_agent_usage.webm"
+    ffmpeg = shutil.which("ffmpeg")
+    valid_captures = [capture for capture in captures if capture.exists() and capture.stat().st_size > 0]
+    if not ffmpeg or not valid_captures:
+        return _render_placeholder_video(package_dir)
+    concat_path = package_dir / "capture_slideshow.ffconcat"
+    lines = ["ffconcat version 1.0"]
+    duration = max(4, min(12, 36 // max(1, len(valid_captures))))
+    for capture in valid_captures:
+        lines.append(f"file '{capture.resolve().as_posix()}'")
+        lines.append(f"duration {duration}")
+    lines.append(f"file '{valid_captures[-1].resolve().as_posix()}'")
+    concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    args = [
+        ffmpeg,
+        "-y",
+        "-safe",
+        "0",
+        "-f",
+        "concat",
+        "-i",
+        str(concat_path),
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-r",
+        "24",
+        "-vf",
+        "scale=1280:720,format=yuv420p",
+        "-c:v",
+        "libvpx-vp9",
+        "-b:v",
+        "1200k",
+        "-c:a",
+        "libopus",
+        "-shortest",
+        str(path),
+    ]
+    completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=180)
+    if completed.returncode == 0 and _is_valid_video(path):
+        return path
+    return _render_placeholder_video(package_dir)
+
+
+def _is_valid_video(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return True
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        return False
+    try:
+        return float(completed.stdout.strip()) > 0
+    except ValueError:
+        return False
 
 
 _RECORDING_HELPER_STYLE = """

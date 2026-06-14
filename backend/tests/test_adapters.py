@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import wave
 import base64
@@ -14,7 +15,7 @@ from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.skills import ensure_hyperframes_skills
-from backend.app.adapters.tts import synthesize_tts
+from backend.app.adapters.tts import _narration_text_for_step, synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
 from backend.app.pipeline import PipelineInput
@@ -37,6 +38,21 @@ def test_input_extractor_derives_values_from_request_text_without_llm(tmp_path: 
     assert result["extracted_input_values"]["라인"] == "A3"
     assert result["effective_input_values"]["LOT"] == "LOT-001"
     assert (tmp_path / "input_extraction.json").exists()
+
+
+def test_tts_narration_does_not_repeat_to_fill_planned_duration():
+    step = {
+        "id": "search",
+        "title": "검색어 입력",
+        "caption": "검색어에 Company LLM Wiki 값을 입력합니다.",
+        "narration": "검색어에 Company LLM Wiki 값을 입력합니다.",
+        "duration_seconds": 60.0,
+    }
+
+    text = _narration_text_for_step(step)
+
+    assert text == "검색어에 Company LLM Wiki 값을 입력합니다."
+    assert text.count("Company LLM Wiki") == 1
 
 
 def test_input_extractor_uses_llm_json_and_filters_sensitive_values(tmp_path: Path, capsys):
@@ -854,6 +870,69 @@ def test_browser_agent_uses_vlm_screenshot_before_dom_llm(tmp_path: Path):
     assert "browser_agent_vlm" in llm_log
 
 
+def test_browser_agent_uses_ollama_gemma_vlm_with_openai_compatible_image_payload(tmp_path: Path):
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+        )
+    )
+    request = PipelineInput(
+        request_text="화면을 보고 다음 안전한 동작을 판단",
+        target_url="http://127.0.0.1:8001/",
+        role="관리자",
+        completion_condition="홈 화면 확인",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_VLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_VLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_VLM_MODEL": "gemma4:12b_qat",
+        }
+    )
+    calls = []
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        calls.append({"url": url, "headers": headers, "payload": payload})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"type": "capture_step", "reason": "스크린샷 기반 현재 화면 캡처"}, ensure_ascii=False)
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation={
+            "url": request.target_url,
+            "body_text": "Company LLM Wiki",
+            "fields": [],
+            "clickables": [],
+            "screenshot": {"status": "ok", "path": str(screenshot), "filename": "mcp_step_01_before.png"},
+        },
+        history=[],
+        step_index=1,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    assert action["source"] == "browser-agent-vlm"
+    assert action["vlm_used"] is True
+    assert calls[0]["url"] == "http://127.0.0.1:11434/v1/chat/completions"
+    assert calls[0]["headers"]["Accept"] == "application/json"
+    assert "Authorization" not in calls[0]["headers"]
+    assert calls[0]["payload"]["model"] == "gemma4:12b_qat"
+    content = calls[0]["payload"]["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_browser_agent_falls_back_to_dom_llm_when_vlm_fails(tmp_path: Path):
     screenshot = tmp_path / "screen.png"
     screenshot.write_bytes(
@@ -1028,6 +1107,240 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     terminal_log_text = capsys.readouterr().err
     assert '"actor": "llm_response"' in terminal_log_text
     assert '"component": "planner"' in terminal_log_text
+
+
+def test_internal_planner_normalizes_missing_navigate_target_and_fill_value(tmp_path: Path):
+    request = PipelineInput(
+        request_text="사내 위키에서 검색어를 입력하고 조회",
+        target_url="http://127.0.0.1:8000/wiki",
+        role="관리자",
+        completion_condition="검색 결과 확인",
+        input_values={"검색어": "Company LLM Wiki"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:12b_qat",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "steps": [{"id": "intro", "title": "접속"}, {"id": "search", "title": "검색"}],
+                                "actions": [
+                                    {"id": "a1", "type": "navigate", "step_id": "intro", "label": "홈"},
+                                    {
+                                        "id": "a2",
+                                        "type": "fill_by_label",
+                                        "step_id": "search",
+                                        "label": "검색어",
+                                        "value_key": "검색어",
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert plan["actions"][0]["target"] == request.target_url
+    assert plan["actions"][1]["value"] == "Company LLM Wiki"
+
+
+def test_internal_planner_normalizes_click_by_selector_alias(tmp_path: Path):
+    request = PipelineInput(
+        request_text="텍스트 없는 더하기 아이콘을 누른다",
+        target_url="http://127.0.0.1:8000/wiki",
+        role="관리자",
+        completion_condition="모달 확인",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:12b_qat",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "steps": [{"id": "intro", "title": "접속"}],
+                                "actions": [
+                                    {"id": "a1", "type": "navigate", "step_id": "intro"},
+                                    {
+                                        "id": "a2",
+                                        "type": "click_by_selector",
+                                        "step_id": "intro",
+                                        "css_selector": "i.icon.icon-plus-bold",
+                                    },
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = build_plan(request, settings, package_dir=tmp_path, http_post=fake_post)
+
+    assert plan["actions"][0]["target"] == request.target_url
+    assert plan["actions"][1]["type"] == "click"
+    assert plan["actions"][1]["selector"] == "i.icon.icon-plus-bold"
+
+
+def test_browser_agent_local_maps_korean_search_key_to_english_placeholder():
+    request = PipelineInput(
+        request_text="검색어를 입력하고 검색 결과를 보여줘",
+        target_url="http://127.0.0.1:8000",
+        role="관리자",
+        completion_condition="검색 결과 확인",
+        input_values={"검색어": "Company LLM Wiki"},
+    )
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true"})
+    observation = {
+        "fields": [
+            {"selector": "input[placeholder=\"rag-public\"]", "placeholder": "rag-public", "value": "rag-public"},
+            {
+                "selector": "input[placeholder=\"Search published Wiki pages\"]",
+                "placeholder": "Search published Wiki pages",
+                "value": "",
+            },
+            {"selector": "textarea", "placeholder": "Ask a grounded question", "value": ""},
+        ],
+        "clickables": [],
+        "body_text": "Hybrid search Ask the Wiki",
+    }
+
+    action = decide_browser_agent_action(request, settings, observation, [], step_index=1)
+
+    assert action["type"] == "fill_by_label"
+    assert action["label"] == "Search published Wiki pages"
+    assert action["value"] == "Company LLM Wiki"
+
+
+def test_browser_agent_accepts_action_field_alias_from_llm(tmp_path: Path):
+    request = PipelineInput(
+        request_text="홈 화면을 캡처해줘",
+        target_url="http://127.0.0.1:8000",
+        role="관리자",
+        completion_condition="홈 화면 캡처",
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:12b_qat",
+        }
+    )
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "action": "capture_step",
+                                "reason": "홈 화면을 먼저 캡처합니다.",
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        {"fields": [], "clickables": [], "body_text": "Company LLM Wiki"},
+        [],
+        step_index=1,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    assert action["status"] == "ok"
+    assert action["type"] == "capture_step"
+    assert action["reason"] == "홈 화면을 먼저 캡처합니다."
+
+
+def test_browser_agent_falls_back_to_local_policy_when_llm_action_is_invalid(tmp_path: Path):
+    request = PipelineInput(
+        request_text="검색어를 입력하고 검색해줘",
+        target_url="http://127.0.0.1:8000",
+        role="관리자",
+        completion_condition="검색 결과 확인",
+        input_values={"검색어": "Company LLM Wiki"},
+    )
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_LLM_PROVIDER": "ollama",
+            "MANUAL_AGENT_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+            "MANUAL_AGENT_LLM_MODEL": "gemma4:12b_qat",
+        }
+    )
+    observation = {
+        "fields": [
+            {
+                "selector": "input[placeholder=\"Search published Wiki pages\"]",
+                "placeholder": "Search published Wiki pages",
+                "value": "",
+            }
+        ],
+        "clickables": [],
+        "body_text": "Hybrid search",
+    }
+
+    def fake_post(url, headers, payload, timeout_seconds):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"type": "fill_by_label", "label": "", "reason": "값이 빠진 잘못된 액션"},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    action = decide_browser_agent_action(
+        request,
+        settings,
+        observation,
+        [],
+        step_index=1,
+        http_post=fake_post,
+        package_dir=tmp_path,
+    )
+
+    assert action["source"] == "browser-agent-local-fallback"
+    assert action["type"] == "fill_by_label"
+    assert action["label"] == "Search published Wiki pages"
+    assert action["value"] == "Company LLM Wiki"
+    assert action["llm_error"] == "missing_fill_label_or_value"
 
 
 def test_internal_planner_prompt_receives_agent_brief(tmp_path: Path):
@@ -1318,6 +1631,49 @@ def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_p
     assert metadata["entries"][0]["text"] == "요청을 확인합니다."
 
 
+def test_tts_keeps_short_narration_natural_even_when_step_has_planned_duration(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "fake-melotts-compatible"})
+    plan = {
+        "steps": [
+            {
+                "id": "step_long",
+                "title": "질문 입력",
+                "caption": "질문을 입력합니다.",
+                "narration": "질문을 입력합니다.",
+                "duration_seconds": 45.0,
+            }
+        ]
+    }
+
+    result = synthesize_tts(plan, settings, tmp_path)
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    text = metadata["entries"][0]["text"]
+
+    assert text == "질문을 입력합니다."
+    with wave.open(str(result.audio_paths[0]), "rb") as handle:
+        duration = handle.getnframes() / handle.getframerate()
+    assert 1.0 <= duration <= 3.0
+
+
+def test_tts_cleans_stale_audio_files_before_synthesis(tmp_path: Path):
+    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "fake-melotts-compatible"})
+    stale_wav = tmp_path / "99_stale.wav"
+    stale_txt = tmp_path / "99_stale.txt"
+    stale_wav.write_bytes(b"old")
+    stale_txt.write_text("old", encoding="utf-8")
+
+    result = synthesize_tts(
+        {"steps": [{"id": "fresh", "title": "새 단계", "narration": "새 내레이션"}]},
+        settings,
+        tmp_path,
+    )
+
+    assert len(result.audio_paths) == 1
+    assert not stale_wav.exists()
+    assert not stale_txt.exists()
+    assert sorted(path.name for path in tmp_path.glob("*.wav")) == ["01_fresh.wav"]
+
+
 def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_path: Path, monkeypatch):
     settings = load_settings(
         environ={
@@ -1341,6 +1697,10 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
 
     monkeypatch.setenv("SUPERTONIC_CACHE_DIR", str(tmp_path / "supertonic3"))
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-cache"))
+    onnx_dir = tmp_path / "supertonic3" / "onnx"
+    onnx_dir.mkdir(parents=True)
+    for name in ("duration_predictor.onnx", "text_encoder.onnx", "vector_estimator.onnx", "vocoder.onnx"):
+        (onnx_dir / name).write_bytes(b"onnx")
 
     class FakeSupertonicTts:
         def __init__(self, **kwargs):
@@ -1530,6 +1890,365 @@ def test_hyperframes_render_muxes_tts_audio_into_final_video(tmp_path: Path, mon
     assert metadata["audio"]["video"] == str(result.video_path)
 
 
+def test_video_mux_trims_blank_lead_in_and_does_not_cut_to_audio_duration(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for mux integration test")
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageStat
+
+    settings = load_settings(environ={"MANUAL_AGENT_VIDEO_RENDERER": "playwright-webm"})
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    audio_path = tmp_path / "tts" / "01_intro.wav"
+    audio_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=320x180:r=24:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x180:r=24:d=3",
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p",
+            "-c:v",
+            "libvpx-vp9",
+            str(fallback_video),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    result = render_final_video(
+        plan={"steps": [{"id": "step_intro", "title": "시작", "caption": "시작합니다."}]},
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_path],
+    )
+
+    duration_probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(result.video_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output_duration = float(duration_probe.stdout.strip())
+    assert output_duration > 2.0
+
+    frame_path = tmp_path / "first_visible_frame.png"
+    subprocess.run(
+        [ffmpeg, "-y", "-ss", "0.500", "-i", str(result.video_path), "-frames:v", "1", "-update", "1", str(frame_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    with Image.open(frame_path) as image:
+        stat = ImageStat.Stat(image.convert("RGB").resize((64, 36)))
+        mean = sum(stat.mean) / len(stat.mean)
+        variance = sum(stat.var) / len(stat.var)
+    assert not (variance < 4.0 and mean > 244.0)
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["audio"]["video_leading_trim_seconds"] > 0
+    assert metadata["audio"]["audio_duration_seconds"] < metadata["audio"]["mux_target_duration_seconds"]
+    assert "-shortest" not in metadata["audio"]["mux_stderr"]
+
+
+def test_video_mux_extends_short_source_video_to_target_duration(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for mux integration test")
+
+    settings = load_settings(environ={"MANUAL_AGENT_VIDEO_RENDERER": "playwright-webm"})
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    audio_path = tmp_path / "tts" / "01_intro.wav"
+    audio_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x180:r=24:d=1",
+            "-c:v",
+            "libvpx-vp9",
+            str(fallback_video),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    result = render_final_video(
+        plan={
+            "target_duration_seconds": 5.0,
+            "duration_source": "target_video_duration",
+            "steps": [{"id": "intro", "title": "소개", "duration_seconds": 5.0}],
+        },
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_path],
+    )
+
+    duration_probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(result.video_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output_duration = float(duration_probe.stdout.strip())
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+
+    assert output_duration >= 4.8
+    assert metadata["audio"]["mux_target_duration_seconds"] == 5.0
+    assert "tpad=stop_mode=clone" in " ".join(metadata["audio"]["mux_command"])
+
+
+def test_video_mux_caps_long_audio_to_target_duration(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for mux integration test")
+
+    settings = load_settings(environ={"MANUAL_AGENT_VIDEO_RENDERER": "playwright-webm"})
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    audio_path = tmp_path / "tts" / "01_long.wav"
+    audio_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=1", "-c:v", "libvpx-vp9", str(fallback_video)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=8", "-ac", "1", "-ar", "16000", str(audio_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    result = render_final_video(
+        plan={
+            "target_duration_seconds": 5.0,
+            "duration_source": "target_video_duration",
+            "steps": [{"id": "intro", "title": "소개", "duration_seconds": 5.0}],
+        },
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_path],
+    )
+
+    duration_probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(result.video_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output_duration = float(duration_probe.stdout.strip())
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+
+    assert 4.8 <= output_duration <= 5.3
+    assert metadata["audio"]["mux_target_duration_seconds"] == 5.0
+    assert "-t" in metadata["audio"]["mux_command"]
+
+
+def test_video_mux_caps_browser_agent_media_plan_to_tts_timeline(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for mux integration test")
+
+    settings = load_settings(environ={"MANUAL_AGENT_VIDEO_RENDERER": "playwright-webm"})
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    audio_path = tmp_path / "tts" / "01_short.wav"
+    audio_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x180:r=24:d=8",
+            "-c:v",
+            "libvpx-vp9",
+            str(fallback_video),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    result = render_final_video(
+        plan={
+            "source": "browser-agent-media-plan",
+            "target_duration_seconds": 2.0,
+            "duration_source": "tts_audio",
+            "steps": [{"id": "step", "title": "검색", "caption": "검색합니다."}],
+        },
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_path],
+    )
+
+    duration_probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(result.video_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output_duration = float(duration_probe.stdout.strip())
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+
+    assert 1.8 <= output_duration <= 2.4
+    assert metadata["composition_duration_source"] == "tts_audio"
+    assert 1.8 <= metadata["audio"]["mux_target_duration_seconds"] <= 2.4
+
+
+def test_video_mux_burns_package_subtitles_into_final_video(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("ffmpeg and ffprobe are required for mux integration test")
+
+    settings = load_settings(environ={"MANUAL_AGENT_VIDEO_RENDERER": "playwright-webm"})
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    subtitles = tmp_path / "subtitles.vtt"
+    subtitles.write_text(
+        "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n검색어를 입력합니다.\n",
+        encoding="utf-8",
+    )
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    audio_path = tmp_path / "tts" / "01_short.wav"
+    audio_path.parent.mkdir(parents=True)
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=2", "-c:v", "libvpx-vp9", str(fallback_video)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    subprocess.run(
+        [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-ac", "1", "-ar", "16000", str(audio_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    result = render_final_video(
+        plan={
+            "source": "browser-agent-media-plan",
+            "steps": [{"id": "step", "title": "검색", "caption": "검색어를 입력합니다."}],
+        },
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio_path],
+    )
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    command = " ".join(metadata["audio"]["mux_command"])
+    assert "subtitles.vtt" in command
+    assert "subtitles=" in command
+    assert "drawbox=" in command
+    assert metadata["audio"]["subtitles_burned_in"] is True
+    assert result.video_path.suffix == ".mp4"
+
+
 def test_hyperframes_composition_duration_tracks_tts_audio(tmp_path: Path):
     def write_wav(path: Path, duration_seconds: float):
         frame_rate = 8000
@@ -1577,6 +2296,58 @@ def test_hyperframes_composition_duration_tracks_tts_audio(tmp_path: Path):
     assert manifest["captions"][0]["end"] == 1.25
     assert manifest["captions"][1]["start"] == 1.25
     assert manifest["captions"][1]["end"] == 4.0
+
+
+def test_hyperframes_composition_duration_uses_target_duration_over_short_tts(tmp_path: Path):
+    def write_wav(path: Path, duration_seconds: float):
+        frame_rate = 8000
+        frame_count = int(frame_rate * duration_seconds)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(frame_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
+
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            "MANUAL_AGENT_HYPERFRAMES_COMMAND": "missing-hyperframes-command",
+        }
+    )
+    preview = tmp_path / "preview.html"
+    preview.write_text("<html><body>preview</body></html>", encoding="utf-8")
+    fallback_video = tmp_path / "manual_video_agent_usage.webm"
+    fallback_video.write_bytes(b"webm")
+    audio = tmp_path / "tts" / "01_intro.wav"
+    write_wav(audio, 1.0)
+    plan = {
+        "target_duration_seconds": 300.0,
+        "duration_source": "target_video_duration",
+        "steps": [
+            {"id": "intro", "title": "소개", "caption": "시작", "duration_seconds": 120.0},
+            {"id": "search", "title": "검색", "caption": "검색", "duration_seconds": 180.0},
+        ],
+    }
+
+    render_final_video(
+        plan=plan,
+        package_dir=tmp_path,
+        preview_html=preview,
+        fallback_video=fallback_video,
+        settings=settings,
+        tts_audio=[audio],
+        command_runner=lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+
+    html = (tmp_path / "hyperframes" / "index.html").read_text(encoding="utf-8")
+    manifest = json.loads((tmp_path / "hyperframes" / "hyperframes_manifest.json").read_text(encoding="utf-8"))
+
+    assert 'data-duration="300.000"' in html
+    assert manifest["duration_seconds"] == 300.0
+    assert manifest["duration_source"] == "target_video_duration"
+    assert manifest["captions"][0]["end"] == 120.0
+    assert manifest["captions"][1]["end"] == 300.0
 
 
 def test_hyperframes_composition_burns_visible_step_captions(tmp_path: Path):

@@ -208,6 +208,7 @@ class AppSettings:
     opencode_timeout_seconds: float
     request_timeout_seconds: float
     demonstration_timeout_seconds: float
+    target_video_duration_seconds: float
     auth_debug_keep_browser_open_seconds: float
     enable_terminal_logs: bool
     strict_mode: bool
@@ -267,6 +268,7 @@ class AppSettings:
                 "opencode_timeout_seconds": self.opencode_timeout_seconds,
                 "request_timeout_seconds": self.request_timeout_seconds,
                 "demonstration_timeout_seconds": self.demonstration_timeout_seconds,
+                "target_video_duration_seconds": self.target_video_duration_seconds,
                 "auth_debug_keep_browser_open_seconds": self.auth_debug_keep_browser_open_seconds,
                 "enable_terminal_logs": self.enable_terminal_logs,
                 "strict_mode": self.strict_mode,
@@ -393,6 +395,7 @@ def load_settings(
         opencode_timeout_seconds=_get_float(env, "OPENCODE_TIMEOUT_SECONDS", 600.0),
         request_timeout_seconds=_get_float(env, "REQUEST_TIMEOUT_SECONDS", 30.0),
         demonstration_timeout_seconds=_get_float(env, "DEMONSTRATION_TIMEOUT_SECONDS", 600.0),
+        target_video_duration_seconds=_get_float(env, "TARGET_VIDEO_DURATION_SECONDS", 0.0),
         auth_debug_keep_browser_open_seconds=_get_float(env, "AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS", 0.0),
         enable_terminal_logs=_get_bool(env, "ENABLE_TERMINAL_LOGS", False),
         strict_mode=_get_bool(env, "STRICT_MODE", False),
