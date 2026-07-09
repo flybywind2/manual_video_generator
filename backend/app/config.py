@@ -188,6 +188,8 @@ class AppSettings:
     extension_bridge_endpoint: str
     extension_bridge_token: str
     enable_browser_agent: bool
+    enable_page_agent: bool
+    browser_decision_policy: str
     browser_agent_max_steps: int
     tts_provider: str
     tts_device: str
@@ -247,6 +249,8 @@ class AppSettings:
                 "browser_channel": self.login.browser_channel,
                 "sso_profile_dir_set": bool(self.login.sso_profile_dir),
                 "enable_browser_agent": self.enable_browser_agent,
+                "enable_page_agent": self.enable_page_agent,
+                "browser_decision_policy": self.browser_decision_policy,
                 "browser_agent_max_steps": self.browser_agent_max_steps,
                 "tts_provider": self.tts_provider,
                 "tts_device": self.tts_device,
@@ -375,6 +379,8 @@ def load_settings(
         extension_bridge_endpoint=_get(env, "EXTENSION_BRIDGE_ENDPOINT", "http://127.0.0.1:8765"),
         extension_bridge_token=_get(env, "EXTENSION_BRIDGE_TOKEN"),
         enable_browser_agent=_get_bool(env, "ENABLE_BROWSER_AGENT", False),
+        enable_page_agent=_get_bool(env, "ENABLE_PAGE_AGENT", False),
+        browser_decision_policy=_normalize_browser_decision_policy(_get(env, "BROWSER_DECISION_POLICY", "balanced")),
         browser_agent_max_steps=_get_int(env, "BROWSER_AGENT_MAX_STEPS", 8),
         tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
         tts_device=_get(env, "TTS_DEVICE", "cpu"),
@@ -513,6 +519,11 @@ def _normalize_browser_runner(value: str) -> str:
     if normalized in {"extension", "extension_bridge", "browser_extension"}:
         return "extension_bridge"
     return "playwright"
+
+
+def _normalize_browser_decision_policy(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    return normalized if normalized in {"balanced", "quality_first"} else "balanced"
 
 
 def _split_csv(value: str) -> list[str]:

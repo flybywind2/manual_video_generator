@@ -11,6 +11,7 @@ def test_env_example_includes_llm_browser_agent_toggles():
     assert "MANUAL_AGENT_LLM_PROVIDER=" in env_example
     assert "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=" in env_example
     assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
+    assert "MANUAL_AGENT_BROWSER_DECISION_POLICY=" in env_example
     assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
     assert "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=" in env_example
     assert "MANUAL_AGENT_TARGET_VIDEO_DURATION_SECONDS=" in env_example

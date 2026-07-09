@@ -62,6 +62,10 @@ def test_static_app_exposes_review_artifact_links():
     assert "execution_mode" in body
     assert 'execution_mode.value = "demonstration";' in body
     assert "Browser Agent" in body
+    assert "Page Agent" in body
+    assert "Decision Policy" in body
+    assert "Quality first" in body
+    assert "VLM every meaningful step" in body
     assert "browser_agent_max_steps" in body
     assert 'login_mode.value = "";' in body
     assert 'login_mode.value = "none";' not in body
@@ -86,6 +90,8 @@ def test_static_app_exposes_review_artifact_links():
     assert "mcp_rehearsal_after_login" in body
     assert "renderDegradationPanel" in body
     assert "degradationReasonInfo" in body
+    assert "render_quality_failed" in body
+    assert "렌더 품질 검증 실패" in body
     assert "재렌더링 영향" in body
     assert "is-complete" in body
     assert "openArtifactEditor" in body

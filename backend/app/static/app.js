@@ -686,6 +686,7 @@ function degradationReasonInfo(reason) {
     opencode_failed: ["OpenCode 실패", "선택적 OpenCode 후처리가 실패했습니다. 패키지 자체는 계속 검수할 수 있습니다."],
     login_required: ["로그인 필요", "로그인 화면이 감지되어 자동 실행이 중단되었습니다. 직접 로그인 또는 .env credentials를 설정하세요."],
     demonstration_replay_failed: ["시연 replay 실패", "직접 시연 원본은 보존됐지만 음성 타이밍 기준 재녹화가 실패했습니다."],
+    render_quality_failed: ["렌더 품질 검증 실패", "음성, 자막, 영상 길이 중 하나 이상이 기대치를 만족하지 못했습니다. Video Render Metadata의 quality.issues를 확인하세요."],
   };
   const [label, action] = labels[reason] || ["Degraded 상태", "패키지 매니페스트와 관련 로그에서 상세 원인을 확인하세요."];
   return { label, action };
@@ -1300,6 +1301,8 @@ function configStatusRows(status) {
     inputExtractorStatusRow(status),
     plannerStatusRow(status),
     browserAgentStatusRow(status),
+    decisionPolicyStatusRow(status),
+    pageAgentStatusRow(status),
     { label: "TTS", state: "ready", text: "Ready", detail: status.runtime.tts_provider },
     { label: "Renderer", state: "ready", text: "Ready", detail: status.runtime.video_renderer },
     loginStatusRow(status),
@@ -1351,6 +1354,25 @@ function browserAgentStatusRow(status) {
   return status.llm.configured
     ? { label: "Browser Agent", state: "ready", text: "Ready", detail: `${status.runtime.browser_agent_max_steps || 8} steps` }
     : { label: "Browser Agent", state: "missing", text: "Missing", detail: "LLM config required" };
+}
+
+function decisionPolicyStatusRow(status) {
+  const policy = status.runtime.browser_decision_policy || "balanced";
+  if (policy === "quality_first") {
+    return { label: "Decision Policy", state: "ready", text: "Quality first", detail: "VLM every meaningful step" };
+  }
+  return { label: "Decision Policy", state: "neutral", text: "Balanced", detail: "DOM candidate first" };
+}
+
+function pageAgentStatusRow(status) {
+  if (!status.runtime.enable_page_agent) {
+    return { label: "Page Agent", state: "disabled", text: "Disabled", detail: "DOM selector policy off" };
+  }
+  if (!status.runtime.enable_browser_agent) {
+    return { label: "Page Agent", state: "neutral", text: "Standby", detail: "requires Browser Agent" };
+  }
+  const detail = status.runtime.browser_decision_policy === "quality_first" ? "VLM candidate enrichment" : "DOM selector first";
+  return { label: "Page Agent", state: "ready", text: "Ready", detail };
 }
 
 function loginStatusRow(status) {

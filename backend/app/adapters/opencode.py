@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.config import AppSettings
+from backend.app.subprocess_utils import run_text_command
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
@@ -58,11 +59,11 @@ def run_opencode_agent(
 
     runner = subprocess.run if command_runner is None else command_runner
     try:
-        completed = runner(
+        completed = run_text_command(
+            runner,
             command,
             cwd=str(package_dir),
             capture_output=True,
-            text=True,
             timeout=settings.opencode_timeout_seconds,
         )
         metadata["returncode"] = completed.returncode

@@ -39,11 +39,11 @@
 | VLM | 어댑터 구현 | MCP 단계별 사전 캡처 이미지를 VLM에 전달해 action 결정을 보강, 실패 시 DOM LLM/로컬 판단 fallback |
 | Supertonic 3 TTS | 어댑터 구현 | preset voice만 사용, OpenRAIL-M/AI 음성 고지를 metadata와 manual에 기록 |
 | MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
-| HyperFrames | 어댑터 구현 | skills 설치/확인, composition 생성, `.env`로 켜면 CLI 렌더 시도 후 실패 시 WebM fallback |
+| HyperFrames | 운영 경로 구현 | 1920x1080 composition, landscape/high/PNG frame 렌더, FFmpeg 오디오/자막 합성, 품질 gate |
 | OpenCode | 어댑터 구현 | 생성 패키지 디렉터리에서 `opencode run` 비대화형 agent pass 실행 |
 | 감사/게이트 | 구현 | `AuditLog`, `RiskPolicy`, `ApprovalGate`, degraded reason을 package manifest에 기록 |
 | PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
-| MP4 | 옵션 | HyperFrames 렌더 성공 시 MP4, 기본은 WebM |
+| MP4 | 권장 산출물 | HyperFrames + FFmpeg 성공 시 H.264/AAC MP4, 실패 시 사유가 포함된 fallback |
 
 ## 파이프라인
 
@@ -107,13 +107,15 @@ stateDiagram-v2
     rerender --> completed
 ```
 
-현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
+현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_BROWSER_DECISION_POLICY`, `MANUAL_AGENT_ENABLE_PAGE_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, page-agent 스타일 DOM selector 정책, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
 
 요청문이 짧거나 모호해도 `input_extraction.json`에는 `scenario_brief`가 함께 생성됩니다. 이 브리프는 `task_type`, `success_criteria`, `required_inputs`, `safe_click_intents`, `forbidden_click_intents`, `autonomy_guidance`를 포함하며 planner와 browser agent 프롬프트에 전달됩니다. 예를 들어 챗봇 요청은 질문 입력, 전송/Enter, 답변 대기 중심으로 증강하고 `Web Search`, 모델 선택, 도구 토글 같은 선택형 UI는 금지 의도로 유지합니다.
 
 fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=true`를 켭니다. strict mode는 입력값 추출, planner, 브라우저 캡처처럼 fallback을 자주 타는 단계에서 첫 예외를 그대로 발생시켜 문제 지점을 숨기지 않습니다. 일반 모드에서도 `package_manifest.json`의 `fallback_events`에는 강등된 actor, reason, 관련 artifact, 요약 details가 남습니다.
 
-`MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`인 경우 LLM이 설정되지 않았거나 일시적으로 실패해도 즉시 기존 action plan으로 내려가지 않고, 관찰된 필드/버튼/`scenario_brief`를 기준으로 로컬 자율 정책을 먼저 사용합니다. 이 로컬 정책은 입력값 매핑, 안전 클릭 의도, 금지 클릭 의도, 최근 실패 이력을 보고 `fill_by_label`, `click_by_text`, `press_key`, `capture_step`, `finish` 중 하나를 선택합니다.
+`MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`인 경우 LLM이 설정되지 않았거나 일시적으로 실패해도 즉시 기존 action plan으로 내려가지 않고, 관찰된 필드/버튼/`scenario_brief`를 기준으로 로컬 자율 정책을 먼저 사용합니다. 이 로컬 정책은 입력값 매핑, 안전 클릭 의도, 금지 클릭 의도, 최근 실패 이력을 보고 `fill_by_label`, `click_by_text`, `press_key`, `capture_step`, `finish` 중 하나를 선택합니다. `MANUAL_AGENT_ENABLE_PAGE_AGENT=true`를 추가로 켜면 [Alibaba Page-Agent](https://github.com/alibaba/page-agent)에서 쓰는 DOM 중심 접근처럼 텍스트 없는 아이콘, class/id/data-action 기반 버튼, selector가 있는 입력칸을 먼저 후보화하고 `click_by_selector`/`fill_by_label`로 실행합니다.
+
+`MANUAL_AGENT_BROWSER_DECISION_POLICY=quality_first`에서는 Page Agent가 직접 클릭을 확정하지 않고 DOM selector 후보를 VLM에 제공합니다. 실제 Playwright 실행 루프는 매 단계 직전 PNG를 저장하고, Gemma VLM은 이 화면과 DOM을 함께 판단합니다. 실행 전 검증에 실패하면 오류를 반영해 한 번 수정 요청하고, 수정도 실패하면 DOM LLM과 local policy로 fallback합니다. Ollama 호출은 JSON mode, `reasoning_effort=none`, 단계별 token 상한을 사용해 형식 이탈과 불필요한 생성 시간을 줄입니다. 결정, repair, fallback, 지연시간은 `llm_responses.jsonl`, `browser_agent_trace.json`, `package_manifest.json`에 남습니다.
 
 개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
 
@@ -191,7 +193,7 @@ MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
 
 ### 4. HyperFrames
 
-HyperFrames는 HTML 기반 video composition을 preview/render하는 Node.js 계열 도구입니다. 현재 MVP는 HyperFrames를 직접 호출하지 않고 HTML preview와 Playwright WebM을 생성합니다. MP4 품질 렌더링으로 넘어갈 때 HyperFrames 어댑터를 연결합니다.
+HyperFrames는 HTML 기반 video composition을 preview/render하는 Node.js 계열 도구입니다. 현재 어댑터는 Playwright WebM을 composition 내부 자산으로 복사하고 HyperFrames CLI로 MP4를 생성한 뒤, FFmpeg로 Supertonic 음성과 WebVTT 자막을 합성합니다. `quality_first`에서는 `1920x1080`, `landscape`, `high`, PNG source frame을 강제하며 composition 내부의 중복 캡션과 정적 포인터를 제거합니다. 최종 품질 gate는 최소 1280x720, 16:9 가로 화면, 오디오 mux, 자막 burn-in, 목표 길이 오차를 검사합니다.
 
 필요 조건:
 
@@ -356,7 +358,7 @@ http://127.0.0.1:8000/sample
 작업마다 홈 화면의 `실행 방식`에서 다음 둘 중 하나를 고릅니다.
 
 - `직접 시연`: 승인 후 headed Playwright 브라우저가 열립니다. 사용자가 로그인, 입력, 클릭, 조회를 직접 수행한 뒤 화면 오른쪽 아래의 `시연 완료` 버튼을 누르면 녹화를 끝내고 마스킹, TTS, HyperFrames/영상 패키징을 진행합니다. 이 모드에서는 브라우저 에이전트가 action plan을 대신 클릭하지 않습니다.
-- `AI 자동 실행`: 승인 후 내부 planner/browser agent 설정에 따라 AI가 화면을 관찰하고 안전한 입력, 클릭, 대기, 캡처 동작을 선택합니다. `MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`와 LLM 설정이 있어야 LLM 기반 화면 판단 루프가 동작하며, 꺼져 있으면 확정된 action plan 기반 캡처로 fallback합니다.
+- `AI 자동 실행`: 승인 후 내부 planner/browser agent 설정에 따라 AI가 화면을 관찰하고 안전한 입력, 클릭, 대기, 캡처 동작을 선택합니다. `MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`와 LLM 설정이 있어야 LLM 기반 화면 판단 루프가 동작하며, 꺼져 있으면 확정된 action plan 기반 캡처로 fallback합니다. `MANUAL_AGENT_ENABLE_PAGE_AGENT=true`를 함께 켜면 LLM/VLM 호출 전에 DOM selector 후보를 먼저 사용해 텍스트 없는 아이콘이나 class 기반 버튼을 더 안정적으로 클릭합니다.
 
 사내 시스템 화면 구성이 자주 바뀌거나 요청문만으로 selector/버튼 의미를 안정적으로 맞추기 어려운 경우에는 `직접 시연`을 기본으로 사용합니다. 반복 가능한 샘플 화면이나 검수된 target에서는 `AI 자동 실행`을 사용할 수 있습니다.
 
@@ -421,6 +423,8 @@ output/jobs/<job_id>/
 
 `degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
 
+`quality_first`의 `video_render.json.quality` gate는 파일 존재 여부뿐 아니라 해상도/화면비, 오디오, 자막, 영상 길이를 검사합니다. 하나라도 실패하면 `render_quality_failed`로 강등되고 `tools/verify_package.py`도 패키지를 실패 처리합니다.
+
 ## `.env` 설정
 
 내부 API 접속값은 `.env`로 관리합니다. 예시 파일은 [.env.example](.env.example)에 있습니다.
@@ -468,6 +472,8 @@ MANUAL_AGENT_CDP_ENDPOINT
 MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT
 MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN
 MANUAL_AGENT_ENABLE_BROWSER_AGENT
+MANUAL_AGENT_BROWSER_DECISION_POLICY
+MANUAL_AGENT_ENABLE_PAGE_AGENT
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS
 MANUAL_AGENT_LOGIN_MODE
 MANUAL_AGENT_LOGIN_USERNAME_SELECTOR
@@ -514,6 +520,8 @@ MANUAL_AGENT_LLM_TIMEOUT_SECONDS=180
 MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
 MANUAL_AGENT_ENABLE_RERANKER=true
 MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
+MANUAL_AGENT_BROWSER_DECISION_POLICY=quality_first
+MANUAL_AGENT_ENABLE_PAGE_AGENT=true
 MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=8
 MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=600
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live

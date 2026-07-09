@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.action_safety import click_text_candidates, is_disallowed_click_texts
 from backend.app.config import AppSettings
+from backend.app.adapters.llm_contracts import (
+    PLANNER_SYSTEM_PROMPT,
+    apply_json_response_format,
+    apply_ollama_generation_controls,
+    call_metrics,
+)
 from backend.app.llm_logging import record_llm_response
 
 
@@ -234,18 +241,7 @@ def _call_llm_planner(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "너는 사내 시스템 사용 매뉴얼 영상 제작용 action plan을 생성한다. "
-                    "반드시 JSON만 반환한다. JSON schema: "
-                    "{steps:[{id,title,caption,narration}], actions:[{id,type,step_id,target?,label?,value?,value_key?,texts?,requires_approval?}]}. "
-                    "사용자 요청이 짧거나 모호하면 agent_brief의 task_type, success_criteria, safe_click_intents를 사용해 필요한 단계를 보강한다. "
-                    "브라우저 화면마다 달라지는 CSS selector보다 fill_by_label, click_by_text, press_key, capture_step 같은 의미 기반 action을 우선한다. "
-                    "단, 사용자가 class/id/css selector를 직접 제공했거나 아이콘처럼 텍스트가 없는 컨트롤은 click action의 selector 필드로 지정한다. "
-                    "입력값은 input_values의 key를 value_key로 참조하고, 화면의 실제 필드명은 label에 넣는다. "
-                    "조회/검색/전송 뒤에는 capture_step을 넣고, 완료 조건 확인 단계도 포함한다. "
-                    "요청문에 모달창/팝업 확인 또는 닫기가 포함되어 있으면 본 작업 전에 닫기/확인 click_by_text 단계를 먼저 둔다. "
-                    "웹 검색, web search, 모델 선택, 도구 선택, 기능 토글 같은 선택형 UI는 클릭하지 않는다."
-                ),
+                "content": PLANNER_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
@@ -266,6 +262,9 @@ def _call_llm_planner(
         "temperature": 0.2,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
+    apply_json_response_format(payload, settings.llm)
+    apply_ollama_generation_controls(payload, settings.llm, max_tokens=1200)
+    started_at = time.perf_counter()
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
     record_llm_response(
@@ -275,6 +274,7 @@ def _call_llm_planner(
         content=content,
         terminal_enabled=settings.enable_terminal_logs,
         package_dir=package_dir,
+        metrics=call_metrics(payload, response, started_at),
     )
     return _normalize_plan(_parse_json_content(content), request)
 
@@ -313,13 +313,26 @@ def _normalize_plan(data: dict[str, Any], request: Any) -> dict[str, Any]:
             item["type"] = "click"
             if not item.get("selector"):
                 item["selector"] = item.get("css_selector") or item.get("target")
-        if item["type"] == "click_by_text" and is_disallowed_click_texts(click_text_candidates(item)):
-            item = {
-                "id": item["id"],
-                "type": "capture_step",
-                "step_id": item["step_id"],
-                "reason": "blocked_disallowed_click_text",
-            }
+        if item["type"] == "click_by_text":
+            if not click_text_candidates(item):
+                safe_texts = _safe_click_texts_from_request(request)
+                if safe_texts:
+                    item["texts"] = safe_texts
+                    item["label"] = safe_texts[0]
+                else:
+                    item = {
+                        "id": item["id"],
+                        "type": "capture_step",
+                        "step_id": item["step_id"],
+                        "reason": "missing_safe_click_target",
+                    }
+            if item["type"] == "click_by_text" and is_disallowed_click_texts(click_text_candidates(item)):
+                item = {
+                    "id": item["id"],
+                    "type": "capture_step",
+                    "step_id": item["step_id"],
+                    "reason": "blocked_disallowed_click_text",
+                }
         normalized_actions.append(item)
 
     if not any(action["type"] == "navigate" for action in normalized_actions):
@@ -331,13 +344,22 @@ def _normalize_plan(data: dict[str, Any], request: Any) -> dict[str, Any]:
 
 
 def _normalize_fill_value(action: dict[str, Any], request: Any) -> None:
-    if str(action.get("value") or ""):
-        return
     input_values = getattr(request, "input_values", {}) or {}
     if not isinstance(input_values, dict) or not input_values:
         return
     value_key = str(action.get("value_key") or "").strip()
     label = str(action.get("label") or action.get("name") or "").strip()
+    if not label and value_key in input_values:
+        action["label"] = value_key
+        label = value_key
+    if str(action.get("value") or ""):
+        return
+    for key, value in input_values.items():
+        if str(action.get(key) or "").strip():
+            action["label"] = str(key)
+            action["value_key"] = str(key)
+            action["value"] = value
+            return
     if value_key in input_values:
         action["value"] = input_values[value_key]
         return
@@ -357,8 +379,18 @@ def _normalize_fill_value(action: dict[str, Any], request: Any) -> None:
     if len(input_values) == 1:
         key, value = next(iter(input_values.items()))
         action["value"] = value
+        if not label:
+            action["label"] = str(key)
         if not value_key:
             action["value_key"] = str(key)
+
+
+def _safe_click_texts_from_request(request: Any) -> list[str]:
+    brief = getattr(request, "agent_brief", {}) or {}
+    values = [str(item).strip() for item in brief.get("safe_click_intents", []) or [] if str(item).strip()]
+    non_key_values = [item for item in values if item.lower() not in {"enter", "return", "엔터"}]
+    candidates = non_key_values or values
+    return list(dict.fromkeys(item for item in candidates if not is_disallowed_click_texts([item])))
 
 
 def _compact_text(value: str) -> str:

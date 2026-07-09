@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.adapters.planner import post_json
+from backend.app.adapters.llm_contracts import (
+    INPUT_EXTRACTOR_SYSTEM_PROMPT,
+    apply_json_response_format,
+    apply_ollama_generation_controls,
+    call_metrics,
+)
 from backend.app.config import AppSettings
 from backend.app.llm_logging import record_llm_response
 from backend.app.redaction import is_sensitive_key, redact_sensitive
@@ -79,12 +86,7 @@ def _extract_with_llm(
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "너는 사내 시스템 매뉴얼 영상 제작 요청문에서 화면 입력에 필요한 값만 추출한다. "
-                    "반드시 JSON만 반환한다. JSON schema: {\"input_values\":{\"필드명\":\"값\"}}. "
-                    "비밀번호, OTP, PIN, token, API key, ticket, credential, authorization 값은 절대 추출하지 않는다. "
-                    "로그인 계정 정보도 추출하지 않는다. 조회/검색/필터 조건처럼 화면에 입력할 업무 값만 추출한다."
-                ),
+                "content": INPUT_EXTRACTOR_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
@@ -103,6 +105,9 @@ def _extract_with_llm(
         "temperature": 0.0,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
+    apply_json_response_format(payload, settings.llm)
+    apply_ollama_generation_controls(payload, settings.llm, max_tokens=300)
+    started_at = time.perf_counter()
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
     record_llm_response(
@@ -112,6 +117,7 @@ def _extract_with_llm(
         content=content,
         terminal_enabled=settings.enable_terminal_logs,
         package_dir=package_dir,
+        metrics=call_metrics(payload, response, started_at),
     )
     return _parse_llm_values(content)
 
@@ -194,7 +200,7 @@ def _build_scenario_brief(request: Any, effective_values: dict[str, str]) -> dic
         "제출",
     ]
     success_criteria = [item for item in [completion_condition.strip(), _inferred_success_criterion(task_type)] if item]
-    return {
+    brief = {
         "task_type": task_type,
         "objective": _redact_sensitive_free_text(request_text.strip()),
         "role": str(getattr(request, "role", "") or "").strip(),
@@ -204,6 +210,33 @@ def _build_scenario_brief(request: Any, effective_values: dict[str, str]) -> dic
         "forbidden_click_intents": forbidden_click_intents,
         "autonomy_guidance": _autonomy_guidance(task_type),
     }
+    target_duration = _extract_requested_duration_seconds(f"{request_text} {completion_condition}")
+    if target_duration > 0:
+        brief["target_video_duration_seconds"] = target_duration
+    return brief
+
+
+def _extract_requested_duration_seconds(text: str) -> float:
+    number = r"(\d+(?:\.\d+)?)"
+    duration_before_label = re.search(
+        rf"(?:(?P<minutes>{number})\s*분)?\s*(?:(?P<seconds>{number})\s*초)?\s*(?:짜리\s*)?(?:영상|비디오|길이|분량)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    label_before_duration = re.search(
+        rf"(?:영상|비디오)(?:\s*재생)?\s*(?:시간|길이|분량)?\s*[:=]?\s*(?:(?P<minutes>{number})\s*분)?\s*(?:(?P<seconds>{number})\s*초)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    match = duration_before_label or label_before_duration
+    if match is None:
+        return 0.0
+    minutes = float(match.group("minutes") or 0.0)
+    seconds = float(match.group("seconds") or 0.0)
+    total = minutes * 60.0 + seconds
+    if total <= 0:
+        return 0.0
+    return round(min(max(total, 10.0), 900.0), 3)
 
 
 def _infer_task_type(text: str) -> str:

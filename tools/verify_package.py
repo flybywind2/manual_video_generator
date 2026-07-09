@@ -128,6 +128,11 @@ def verify_manifest(manifest_path: Path) -> list[str]:
     if tts_metadata and tts_metadata.exists():
         errors.extend(_verify_tts_metadata(tts_metadata))
 
+    if isinstance(supporting_artifacts, dict):
+        video_render = _path_from(supporting_artifacts, "video_render")
+        if video_render and video_render.exists():
+            errors.extend(_verify_render_quality(video_render))
+
     degradations = manifest.get("degradations", [])
     if not isinstance(degradations, list):
         errors.append("degradations must be a list")
@@ -186,6 +191,21 @@ def _verify_tts_metadata(path: Path) -> list[str]:
         elif audio_path.stat().st_size == 0:
             errors.append(f"tts metadata audio path is empty: {audio_path}")
     return errors
+
+
+def _verify_render_quality(path: Path) -> list[str]:
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"video_render.json is invalid JSON: {exc}"]
+    quality = metadata.get("quality")
+    if not isinstance(quality, dict) or not quality.get("enforced"):
+        return []
+    if quality.get("status") != "failed":
+        return []
+    issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+    codes = [str(item.get("code") or "unknown") for item in issues if isinstance(item, dict)]
+    return [f"render quality failed: {code}" for code in codes] or ["render quality failed: unknown"]
 
 
 if __name__ == "__main__":

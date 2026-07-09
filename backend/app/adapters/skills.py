@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from backend.app.config import AppSettings
+from backend.app.subprocess_utils import run_text_command
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
@@ -49,7 +50,7 @@ def ensure_hyperframes_skills(
 
     runner = subprocess.run if command_runner is None else command_runner
     try:
-        completed = runner(command, cwd=str(package_dir), capture_output=True, text=True, timeout=300)
+        completed = run_text_command(runner, command, cwd=str(package_dir), capture_output=True, timeout=300)
         metadata["returncode"] = completed.returncode
         metadata["stdout"] = completed.stdout[-4000:] if completed.stdout else ""
         metadata["stderr"] = completed.stderr[-4000:] if completed.stderr else ""

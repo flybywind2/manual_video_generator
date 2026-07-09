@@ -25,8 +25,16 @@ def record_llm_response(
     terminal_enabled: bool,
     package_dir: Path | None = None,
     status: str = "ok",
+    metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    summary = _response_summary(component=component, model=model, response=response, content=content, status=status)
+    summary = _response_summary(
+        component=component,
+        model=model,
+        response=response,
+        content=content,
+        status=status,
+        metrics=metrics,
+    )
     event = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "actor": "llm_response",
@@ -48,7 +56,15 @@ def record_llm_response(
     return summary
 
 
-def _response_summary(*, component: str, model: str, response: Any, content: Any, status: str) -> dict[str, Any]:
+def _response_summary(
+    *,
+    component: str,
+    model: str,
+    response: Any,
+    content: Any,
+    status: str,
+    metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     content_text = "" if content is None else str(content)
     summary = {
         "component": component,
@@ -63,6 +79,8 @@ def _response_summary(*, component: str, model: str, response: Any, content: Any
             summary["choice_count"] = len(choices)
             if choices and isinstance(choices[0], dict) and choices[0].get("finish_reason"):
                 summary["finish_reason"] = str(choices[0]["finish_reason"])
+    if metrics:
+        summary.update(redact_sensitive(metrics))
     return summary
 
 

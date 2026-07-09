@@ -1780,9 +1780,10 @@ def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_pat
     assert result.video_path == fallback_video
     assert result.composition_dir.joinpath("index.html").exists()
     html = result.composition_dir.joinpath("index.html").read_text(encoding="utf-8")
-    assert "../manual_video_agent_usage.webm" in html
+    assert 'src="source.webm"' in html
+    assert result.composition_dir.joinpath("source.webm").read_bytes() == b"webm"
     assert "manual-source-video" in html
-    assert "manual-video-pointer" in html
+    assert "manual-video-pointer" not in html
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["renderer"] == "hyperframes"
     assert metadata["fallback_video"] == str(fallback_video)
@@ -2245,6 +2246,9 @@ def test_video_mux_burns_package_subtitles_into_final_video(tmp_path: Path):
     assert "subtitles.vtt" in command
     assert "subtitles=" in command
     assert "drawbox=" in command
+    assert "color=black@0.72" in command
+    assert "FontSize=11" in command
+    assert "PrimaryColour=&H00FFFFFF" in command
     assert metadata["audio"]["subtitles_burned_in"] is True
     assert result.video_path.suffix == ".mp4"
 
@@ -2350,7 +2354,7 @@ def test_hyperframes_composition_duration_uses_target_duration_over_short_tts(tm
     assert manifest["captions"][1]["end"] == 300.0
 
 
-def test_hyperframes_composition_burns_visible_step_captions(tmp_path: Path):
+def test_hyperframes_composition_defers_visible_captions_to_final_subtitle_burn(tmp_path: Path):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
@@ -2381,10 +2385,16 @@ def test_hyperframes_composition_burns_visible_step_captions(tmp_path: Path):
     html = (tmp_path / "hyperframes" / "index.html").read_text(encoding="utf-8")
     manifest = json.loads((tmp_path / "hyperframes" / "hyperframes_manifest.json").read_text(encoding="utf-8"))
 
-    assert "manual-video-caption" in html
-    assert "updateManualVideoCaption" in html
-    assert "질문에 값을 입력합니다." in html
-    assert "전송 버튼을 클릭합니다." in html
+    assert "manual-video-caption" not in html
+    assert "updateManualVideoCaption" not in html
+    assert "object-fit: contain" in html
+    assert "grid-template-columns" not in html
+    assert 'data-start="0"' in html
+    assert 'data-width="1920"' in html
+    assert 'data-height="1080"' in html
+    assert "data-no-timeline" in html
+    assert 'src="source.webm"' in html
+    assert (tmp_path / "hyperframes" / "source.webm").read_bytes() == b"webm"
     assert manifest["captions"][1]["caption"] == "질문에 값을 입력합니다."
 
 

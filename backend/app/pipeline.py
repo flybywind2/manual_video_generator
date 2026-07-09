@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from backend.app.adapters.browser_agent import decide_browser_agent_action
+from backend.app.adapters.page_agent import enrich_page_agent_observation
 from backend.app.adapters.extension_bridge import ExtensionBridgeClient
 from backend.app.adapters.input_extractor import extract_input_values
 from backend.app.adapters.opencode import run_opencode_agent
@@ -35,6 +36,7 @@ from backend.app.package_builder import build_media_assets, build_preview_manual
 from backend.app.policies import ApprovalGate
 from backend.app.redaction import RedactionPipeline, redact_sensitive
 from backend.app.terminal_logging import TerminalRunLogger
+from backend.app.subprocess_utils import run_text_command
 from backend.app.workflow import WorkflowStatus, WorkflowStep
 from backend.app.workflow_graph import WORKFLOW_GRAPH
 
@@ -981,7 +983,11 @@ def rerender_pipeline_package(
         settings=settings,
         tts_audio=tts_result.audio_paths,
     )
-    render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
+    render_degrade_reason = _render_degrade_reason(
+        video_render.used_fallback,
+        settings.video_renderer,
+        video_render.metadata_path,
+    )
     _record_stage(
         audit,
         terminal,
@@ -1381,7 +1387,11 @@ def _complete_pipeline_execution(
         settings=settings,
         tts_audio=tts_result.audio_paths,
     )
-    render_degrade_reason = _render_degrade_reason(video_render.used_fallback, settings.video_renderer)
+    render_degrade_reason = _render_degrade_reason(
+        video_render.used_fallback,
+        settings.video_renderer,
+        video_render.metadata_path,
+    )
     _record_stage(
         audit,
         terminal,
@@ -2723,6 +2733,8 @@ def _execute_demonstration_replay_event(page: Any, event: dict[str, Any], step: 
             key = str(event.get("key") or "Enter")
             page.keyboard.press(key)
             log_entry["key"] = key
+        elif event_type in {"capture", "wait"}:
+            log_entry["method"] = f"{event_type}_hold"
         else:
             log_entry["status"] = "skipped"
             log_entry["reason"] = "unsupported_demonstration_event"
@@ -3234,6 +3246,10 @@ def _execute_browser_agent_actions(
     while functional_steps < max_steps and step_index <= max_steps + max_sso_wait_turns:
         try:
             observation = observer(page)
+            if str(getattr(settings, "browser_decision_policy", "balanced") or "balanced") == "quality_first":
+                observation = _attach_pre_action_screenshot(page, observation, capture_dir, step_index)
+            if getattr(settings, "enable_page_agent", False):
+                observation = enrich_page_agent_observation(observation)
             decide_kwargs: dict[str, Any] = {"step_index": step_index}
             if decide_next is decide_browser_agent_action:
                 decide_kwargs["package_dir"] = capture_dir.parent
@@ -3300,17 +3316,27 @@ def _execute_browser_agent_actions(
         history.append(
             {
                 "step": step_index,
+                "action_id": log_entry.get("action_id"),
+                "step_id": log_entry.get("step_id"),
                 "type": log_entry.get("type"),
+                "source": log_entry.get("source"),
                 "status": log_entry.get("status"),
-                "verification_status": verification.get("status"),
                 "reason": log_entry.get("reason") or log_entry.get("error") or action.get("reason", ""),
+                "label": log_entry.get("label"),
+                "value_key": action.get("value_key"),
+                "texts": log_entry.get("texts"),
+                "selector": log_entry.get("selector"),
+                "key": log_entry.get("key"),
+                "timeout_ms": action.get("timeout_ms"),
+                "capture": log_entry.get("capture"),
+                "verification": verification,
             }
         )
         if log_entry.get("capture"):
             captures.append(Path(log_entry["capture"]))
         if action.get("type") == "finish":
             break
-        if is_sso_wait and sso_wait_turns > max_sso_wait_turns:
+        if is_sso_wait and sso_wait_turns >= max_sso_wait_turns:
             action_log.append(
                 {
                     "type": "wait",
@@ -3322,6 +3348,18 @@ def _execute_browser_agent_actions(
             break
         step_index += 1
 
+    quality_first = str(getattr(settings, "browser_decision_policy", "balanced") or "balanced") == "quality_first"
+    finish_attempted = any(str(entry.get("type") or "") == "finish" for entry in action_log)
+    if quality_first and not finish_attempted and functional_steps >= max_steps:
+        action_log.append(
+            {
+                "type": "browser_agent",
+                "source": "browser-agent-quality-gate",
+                "status": "degraded",
+                "reason": "browser_agent_max_steps_exhausted",
+            }
+        )
+
     if not captures:
         step = {"id": "browser_agent_step_final", "title": "자동 판단 결과", "caption": "브라우저 자동 판단 결과를 확인합니다."}
         _apply_step_overlay(page, step)
@@ -3331,6 +3369,29 @@ def _execute_browser_agent_actions(
     status, degrade_reason = _capture_action_log_status(action_log, failed_reason="browser_agent_action_failed")
     _write_browser_agent_trace(capture_dir.parent, trace_turns)
     return {"captures": captures, "action_log": action_log, "status": status, "degrade_reason": degrade_reason}
+
+
+def _attach_pre_action_screenshot(
+    page: Any,
+    observation: dict[str, Any],
+    capture_dir: Path,
+    step_index: int,
+) -> dict[str, Any]:
+    enriched = dict(observation)
+    observation_dir = capture_dir / "observations"
+    observation_dir.mkdir(parents=True, exist_ok=True)
+    path = observation_dir / f"before_step_{step_index:03d}.png"
+    try:
+        page.screenshot(path=str(path), full_page=False)
+        enriched["screenshot"] = {"status": "ok", "path": str(path), "filename": path.name}
+    except Exception as exc:  # noqa: BLE001 - the decision layer records and handles an unavailable visual observation.
+        enriched["screenshot"] = {
+            "status": "failed",
+            "path": str(path),
+            "filename": path.name,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return enriched
 
 
 def _is_sso_wait_action(action: dict[str, Any]) -> bool:
@@ -3424,6 +3485,8 @@ def _capture_action_log_status(action_log: list[dict[str, Any]], *, failed_reaso
         if status in {"blocked", "degraded"}:
             if reason == "login_required":
                 return "degraded", "login_required"
+            if reason in {"sso_auth_redirect_timeout", "browser_agent_max_steps_exhausted"}:
+                return "degraded", reason
             return "degraded", failed_reason
         if status == "skipped" and reason not in ignored_skips:
             return "degraded", failed_reason
@@ -4774,7 +4837,9 @@ def _media_plan_for_outputs(
         if not events:
             return plan
         events = _enrich_media_events(events, request)
-        steps = [_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1)]
+        steps = _deduplicate_media_steps(
+            [_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1)]
+        )
         return {
             "source": "browser-agent-media-plan",
             "request_text": request.request_text,
@@ -4800,6 +4865,7 @@ def _media_plan_for_outputs(
     ]
     events = _enrich_media_events(events, request)
     steps.extend(_demonstration_event_to_step(index, event) for index, event in enumerate(events, start=1))
+    steps = _deduplicate_media_steps(steps)
     return {
         "source": "direct-demonstration-media-plan",
         "request_text": request.request_text,
@@ -4904,7 +4970,9 @@ def _media_plan_from_subtitles(path: Path, result: PipelineResult) -> dict[str, 
             continue
         title = _compact_text(lines[0], limit=80)
         caption = _compact_text(" ".join(lines[1:]) if len(lines) > 1 else lines[0], limit=180)
-        narration = caption if caption == title else f"{title}\n{caption}"
+        title_key = re.sub(r"\s+", "", title).lower()
+        caption_key = re.sub(r"\s+", "", caption).lower()
+        narration = caption if title_key and title_key in caption_key else (caption if caption == title else f"{title}\n{caption}")
         steps.append(
             {
                 "id": f"subtitle_{index:02d}",
@@ -5224,7 +5292,8 @@ def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str,
     elif event_type == "click":
         target = _event_target_label(event, fallback="화면 요소")
         title = f"클릭: {target}"
-        caption = target if _looks_like_sentence(target) else f"{target}을 클릭합니다."
+        reason = _compact_text(str(event.get("reason") or ""))
+        caption = reason if _looks_like_sentence(reason) else (target if _looks_like_sentence(target) else f"{target}을 클릭합니다.")
     elif event_type == "wait":
         reason = _compact_text(str(event.get("reason") or "화면 변화가 완료될 때까지 기다립니다."))
         title = "대기: 화면 응답 확인"
@@ -5239,6 +5308,19 @@ def _demonstration_event_to_step(index: int, event: dict[str, Any]) -> dict[str,
     title = _compact_text(title, limit=80)
     caption = _compact_text(caption, limit=180)
     return {"id": step_id, "title": title, "caption": caption, "narration": caption}
+
+
+def _deduplicate_media_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduplicated: list[dict[str, Any]] = []
+    previous_narration = ""
+    for step in steps:
+        narration = _compact_text(str(step.get("narration") or step.get("caption") or step.get("title") or ""), limit=500)
+        normalized = re.sub(r"\s+", "", narration).lower()
+        if normalized and normalized == previous_narration:
+            continue
+        deduplicated.append(step)
+        previous_narration = normalized
+    return deduplicated
 
 
 def _looks_like_sentence(value: str) -> bool:
@@ -5519,7 +5601,7 @@ def _render_placeholder_video(package_dir: Path) -> Path:
             "-shortest",
             str(path),
         ]
-        completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=60)
+        completed = run_text_command(subprocess.run, args, cwd=str(package_dir), capture_output=True, timeout=60)
         if completed.returncode == 0 and _is_valid_video(path):
             return path
     path.write_bytes(base64.b64decode("GkXfo0AgQoaBAUL3gQFC8oEEQvOB"))
@@ -5566,7 +5648,7 @@ def _render_capture_slideshow_video(package_dir: Path, captures: list[Path]) -> 
         "-shortest",
         str(path),
     ]
-    completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=180)
+    completed = run_text_command(subprocess.run, args, cwd=str(package_dir), capture_output=True, timeout=180)
     if completed.returncode == 0 and _is_valid_video(path):
         return path
     return _render_placeholder_video(package_dir)
@@ -5578,10 +5660,10 @@ def _is_valid_video(path: Path) -> bool:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
         return True
-    completed = subprocess.run(
+    completed = run_text_command(
+        subprocess.run,
         [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
         capture_output=True,
-        text=True,
         timeout=20,
     )
     if completed.returncode != 0:
@@ -5812,6 +5894,7 @@ def _manifest(
         "hyperframes_composition": str(package_dir / "hyperframes" / "index.html"),
         "hyperframes_manifest": str(package_dir / "hyperframes" / "hyperframes_manifest.json"),
     }
+    render_metadata = _read_small_json(result.artifacts.video_render_metadata) if result.artifacts.video_render_metadata else {}
     return {
         "job_id": result.job_id,
         "status": result.status,
@@ -5819,6 +5902,7 @@ def _manifest(
         "environment": environment or {},
         "degradations": degradations or [],
         "fallback_events": fallback_events or [],
+        "render_quality": render_metadata.get("quality") if isinstance(render_metadata.get("quality"), dict) else {},
         "artifacts": {
             "html_preview": str(result.artifacts.html_preview),
             "markdown_manual": str(result.artifacts.markdown_manual),
@@ -5879,7 +5963,12 @@ def _tts_degrade_reason(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _render_degrade_reason(used_fallback: bool, renderer: str) -> str:
+def _render_degrade_reason(used_fallback: bool, renderer: str, metadata_path: Path | None = None) -> str:
+    if metadata_path is not None:
+        metadata = _read_small_json(metadata_path)
+        quality = metadata.get("quality") if isinstance(metadata.get("quality"), dict) else {}
+        if quality.get("enforced") and quality.get("status") == "failed":
+            return "render_quality_failed"
     if used_fallback and renderer.lower() == "hyperframes":
         return "hyperframes_fallback_video"
     return ""
@@ -5932,6 +6021,7 @@ def _read_small_json(path: Path | None) -> dict[str, Any]:
         "returncode",
         "stderr",
         "audio",
+        "quality",
         "skills_status",
     }
     return {key: data[key] for key in allowed_keys if key in data}

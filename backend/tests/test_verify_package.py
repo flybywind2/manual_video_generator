@@ -63,6 +63,34 @@ def test_verify_package_rejects_missing_supporting_artifact(tmp_path: Path):
     assert f"supporting artifact path does not exist: planner_trace={planner_trace}" in errors
 
 
+def test_verify_package_rejects_enforced_render_quality_failure(tmp_path: Path):
+    result = run_pipeline(
+        PipelineInput(
+            request_text="MES에서 LOT 조회 방법 영상 만들기",
+            target_url="http://127.0.0.1:8000/sample",
+            role="작업자",
+            completion_condition="상세 화면이 보이면 완료",
+            input_values={"LOT": "LOT-001"},
+        ),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    render_path = Path(manifest["supporting_artifacts"]["video_render"])
+    render = json.loads(render_path.read_text(encoding="utf-8"))
+    render["quality"] = {
+        "status": "failed",
+        "enforced": True,
+        "issues": [{"code": "audio_mux_failed", "message": "TTS audio mux failed"}],
+    }
+    render_path.write_text(json.dumps(render, ensure_ascii=False), encoding="utf-8")
+
+    verify_package = _load_verify_module()
+    errors = verify_package.verify_manifest(result.artifacts.package_manifest)
+
+    assert "render quality failed: audio_mux_failed" in errors
+
+
 def test_verify_package_rejects_audit_log_run_id_mismatch(tmp_path: Path):
     result = run_pipeline(
         PipelineInput(

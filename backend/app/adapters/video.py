@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from backend.app.adapters.skills import ensure_hyperframes_skills
 from backend.app.config import AppSettings
+from backend.app.subprocess_utils import run_text_command
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
@@ -60,6 +61,7 @@ def render_final_video(
         "composition_duration_seconds": duration_seconds,
         "composition_duration_source": duration_source,
         "used_fallback": True,
+        "quality_enforced": str(getattr(settings, "browser_decision_policy", "balanced") or "balanced") == "quality_first",
     }
     has_tts_timeline = duration_source == "tts_audio" and _positive_float(plan.get("target_duration_seconds")) > 0
     mux_target_duration_seconds = (
@@ -92,6 +94,8 @@ def render_final_video(
         resolved = shutil.which(command[0])
         if resolved:
             command[0] = resolved
+    if metadata["quality_enforced"]:
+        command = _quality_first_hyperframes_command(command)
     if not command:
         metadata["status"] = "skipped"
         metadata["reason"] = "hyperframes command is empty"
@@ -125,7 +129,14 @@ def render_final_video(
     if isinstance(runner_args, str):
         metadata["shell_command"] = runner_args
     try:
-        completed = runner(runner_args, cwd=str(composition_dir), capture_output=True, text=True, timeout=600, shell=use_shell)
+        completed = run_text_command(
+            runner,
+            runner_args,
+            cwd=str(composition_dir),
+            capture_output=True,
+            timeout=600,
+            shell=use_shell,
+        )
         metadata["returncode"] = completed.returncode
         metadata["stdout"] = completed.stdout[-4000:] if completed.stdout else ""
         metadata["stderr"] = completed.stderr[-4000:] if completed.stderr else ""
@@ -214,7 +225,7 @@ def _mux_tts_audio(
         "narration": str(narration_wav),
     }
     try:
-        concat_completed = runner(concat_args, cwd=str(package_dir), capture_output=True, text=True, timeout=600)
+        concat_completed = run_text_command(runner, concat_args, cwd=str(package_dir), capture_output=True, timeout=600)
         audio_metadata["concat_returncode"] = concat_completed.returncode
         audio_metadata["concat_stdout"] = concat_completed.stdout[-2000:] if concat_completed.stdout else ""
         audio_metadata["concat_stderr"] = concat_completed.stderr[-2000:] if concat_completed.stderr else ""
@@ -257,7 +268,7 @@ def _mux_tts_audio(
         subtitles_path = package_dir / "subtitles.vtt"
         subtitles_burned_in = subtitles_path.exists() and subtitles_path.stat().st_size > 0
         if subtitles_burned_in:
-            video_filters.append("drawbox=x=0:y=ih-150:w=iw:h=150:color=white@1.0:t=fill")
+            video_filters.append("drawbox=x=0:y=ih-150:w=iw:h=150:color=black@0.72:t=fill")
             video_filters.append(_subtitles_filter(subtitles_path, package_dir=package_dir))
             video_codec_args = ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
         video_filter_args = ["-vf", ",".join(video_filters)] if video_filters else []
@@ -291,7 +302,7 @@ def _mux_tts_audio(
             str(mux_output),
         ]
         audio_metadata["mux_command"] = mux_args
-        mux_completed = runner(mux_args, cwd=str(package_dir), capture_output=True, text=True, timeout=600)
+        mux_completed = run_text_command(runner, mux_args, cwd=str(package_dir), capture_output=True, timeout=600)
         audio_metadata["mux_returncode"] = mux_completed.returncode
         audio_metadata["mux_stdout"] = mux_completed.stdout[-2000:] if mux_completed.stdout else ""
         audio_metadata["mux_stderr"] = mux_completed.stderr[-2000:] if mux_completed.stderr else ""
@@ -323,7 +334,8 @@ def _probe_media_duration_seconds(path: Path) -> float:
     if not ffprobe or not path.exists() or path.stat().st_size <= 0:
         return 0.0
     try:
-        completed = subprocess.run(
+        completed = run_text_command(
+            subprocess.run,
             [
                 ffprobe,
                 "-v",
@@ -335,7 +347,6 @@ def _probe_media_duration_seconds(path: Path) -> float:
                 str(path),
             ],
             capture_output=True,
-            text=True,
             timeout=20,
         )
     except Exception:
@@ -346,6 +357,122 @@ def _probe_media_duration_seconds(path: Path) -> float:
         return max(0.0, float(completed.stdout.strip()))
     except ValueError:
         return 0.0
+
+
+def _probe_video_dimensions(path: Path) -> tuple[int, int]:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not path.exists() or path.stat().st_size <= 0:
+        return 0, 0
+    try:
+        completed = run_text_command(
+            subprocess.run,
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=20,
+        )
+        payload = json.loads(completed.stdout or "{}") if completed.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return 0, 0
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    stream = streams[0] if isinstance(streams, list) and streams and isinstance(streams[0], dict) else {}
+    try:
+        return max(0, int(stream.get("width") or 0)), max(0, int(stream.get("height") or 0))
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _build_render_quality_report(
+    video_path: Path,
+    metadata: dict[str, Any],
+    package_dir: Path,
+    *,
+    enforced: bool,
+) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    video_exists = video_path.is_file()
+    video_nonempty = video_exists and video_path.stat().st_size > 0
+    if not video_exists:
+        issues.append({"code": "video_missing", "message": "Final video file is missing"})
+    elif not video_nonempty:
+        issues.append({"code": "video_empty", "message": "Final video file is empty"})
+
+    audio = metadata.get("audio") if isinstance(metadata.get("audio"), dict) else {}
+    audio_expected = int(audio.get("input_count") or 0) > 0
+    if audio_expected and str(audio.get("status") or "") != "completed":
+        issues.append({"code": "audio_mux_failed", "message": "TTS audio was not muxed into the final video"})
+
+    subtitles_path = package_dir / "subtitles.vtt"
+    subtitles_requested = subtitles_path.is_file() and subtitles_path.stat().st_size > 0
+    if subtitles_requested and audio.get("subtitles_burned_in") is not True:
+        issues.append({"code": "subtitles_not_burned_in", "message": "Requested subtitles were not burned into the final video"})
+
+    video_duration = _probe_media_duration_seconds(video_path) if video_nonempty else 0.0
+    video_width, video_height = _probe_video_dimensions(video_path) if video_nonempty else (0, 0)
+    aspect_ratio = float(video_width) / float(video_height) if video_width > 0 and video_height > 0 else 0.0
+    if video_nonempty and (video_width <= 0 or video_height <= 0):
+        issues.append({"code": "video_dimensions_unavailable", "message": "Final video dimensions could not be verified"})
+    elif video_nonempty:
+        if video_width <= video_height or aspect_ratio < 1.7 or aspect_ratio > 1.85:
+            issues.append(
+                {
+                    "code": "video_not_landscape",
+                    "message": "Desktop manual video must use a landscape 16:9 frame",
+                    "width": video_width,
+                    "height": video_height,
+                }
+            )
+        if video_width < 1280 or video_height < 720:
+            issues.append(
+                {
+                    "code": "video_resolution_too_low",
+                    "message": "Desktop manual video must be at least 1280x720",
+                    "width": video_width,
+                    "height": video_height,
+                }
+            )
+    target_duration = _positive_float(audio.get("mux_target_duration_seconds"))
+    if target_duration <= 0:
+        target_duration = _positive_float(metadata.get("composition_duration_seconds"))
+    duration_drift = abs(video_duration - target_duration) if video_duration > 0 and target_duration > 0 else 0.0
+    duration_tolerance = max(1.0, target_duration * 0.08) if target_duration > 0 else 0.0
+    if duration_drift > duration_tolerance > 0:
+        issues.append(
+            {
+                "code": "duration_drift_exceeded",
+                "message": "Final video duration differs from the target timeline",
+                "drift_seconds": round(duration_drift, 3),
+                "tolerance_seconds": round(duration_tolerance, 3),
+            }
+        )
+
+    return {
+        "status": "failed" if issues and enforced else ("warning" if issues else "passed"),
+        "enforced": enforced,
+        "issues": issues,
+        "video_exists": video_exists,
+        "video_nonempty": video_nonempty,
+        "video_duration_seconds": round(video_duration, 3) if video_duration > 0 else None,
+        "video_width": video_width or None,
+        "video_height": video_height or None,
+        "video_aspect_ratio": round(aspect_ratio, 4) if aspect_ratio > 0 else None,
+        "target_duration_seconds": round(target_duration, 3) if target_duration > 0 else None,
+        "duration_drift_seconds": round(duration_drift, 3) if target_duration > 0 and video_duration > 0 else None,
+        "audio_expected": audio_expected,
+        "audio_status": str(audio.get("status") or "not_requested"),
+        "subtitles_requested": subtitles_requested,
+        "subtitles_burned_in": audio.get("subtitles_burned_in") is True,
+    }
 
 
 def _detect_leading_blank_seconds(
@@ -386,7 +513,13 @@ def _detect_leading_blank_seconds(
                 str(frame_path),
             ]
             try:
-                completed = subprocess.run(args, cwd=str(package_dir), capture_output=True, text=True, timeout=30)
+                completed = run_text_command(
+                    subprocess.run,
+                    args,
+                    cwd=str(package_dir),
+                    capture_output=True,
+                    timeout=30,
+                )
             except Exception:
                 continue
             if completed.returncode != 0 or not frame_path.exists() or frame_path.stat().st_size <= 0:
@@ -435,7 +568,10 @@ def _subtitles_filter(path: Path, *, package_dir: Path) -> str:
     except ValueError:
         filter_path = path.resolve().as_posix().replace(":", "\\:")
     filter_path = filter_path.replace("\\", "/").replace("'", "\\'")
-    style = "FontName=Arial,FontSize=20,Outline=2,Shadow=1,MarginV=36,Alignment=2"
+    style = (
+        "FontName=Malgun Gothic,FontSize=11,PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,Outline=1,Shadow=0,MarginL=70,MarginR=70,MarginV=38,Alignment=2"
+    )
     return f"subtitles='{filter_path}':force_style='{style}'"
 
 
@@ -517,21 +653,14 @@ def _write_hyperframes_composition(
 ) -> Path:
     composition_dir = package_dir / "hyperframes"
     composition_dir.mkdir(parents=True, exist_ok=True)
-    source_video = Path(os.path.relpath(fallback_video, composition_dir)).as_posix()
+    source_suffix = fallback_video.suffix.lower() or ".webm"
+    source_asset = composition_dir / f"source{source_suffix}"
+    if fallback_video.resolve() != source_asset.resolve():
+        shutil.copy2(fallback_video, source_asset)
+    source_video = source_asset.name
     source_preview = Path(os.path.relpath(preview_html, composition_dir)).as_posix()
     captions = _caption_entries(plan, duration_seconds, step_durations)
-    captions_json = json.dumps(captions, ensure_ascii=False).replace("</", "<\\/")
-    slides = []
-    for index, step in enumerate(plan.get("steps", []), start=1):
-        slides.append(
-            f"""
-            <section class="scene" data-step-id="{_escape(str(step.get('id', index)))}">
-              <p class="kicker">Step {index:02d}</p>
-              <h2>{_escape(str(step.get('title', '단계')))}</h2>
-              <p>{_escape(str(step.get('caption', '')))}</p>
-            </section>
-            """
-        )
+    step_count = len([step for step in plan.get("steps", []) if isinstance(step, dict)])
     html = f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -539,68 +668,18 @@ def _write_hyperframes_composition(
   <meta name="viewport" content="width=1920, height=1080" />
   <title>Manual Video Agent HyperFrames Composition</title>
   <style>
-    body {{ margin: 0; width: 1920px; height: 1080px; overflow: hidden; font-family: Pretendard, Inter, system-ui, sans-serif; background: #f7f9fc; color: #050816; }}
-    [data-composition-id] {{ width: 1920px; height: 1080px; display: grid; grid-template-columns: 1fr 440px; gap: 0; background: linear-gradient(135deg, #f8fbff, #eef4ff); }}
-    .stage {{ position: relative; margin: 54px 0 54px 54px; border: 1px solid #d8e0ec; border-radius: 8px; overflow: hidden; background: #ffffff; box-shadow: 0 30px 86px rgba(17,24,39,.16); }}
-    .manual-source-video {{ width: 100%; height: 100%; object-fit: cover; display: block; background: #ffffff; }}
-    .manual-video-pointer {{ position: absolute; right: 116px; bottom: 108px; width: 28px; height: 28px; pointer-events: none; filter: drop-shadow(0 8px 16px rgba(17,24,39,.32)); }}
-    .manual-video-pointer::before {{ content: ""; position: absolute; left: 0; top: 0; width: 0; height: 0; border-left: 22px solid #111827; border-top: 13px solid transparent; border-bottom: 13px solid transparent; transform: rotate(-34deg); transform-origin: 0 50%; }}
-    .manual-video-pointer::after {{ content: ""; position: absolute; left: 14px; top: 14px; width: 10px; height: 10px; border-radius: 999px; background: #21d4fd; border: 2px solid #fff; box-shadow: 0 0 0 7px rgba(33,212,253,.18); }}
-    .manual-video-caption {{ position: absolute; left: 48px; right: 48px; bottom: 42px; z-index: 6; display: grid; gap: 8px; padding: 20px 24px; border: 1px solid rgba(255,255,255,.62); border-radius: 8px; background: rgba(5,8,22,.82); color: #fff; box-shadow: 0 24px 70px rgba(5,8,22,.38); backdrop-filter: blur(10px); }}
-    .manual-video-caption-title {{ margin: 0; color: #21d4fd; font-size: 16px; font-weight: 900; line-height: 1.25; }}
-    .manual-video-caption-text {{ margin: 0; font-size: 28px; font-weight: 850; line-height: 1.35; }}
-    aside {{ padding: 54px 42px; border-left: 1px solid #d8e0ec; display: flex; flex-direction: column; gap: 18px; }}
-    aside .dot {{ width: 16px; height: 16px; border-radius: 999px; background: #21d4fd; box-shadow: 0 0 36px rgba(33,212,253,.72); }}
-    aside h1 {{ margin: 14px 0 6px; font-size: 42px; line-height: 1.08; }}
-    aside p {{ margin: 0; font-size: 18px; line-height: 1.5; color: #465161; }}
-    .steps {{ display: grid; gap: 14px; margin-top: 10px; max-height: 730px; overflow: hidden; }}
-    .scene {{ padding: 18px; border: 1px solid #d8e0ec; border-radius: 8px; background: rgba(255,255,255,.9); box-shadow: 0 16px 38px rgba(17,24,39,.07); }}
-    .kicker {{ margin: 0 0 10px; color: #245bff; font-size: 13px; font-weight: 800; }}
-    h2 {{ margin: 0 0 8px; font-size: 22px; line-height: 1.2; }}
-    .scene p:last-child {{ margin: 0; font-size: 16px; line-height: 1.45; color: #465161; }}
+    html, body {{ margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #050816; }}
+    [data-composition-id] {{ width: 1920px; height: 1080px; background: #050816; }}
+    .stage {{ width: 100%; height: 100%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #050816; }}
+    .manual-source-video {{ width: 100%; height: 100%; object-fit: contain; display: block; background: #050816; }}
   </style>
 </head>
-<body>
-  <div data-composition-id="manual-video-agent" data-duration="{duration_seconds:.3f}" data-fps="30">
+<body data-caption-renderer="final-ffmpeg-vtt">
+  <div id="stage" data-composition-id="manual-video-agent" data-start="0" data-width="1920" data-height="1080" data-duration="{duration_seconds:.3f}" data-fps="30" data-no-timeline data-resolution="1920x1080">
     <div class="stage">
-      <video class="manual-source-video" src="{_escape(source_video)}" muted autoplay loop playsinline></video>
-      <div class="manual-video-pointer"></div>
-      <div class="manual-video-caption" aria-live="polite">
-        <p class="manual-video-caption-title">{_escape(captions[0]['title']) if captions else ''}</p>
-        <p class="manual-video-caption-text">{_escape(captions[0]['caption']) if captions else ''}</p>
-      </div>
+      <video class="manual-source-video clip" data-start="0" data-duration="{duration_seconds:.3f}" data-track-index="0" src="{_escape(source_video)}" muted autoplay playsinline></video>
     </div>
-    <aside>
-      <div class="dot"></div>
-      <h1>Manual Video Agent</h1>
-      <p>Playwright 녹화 영상을 HyperFrames composition의 1차 소스로 사용합니다.</p>
-      <p>Source: {_escape(source_preview)}</p>
-      <div class="steps">{''.join(slides)}</div>
-    </aside>
   </div>
-  <script>
-    const manualVideoCaptions = {captions_json};
-    const updateManualVideoCaption = () => {{
-      const video = document.querySelector('.manual-source-video');
-      const title = document.querySelector('.manual-video-caption-title');
-      const text = document.querySelector('.manual-video-caption-text');
-      if (!video || !title || !text || !manualVideoCaptions.length) return;
-      const duration = Number(video.duration || {duration_seconds:.3f}) || {duration_seconds:.3f};
-      const current = Number(video.currentTime || 0) % Math.max(duration, 0.1);
-      const active = manualVideoCaptions.find((item) => current >= item.start && current < item.end)
-        || manualVideoCaptions[manualVideoCaptions.length - 1];
-      title.textContent = active.title || '';
-      text.textContent = active.caption || active.title || '';
-    }};
-    const video = document.querySelector('.manual-source-video');
-    if (video) {{
-      video.addEventListener('loadedmetadata', updateManualVideoCaption);
-      video.addEventListener('timeupdate', updateManualVideoCaption);
-      video.addEventListener('play', updateManualVideoCaption);
-      window.setInterval(updateManualVideoCaption, 250);
-      updateManualVideoCaption();
-    }}
-  </script>
 </body>
 </html>"""
     (composition_dir / "index.html").write_text(html, encoding="utf-8")
@@ -614,7 +693,9 @@ def _write_hyperframes_composition(
                 "duration_seconds": duration_seconds,
                 "duration_source": duration_source,
                 "captions": captions,
-                "steps": len(slides),
+                "caption_rendering": "final-ffmpeg-vtt",
+                "resolution": "1920x1080",
+                "steps": step_count,
             },
             ensure_ascii=False,
             indent=2,
@@ -622,6 +703,19 @@ def _write_hyperframes_composition(
         encoding="utf-8",
     )
     return composition_dir
+
+
+def _quality_first_hyperframes_command(command: list[str]) -> list[str]:
+    updated = list(command)
+    options = [
+        ("--resolution", "--resolution=landscape"),
+        ("--quality", "--quality=high"),
+        ("--video-frame-format", "--video-frame-format=png"),
+    ]
+    for prefix, value in options:
+        if not any(str(item) == prefix or str(item).startswith(f"{prefix}=") for item in updated):
+            updated.append(value)
+    return updated
 
 
 def _caption_entries(plan: dict[str, Any], duration_seconds: float, step_durations: list[float]) -> list[dict[str, Any]]:
@@ -662,6 +756,14 @@ def _requires_windows_shell(args: list[str]) -> bool:
 
 
 def _write_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    video_value = metadata.get("video") or metadata.get("fallback_video") or ""
+    video_path = Path(str(video_value)) if video_value else path.parent / "missing-video"
+    metadata["quality"] = _build_render_quality_report(
+        video_path,
+        metadata,
+        path.parent,
+        enforced=bool(metadata.get("quality_enforced")),
+    )
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 

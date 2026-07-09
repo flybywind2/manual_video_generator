@@ -4,11 +4,21 @@ import base64
 import json
 import mimetypes
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.app.action_safety import is_disallowed_click_texts
+from backend.app.adapters.page_agent import decide_page_agent_action, enrich_page_agent_observation
+from backend.app.adapters.llm_contracts import (
+    DOM_BROWSER_SYSTEM_PROMPT,
+    VLM_BROWSER_SYSTEM_PROMPT,
+    apply_json_response_format,
+    apply_ollama_generation_controls,
+    call_metrics,
+)
+from backend.app.adapters.browser_quality import compact_history, compact_observation, validate_browser_action
 from backend.app.adapters.planner import post_json
 from backend.app.config import AppSettings
 from backend.app.llm_logging import record_llm_response
@@ -58,11 +68,18 @@ def decide_browser_agent_action(
         }
     if _has_login_blocker(observation):
         return {"status": "blocked", "type": "finish", "reason": "login_required"}
+    quality_first = str(getattr(settings, "browser_decision_policy", "balanced") or "balanced") == "quality_first"
+    if getattr(settings, "enable_page_agent", False):
+        observation = enrich_page_agent_observation(observation)
+        if not quality_first:
+            page_agent_action = decide_page_agent_action(request, observation, history, step_index=step_index)
+            if page_agent_action.get("status") == "ok":
+                return page_agent_action
     post = post_json if http_post is None else http_post
     vlm_error = ""
     if settings.vlm.is_configured and _screenshot_path_from_observation(observation):
         try:
-            return _decide_vlm_browser_action(
+            vlm_action = _decide_vlm_browser_action(
                 request,
                 settings,
                 observation,
@@ -71,6 +88,36 @@ def decide_browser_agent_action(
                 post=post,
                 package_dir=package_dir,
             )
+            if not quality_first:
+                return vlm_action
+            validation_errors = validate_browser_action(vlm_action, request, observation, history)
+            if not validation_errors:
+                vlm_action.update({"validation_status": "ok", "vlm_attempt": 1, "repair_applied": False})
+                return vlm_action
+            repaired_action = _decide_vlm_browser_action(
+                request,
+                settings,
+                observation,
+                history,
+                step_index=step_index,
+                post=post,
+                package_dir=package_dir,
+                validation_errors=validation_errors,
+                previous_action=vlm_action,
+                attempt=2,
+            )
+            repair_errors = validate_browser_action(repaired_action, request, observation, history)
+            if not repair_errors:
+                repaired_action.update(
+                    {
+                        "source": "browser-agent-vlm-repair",
+                        "validation_status": "ok",
+                        "vlm_attempt": 2,
+                        "repair_applied": True,
+                    }
+                )
+                return repaired_action
+            vlm_error = f"VlmValidationError: {','.join(repair_errors)}"
         except Exception as exc:  # noqa: BLE001 - DOM LLM/local fallback keeps the agent usable when VLM is unavailable.
             if getattr(settings, "strict_mode", False):
                 raise
@@ -92,28 +139,14 @@ def decide_browser_agent_action(
 
     url = f"{settings.llm.base_url.rstrip('/')}/chat/completions"
     headers = settings.llm.chat_headers()
+    compacted_observation = compact_observation(observation)
+    compacted_history = compact_history(history)
     payload = {
         "model": settings.llm.model,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a browser automation agent for an internal system manual video. "
-                    "Inspect the current Playwright page observation, the augmented agent brief, and the recent history. "
-                    "Choose exactly one next safe action that moves the user objective forward. "
-                    "Each turn will be executed as observe -> act -> verify, so choose an action that can be verified from the next page state. "
-                    "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
-                    "Use fill_by_label only with provided input_values; if the visible field label differs from the input key, map the closest field to the value. "
-                    "Use click_by_text only for navigation/search/detail/read/send actions listed in safe_click_intents or clearly required by the objective. "
-                    "Use click_by_selector when the user explicitly provides a CSS selector/class/id or the observation includes a reliable selector for the intended element. "
-                    "If a modal or popup is visible and the objective mentions checking or closing it, close/confirm that modal before continuing with later work. "
-                    "Use press_key only for Enter after a chat/search input has already been filled and needs submission. "
-                    "If the previous action failed, do not repeat the same label/text; pick another visible candidate or finish with a clear reason. "
-                    "Capture meaningful milestones after data entry, after search/send, and before finish. "
-                    "Finish only after success_criteria is likely satisfied or a login/blocker prevents progress. "
-                    "Never click optional feature toggles, tool switches, model/provider selectors, or web search/browsing controls. "
-                    "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
-                ),
+                "content": DOM_BROWSER_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
@@ -127,9 +160,11 @@ def decide_browser_agent_action(
                         "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
                         "input_values": request.input_values,
                         "agent_brief": getattr(request, "agent_brief", {}) or {},
-                        "observation": observation,
-                        "history": history[-8:],
-                        "recent_failures": [item for item in history[-8:] if item.get("status") in {"failed", "blocked", "degraded"}],
+                        "observation": compacted_observation,
+                        "history": compacted_history,
+                        "recent_failures": [
+                            item for item in compacted_history if item.get("status") in {"failed", "blocked", "degraded"}
+                        ],
                         "output_schema": {
                             "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
                             "label": "field label for fill_by_label",
@@ -148,7 +183,10 @@ def decide_browser_agent_action(
         "temperature": 0.1,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
+    apply_json_response_format(payload, settings.llm)
+    apply_ollama_generation_controls(payload, settings.llm, max_tokens=350)
     try:
+        started_at = time.perf_counter()
         response = post(url, headers, payload, settings.llm_timeout_seconds)
         content = response["choices"][0]["message"]["content"]
         record_llm_response(
@@ -158,8 +196,26 @@ def decide_browser_agent_action(
             content=content,
             terminal_enabled=settings.enable_terminal_logs,
             package_dir=package_dir,
+            metrics=call_metrics(
+                payload,
+                response,
+                started_at,
+                decision_policy=str(getattr(settings, "browser_decision_policy", "balanced") or "balanced"),
+            ),
         )
         action = _normalize_browser_agent_action(_parse_json_content(content), request)
+        if quality_first and action.get("status") == "ok":
+            validation_errors = validate_browser_action(action, request, observation, history)
+            if validation_errors:
+                action = _decide_local_browser_action(
+                    request,
+                    observation,
+                    history,
+                    step_index=step_index,
+                    source="browser-agent-local-fallback",
+                )
+                action["validation_errors"] = validation_errors
+                action["llm_error"] = f"BrowserActionValidationError: {','.join(validation_errors)}"
         if action.get("status") == "failed":
             normalization_error = str(action.get("reason") or "llm_action_normalization_failed")
             action = _decide_local_browser_action(
@@ -198,6 +254,9 @@ def _decide_vlm_browser_action(
     step_index: int,
     post: HttpPost,
     package_dir: Path | None,
+    validation_errors: list[str] | None = None,
+    previous_action: dict[str, Any] | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     screenshot_path = _screenshot_path_from_observation(observation)
     if not screenshot_path:
@@ -229,7 +288,15 @@ def _decide_vlm_browser_action(
                 "content": [
                     {
                         "type": "text",
-                        "text": _vlm_prompt_text(request, settings, observation, history, step_index=step_index),
+                        "text": _vlm_prompt_text(
+                            request,
+                            settings,
+                            observation,
+                            history,
+                            step_index=step_index,
+                            validation_errors=validation_errors,
+                            previous_action=previous_action,
+                        ),
                     },
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ],
@@ -237,6 +304,9 @@ def _decide_vlm_browser_action(
         ],
         "temperature": 0.1,
     }
+    apply_json_response_format(payload, settings.vlm)
+    apply_ollama_generation_controls(payload, settings.vlm, max_tokens=350)
+    started_at = time.perf_counter()
     response = post(url, headers, payload, settings.llm_timeout_seconds)
     content = response["choices"][0]["message"]["content"]
     record_llm_response(
@@ -246,6 +316,13 @@ def _decide_vlm_browser_action(
         content=content,
         terminal_enabled=settings.enable_terminal_logs,
         package_dir=package_dir,
+        metrics=call_metrics(
+            payload,
+            response,
+            started_at,
+            attempt=attempt,
+            decision_policy=str(getattr(settings, "browser_decision_policy", "balanced") or "balanced"),
+        ),
     )
     action = _normalize_browser_agent_action(_parse_json_content(content), request)
     action["source"] = "browser-agent-vlm"
@@ -276,16 +353,10 @@ def _vlm_prompt_text(
     history: list[dict[str, Any]],
     *,
     step_index: int,
+    validation_errors: list[str] | None = None,
+    previous_action: dict[str, Any] | None = None,
 ) -> str:
-    instructions = (
-        "You are a vision-capable browser automation agent for an internal system manual video. "
-        "Use the screenshot first, then cross-check the DOM observation and recent history. "
-        "Choose exactly one next safe action that can be executed by MCP. "
-        "Return JSON only. Allowed types: fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish. "
-        "Prefer click_by_selector when the screenshot target matches an observation selector or the user provided a CSS selector/class/id. "
-        "Use fill_by_label for visible input fields using provided input_values. "
-        "Never choose destructive or write actions such as save, submit, delete, approve, reject, create, update, register."
-    )
+    instructions = VLM_BROWSER_SYSTEM_PROMPT
     context = {
         "step_index": step_index,
         "request_text": request.request_text,
@@ -295,8 +366,8 @@ def _vlm_prompt_text(
         "login_mode": str(getattr(getattr(settings, "login", None), "mode", "") or ""),
         "input_values": request.input_values,
         "agent_brief": getattr(request, "agent_brief", {}) or {},
-        "observation": _vlm_safe_observation(observation),
-        "history": history[-8:],
+        "observation": compact_observation(_vlm_safe_observation(observation)),
+        "history": compact_history(history),
         "output_schema": {
             "type": "fill_by_label|click_by_text|click_by_selector|press_key|wait|capture_step|finish",
             "label": "field label for fill_by_label",
@@ -308,6 +379,12 @@ def _vlm_prompt_text(
             "reason": "short Korean reason",
         },
     }
+    if validation_errors:
+        context["repair"] = {
+            "validation_errors": validation_errors,
+            "previous_action": previous_action or {},
+            "instruction": "검증 오류를 모두 해결한 다른 행동 하나를 반환한다.",
+        }
     return f"{instructions}\n\nCONTEXT_JSON:\n{json.dumps(context, ensure_ascii=False)}"
 
 
@@ -324,6 +401,11 @@ def _vlm_safe_observation(observation: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[str, Any]:
+    if not data.get("type") and not data.get("action"):
+        nested_types = [key for key in _ALLOWED_ACTION_TYPES if isinstance(data.get(key), dict)]
+        if len(nested_types) == 1:
+            nested_type = nested_types[0]
+            data = {**data[nested_type], "type": nested_type}
     action_type = str(data.get("type") or data.get("action") or "").strip().lower()
     if not action_type and isinstance(data.get("output_schema"), dict):
         action_type = str(data["output_schema"].get("type") or "").strip().lower()
