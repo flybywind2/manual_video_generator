@@ -367,6 +367,7 @@ def test_doctor_script_emits_machine_readable_json_contract():
         "ffmpeg",
         "playwright_browsers",
         "hf_cache",
+        "supertonic_cache",
         "corp_ca",
         "onedrive_path",
         "long_paths",
@@ -786,6 +787,19 @@ def test_smoke_script_supports_live_browser_and_output_smoke_dir():
     assert '"uvicorn", "backend.app.main:app"' in script
 
 
+def test_smoke_live_browser_uses_isolated_port_process_and_app_identity_contract():
+    script = Path("scripts/smoke.ps1").read_text(encoding="utf-8")
+
+    assert "[int]$Port = 0" in script
+    assert "System.Net.Sockets.TcpListener" in script
+    assert "$server.HasExited" in script
+    assert "/openapi.json" in script
+    assert '"Manual Video Agent"' in script
+    assert '"--port", ([string]$livePort)' in script
+    assert 'target_url="$liveBaseUrl/sample"' in script
+    assert '127.0.0.1:8000/api/health' not in script
+
+
 def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp_path: Path):
     output_dir = tmp_path / "manual-output"
     env = os.environ.copy()
@@ -812,3 +826,85 @@ def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp
     assert "MANUAL_AGENT_DEP_TICKET=<redacted>" in env_text
     assert "super-secret" not in env_text
     assert "credential:SECRET" not in env_text
+
+
+def test_doctor_collect_redacts_all_non_allowlisted_manual_agent_identity_and_auth_values(tmp_path: Path):
+    output_dir = tmp_path / "manual-output"
+    env = os.environ.copy()
+    env.update(
+        {
+            "MANUAL_AGENT_OUTPUT_DIR": str(output_dir),
+            "MANUAL_AGENT_BROWSER_CHANNEL": "msedge",
+            "MANUAL_AGENT_LOGIN_USERNAME": "employee.one",
+            "MANUAL_AGENT_USER_ID": "E123456",
+            "MANUAL_AGENT_BROWSER_COOKIE": "session-cookie-value",
+            "MANUAL_AGENT_SESSION": "session-value",
+            "MANUAL_AGENT_AUTH_HEADER": "Bearer auth-value",
+            "MANUAL_AGENT_CREDENTIAL": "credential-value",
+        }
+    )
+
+    _powershell_script("doctor.ps1", "-Collect", env=env)
+
+    [archive_path] = list((output_dir / "diagnostics").glob("*.zip"))
+    with zipfile.ZipFile(archive_path) as archive:
+        env_text = archive.read("environment.redacted.txt").decode("utf-8-sig")
+    assert f"MANUAL_AGENT_OUTPUT_DIR={output_dir}" in env_text
+    assert "MANUAL_AGENT_BROWSER_CHANNEL=msedge" in env_text
+    for name in (
+        "MANUAL_AGENT_LOGIN_USERNAME",
+        "MANUAL_AGENT_USER_ID",
+        "MANUAL_AGENT_BROWSER_COOKIE",
+        "MANUAL_AGENT_SESSION",
+        "MANUAL_AGENT_AUTH_HEADER",
+        "MANUAL_AGENT_CREDENTIAL",
+    ):
+        assert f"{name}=<redacted>" in env_text
+    for sensitive_value in (
+        "employee.one",
+        "E123456",
+        "session-cookie-value",
+        "session-value",
+        "Bearer auth-value",
+        "credential-value",
+    ):
+        assert sensitive_value not in env_text
+
+
+def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_path: Path):
+    cache = tmp_path / "supertonic3"
+    onnx = cache / "onnx"
+    onnx.mkdir(parents=True)
+    for model in (
+        "duration_predictor.onnx",
+        "text_encoder.onnx",
+        "vector_estimator.onnx",
+        "vocoder.onnx",
+    ):
+        (onnx / model).write_bytes(b"fixture")
+    env = os.environ.copy()
+    env["SUPERTONIC_CACHE_DIR"] = str(cache)
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("doctor.ps1", "-Json", env=env)
+
+    checks = json.loads(completed.stdout)
+    check = next(item for item in checks if item["name"] == "supertonic_cache")
+    assert check["status"] == "PASS"
+    assert str(cache) in check["message"]
+
+
+def test_doctor_supertonic_cache_warning_uses_current_preload_guidance(tmp_path: Path):
+    cache = tmp_path / "missing-supertonic3"
+    env = os.environ.copy()
+    env["SUPERTONIC_CACHE_DIR"] = str(cache)
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("doctor.ps1", "-Json", env=env)
+
+    checks = json.loads(completed.stdout)
+    check = next(item for item in checks if item["name"] == "supertonic_cache")
+    assert check["status"] == "WARN"
+    assert "SUPERTONIC_CACHE_DIR" in check["action"]
+    assert "preload" in check["action"].lower()
+    assert "MeloTTS" not in check["action"]

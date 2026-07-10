@@ -1,13 +1,31 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [switch]$SkipTests,
-    [switch]$LiveBrowser
+    [switch]$LiveBrowser,
+    [ValidateRange(0, 65535)]
+    [int]$Port = 0
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet
 $pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 Set-Location $Root
+
+function Get-AvailableLoopbackPort {
+    param([int]$RequestedPort)
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $RequestedPort)
+    try {
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } catch {
+        if ($RequestedPort -gt 0) {
+            throw "Requested loopback port $RequestedPort is unavailable."
+        }
+        throw "Unable to allocate an available loopback port."
+    } finally {
+        $listener.Stop()
+    }
+}
 
 Write-Host "== Doctor =="
 $powershellExecutable = (Get-Process -Id $PID).Path
@@ -28,6 +46,8 @@ Invoke-CheckedNativeCommand `
 
 Write-Host "== Pipeline smoke =="
 $captureBrowser = if ($LiveBrowser) { "True" } else { "False" }
+$livePort = if ($LiveBrowser) { Get-AvailableLoopbackPort -RequestedPort $Port } else { 0 }
+$liveBaseUrl = if ($LiveBrowser) { "http://127.0.0.1:$livePort" } else { "http://127.0.0.1" }
 $smoke = @"
 from pathlib import Path
 from backend.app.pipeline import PipelineInput, create_pipeline_draft, continue_pipeline_draft
@@ -36,7 +56,7 @@ base = Path("output") / "smoke"
 draft = create_pipeline_draft(
     PipelineInput(
         request_text="MES LOT lookup smoke",
-        target_url="http://127.0.0.1:8000/sample",
+        target_url="$liveBaseUrl/sample",
         role="operator",
         completion_condition="detail panel visible",
         input_values={"LOT": "LOT-001"},
@@ -54,15 +74,23 @@ if ($LiveBrowser) {
     $serverOut = Join-Path $env:MANUAL_AGENT_OUTPUT_DIR "smoke-server.out.log"
     $serverErr = Join-Path $env:MANUAL_AGENT_OUTPUT_DIR "smoke-server.err.log"
     $serverArguments = [object[]]@($pythonRuntime.arguments) + @(
-        "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8000"
+        "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", ([string]$livePort)
     )
     $server = Start-Process -FilePath ([string]$pythonRuntime.executable) -ArgumentList $serverArguments -WorkingDirectory $Root -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -WindowStyle Hidden -PassThru
     try {
         $deadline = (Get-Date).AddSeconds(30)
         do {
+            if ($server.HasExited) {
+                $server.Refresh()
+                throw "Live smoke app process exited before readiness with exit code $($server.ExitCode)."
+            }
             try {
-                $response = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/api/health" -TimeoutSec 2
-                if ($response.StatusCode -eq 200) { $ready = $true; break }
+                $health = Invoke-RestMethod "$liveBaseUrl/api/health" -TimeoutSec 2
+                $openApi = Invoke-RestMethod "$liveBaseUrl/openapi.json" -TimeoutSec 2
+                if ($health.status -eq "ok" -and $openApi.info.title -eq "Manual Video Agent") {
+                    $ready = $true
+                    break
+                }
             } catch {
                 Start-Sleep -Milliseconds 500
             }
@@ -71,6 +99,10 @@ if ($LiveBrowser) {
             Get-Content -Path $serverErr -Tail 80
             throw "Local app did not become ready for live browser smoke."
         }
+        if ($server.HasExited) {
+            $server.Refresh()
+            throw "Live smoke app process exited after readiness with exit code $($server.ExitCode)."
+        }
         $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")
         $manifest = Invoke-CheckedNativeCommand `
             -Executable ([string]$pythonRuntime.executable) `
@@ -78,7 +110,10 @@ if ($LiveBrowser) {
             -Operation "Pipeline smoke" `
             -InputObject $smoke
     } finally {
-        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+        if ($server -and -not $server.HasExited) {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            $server.WaitForExit(5000) | Out-Null
+        }
     }
 } else {
     $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")

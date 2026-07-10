@@ -659,13 +659,20 @@ Set-Location C:\AppBundle\manualgen
 .\scripts\start.ps1
 ```
 
-`doctor.ps1`는 Python이 정확히 3.13.14인지 확인하고, Node/npm/npx, FFmpeg, Playwright browser cache, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 다른 Python이면 경고가 아니라 `FAIL`이며 사내 배포를 진행하지 않습니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
+`doctor.ps1`는 Python이 정확히 3.13.14인지 확인하고, Node/npm/npx, FFmpeg, Playwright browser cache, Supertonic 필수 ONNX 모델, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 다른 Python이면 경고가 아니라 `FAIL`이며 사내 배포를 진행하지 않습니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
 
 ```powershell
 .\scripts\doctor.ps1 -Collect
 ```
 
-진단 zip은 `output/diagnostics/` 아래에 생성되고, 비밀로 보이는 환경값은 redact됩니다.
+진단 zip은 `output/diagnostics/` 아래에 생성됩니다. 운영 경로와 명시적으로 허용한 비민감 설정만 원문으로 보존하고, 사용자 ID, 로그인 이름, cookie, session, auth, credential을 포함한 나머지 `MANUAL_AGENT_*` 값은 모두 `<redacted>`로 기록합니다.
+
+실제 브라우저까지 확인하는 smoke는 사용 가능한 loopback 포트를 자동 할당하고, 새로 시작한 프로세스와 `Manual Video Agent` OpenAPI 식별값을 함께 검증합니다. 특정 포트가 필요한 경우 비어 있는 포트만 명시할 수 있습니다.
+
+```powershell
+.\scripts\smoke.ps1 -LiveBrowser -SkipTests
+.\scripts\smoke.ps1 -LiveBrowser -SkipTests -Port 18080
+```
 
 ### 오프라인 번들 생성
 

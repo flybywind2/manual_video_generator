@@ -124,7 +124,31 @@ $hfHome = $env:HF_HOME
 if (Test-Path $hfHome) {
     Add-Check "hf_cache" "PASS" $hfHome
 } else {
-    Add-Check "hf_cache" "WARN" "$hfHome missing" "Needed before enabling MeloTTS in restricted networks."
+    Add-Check "hf_cache" "WARN" "$hfHome missing" "Preload this cache only for adapters that use Hugging Face assets in restricted networks."
+}
+
+$supertonicCache = if ($env:SUPERTONIC_CACHE_DIR) {
+    $env:SUPERTONIC_CACHE_DIR
+} else {
+    Join-Path $Root "runtime\supertonic3"
+}
+$supertonicModels = @(
+    "duration_predictor.onnx",
+    "text_encoder.onnx",
+    "vector_estimator.onnx",
+    "vocoder.onnx"
+)
+$missingSupertonicModels = @(
+    $supertonicModels | Where-Object { -not (Test-Path (Join-Path $supertonicCache "onnx\$_") -PathType Leaf) }
+)
+if ($missingSupertonicModels.Count -eq 0) {
+    Add-Check "supertonic_cache" "PASS" "$supertonicCache (required ONNX models ready)"
+} else {
+    Add-Check `
+        "supertonic_cache" `
+        "WARN" `
+        "$supertonicCache missing: $($missingSupertonicModels -join ', ')" `
+        "Preload the Supertonic model into SUPERTONIC_CACHE_DIR on a connected build PC."
 }
 
 if (-not $pythonRuntime.valid) {
@@ -162,10 +186,35 @@ if ($Collect) {
     $diag = Join-Path $diagRoot $stamp
     New-Item -ItemType Directory -Force -Path $diag | Out-Null
     $checks | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $diag "doctor.json")
-    Get-ChildItem Env: | Where-Object { $_.Name -like "MANUAL_AGENT_*" -or $_.Name -in @("PLAYWRIGHT_BROWSERS_PATH", "HF_HOME", "NPM_CONFIG_CACHE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS") } |
+    $safeManualAgentVariables = @(
+        "MANUAL_AGENT_BROWSER_CHANNEL",
+        "MANUAL_AGENT_BUNDLE_ROOT",
+        "MANUAL_AGENT_ENABLE_BROWSER_AGENT",
+        "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER",
+        "MANUAL_AGENT_ENV_FILE",
+        "MANUAL_AGENT_OUTPUT_DIR",
+        "MANUAL_AGENT_PYTHON",
+        "MANUAL_AGENT_RENDER_POLICY",
+        "MANUAL_AGENT_TTS_PROVIDER"
+    )
+    $safeRuntimeVariables = @(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "HF_HOME",
+        "SUPERTONIC_CACHE_DIR",
+        "NPM_CONFIG_CACHE",
+        "REQUESTS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS"
+    )
+    Get-ChildItem Env: | Where-Object { $_.Name -like "MANUAL_AGENT_*" -or $_.Name -in $safeRuntimeVariables } |
         ForEach-Object {
-            $value = $_.Value
-            if ($_.Name -match "KEY|SECRET|TOKEN|TICKET|PASSWORD") { $value = "<redacted>" }
+            $value = if ($_.Name -like "MANUAL_AGENT_*" -and $_.Name -notin $safeManualAgentVariables) {
+                "<redacted>"
+            } else {
+                $_.Value
+            }
+            if ($value -ne "<redacted>" -and $env:USERPROFILE) {
+                $value = $value -replace [regex]::Escape($env:USERPROFILE), "<user-profile>"
+            }
             "$($_.Name)=$value"
         } | Set-Content -Encoding UTF8 (Join-Path $diag "environment.redacted.txt")
     netsh winhttp show proxy | Set-Content -Encoding UTF8 (Join-Path $diag "winhttp-proxy.txt")
