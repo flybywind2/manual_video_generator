@@ -2,10 +2,18 @@ import json
 import os
 import shutil
 import subprocess
+import tomllib
 import zipfile
 from pathlib import Path
 
 import pytest
+
+
+def test_python_runtime_contract_is_exact_3_13_14():
+    assert Path(".python-version").read_text(encoding="utf-8").strip() == "3.13.14"
+
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["requires-python"] == "==3.13.14"
 
 
 def _powershell() -> str:
