@@ -13,4 +13,7 @@ Write-Host "Starting Manual Video Agent on http://$HostName`:$Port"
 $pythonArguments = [object[]]@($ManualAgentPythonRuntime.arguments) + @(
     "-m", "uvicorn", "backend.app.main:app", "--host", $HostName, "--port", [string]$Port
 )
-& ([string]$ManualAgentPythonRuntime.executable) @pythonArguments
+Invoke-CheckedNativeCommand `
+    -Executable ([string]$ManualAgentPythonRuntime.executable) `
+    -Arguments $pythonArguments `
+    -Operation "Uvicorn"

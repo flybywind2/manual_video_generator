@@ -1,7 +1,8 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$EnvFile = "",
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$AllowInvalidPython
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +43,11 @@ Add-PathEntry (Join-Path $Runtime "node")
 Add-PathEntry (Join-Path $Runtime "node\bin")
 Add-PathEntry (Join-Path $Runtime "ffmpeg\bin")
 
-$script:ManualAgentPythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1")
+$script:ManualAgentPythonRuntime = if ($AllowInvalidPython) {
+    . (Join-Path $PSScriptRoot "python_runtime.ps1")
+} else {
+    . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
+}
 $script:ManualAgentPythonExecutable = [string]$script:ManualAgentPythonRuntime.executable
 $script:ManualAgentPythonPrefixArguments = [object[]]@($script:ManualAgentPythonRuntime.arguments)
 

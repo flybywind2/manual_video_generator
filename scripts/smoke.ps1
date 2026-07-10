@@ -10,13 +10,21 @@ $pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 Set-Location $Root
 
 Write-Host "== Doctor =="
-& (Join-Path $PSScriptRoot "doctor.ps1") -Root $Root
+$powershellExecutable = (Get-Process -Id $PID).Path
+$doctorArguments = @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    (Join-Path $PSScriptRoot "doctor.ps1"), "-Root", $Root
+)
+Invoke-CheckedNativeCommand -Executable $powershellExecutable -Arguments $doctorArguments -Operation "Doctor"
 
 Write-Host "== Python imports =="
 $importArguments = [object[]]@($pythonRuntime.arguments) + @(
     "-c", "import fastapi, pydantic, PIL, playwright; print('python runtime ok')"
 )
-& ([string]$pythonRuntime.executable) @importArguments
+Invoke-CheckedNativeCommand `
+    -Executable ([string]$pythonRuntime.executable) `
+    -Arguments $importArguments `
+    -Operation "Python import check"
 
 Write-Host "== Pipeline smoke =="
 $captureBrowser = if ($LiveBrowser) { "True" } else { "False" }
@@ -64,19 +72,33 @@ if ($LiveBrowser) {
             throw "Local app did not become ready for live browser smoke."
         }
         $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")
-        $manifest = $smoke | & ([string]$pythonRuntime.executable) @stdinArguments
+        $manifest = Invoke-CheckedNativeCommand `
+            -Executable ([string]$pythonRuntime.executable) `
+            -Arguments $stdinArguments `
+            -Operation "Pipeline smoke" `
+            -InputObject $smoke
     } finally {
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     }
 } else {
     $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")
-    $manifest = $smoke | & ([string]$pythonRuntime.executable) @stdinArguments
+    $manifest = Invoke-CheckedNativeCommand `
+        -Executable ([string]$pythonRuntime.executable) `
+        -Arguments $stdinArguments `
+        -Operation "Pipeline smoke" `
+        -InputObject $smoke
 }
 $verifyArguments = [object[]]@($pythonRuntime.arguments) + @("tools\verify_package.py", [string]$manifest)
-& ([string]$pythonRuntime.executable) @verifyArguments
+Invoke-CheckedNativeCommand `
+    -Executable ([string]$pythonRuntime.executable) `
+    -Arguments $verifyArguments `
+    -Operation "Package verification"
 
 if (-not $SkipTests) {
     Write-Host "== Pytest =="
     $pytestArguments = [object[]]@($pythonRuntime.arguments) + @("-m", "pytest", "-q", "--basetemp", ".pytest_tmp")
-    & ([string]$pythonRuntime.executable) @pytestArguments
+    Invoke-CheckedNativeCommand `
+        -Executable ([string]$pythonRuntime.executable) `
+        -Arguments $pytestArguments `
+        -Operation "Pytest"
 }

@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $doctorJson = $Json
-. (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet
+. (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet -AllowInvalidPython
 $pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1")
 $Json = $doctorJson
 $Root = (Resolve-Path $Root).Path
@@ -170,9 +170,11 @@ if ($Collect) {
         } | Set-Content -Encoding UTF8 (Join-Path $diag "environment.redacted.txt")
     netsh winhttp show proxy | Set-Content -Encoding UTF8 (Join-Path $diag "winhttp-proxy.txt")
     Compress-Archive -Path (Join-Path $diag "*") -DestinationPath "$diag.zip" -Force
-    Write-Host "Diagnostics collected: $diag.zip"
+    if (-not $Json) {
+        Write-Host "Diagnostics collected: $diag.zip"
+    }
 }
 
-if (($checks | Where-Object { $_.status -eq "FAIL" }).Count -gt 0) {
+if (@($checks | Where-Object { $_.status -eq "FAIL" }).Count -gt 0) {
     exit 1
 }

@@ -11,6 +11,30 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Invoke-CheckedNativeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [object[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)]
+        [string]$Operation,
+        [AllowNull()]
+        [object]$InputObject
+    )
+
+    if ($PSBoundParameters.ContainsKey("InputObject")) {
+        $output = $InputObject | & $Executable @Arguments
+    } else {
+        $output = & $Executable @Arguments
+    }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "$Operation failed with exit code $exitCode."
+    }
+    return $output
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $versionFile = Join-Path $projectRoot ".python-version"
 

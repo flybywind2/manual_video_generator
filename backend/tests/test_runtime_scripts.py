@@ -80,6 +80,31 @@ def _fake_python_3_13_14(tmp_path: Path) -> Path:
     return executable
 
 
+def _controlled_python_3_13_14(tmp_path: Path) -> Path:
+    executable = tmp_path / "controlled python 3.13.14.cmd"
+    executable.write_text(
+        "@echo off\n"
+        "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"platform.python_version\" >nul && (echo 3.13.14 & exit /b 0)\n"
+        "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"backend.app.config\" >nul && exit /b 0\n"
+        "if \"%~1\"==\"-c\" if \"%FAKE_FAIL_STAGE%\"==\"import\" exit /b 31\n"
+        "if \"%~1\"==\"-c\" exit /b 0\n"
+        "if \"%~1\"==\"-\" (echo fake-manifest.json & exit /b 0)\n"
+        "if \"%~1\"==\"tools\\verify_package.py\" if \"%FAKE_FAIL_STAGE%\"==\"verify\" exit /b 32\n"
+        "if \"%~1\"==\"tools\\verify_package.py\" exit /b 0\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"pytest\" if \"%FAKE_FAIL_STAGE%\"==\"pytest\" exit /b 33\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"pytest\" exit /b 0\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"uvicorn\" if \"%FAKE_FAIL_STAGE%\"==\"uvicorn\" exit /b 34\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"uvicorn\" exit /b 0\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"pip\" if \"%FAKE_FAIL_STAGE%\"==\"pip\" exit /b 35\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"pip\" exit /b 0\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"playwright\" if \"%FAKE_FAIL_STAGE%\"==\"playwright\" exit /b 36\n"
+        "if \"%~1\"==\"-m\" if \"%~2\"==\"playwright\" exit /b 0\n"
+        "exit /b 0\n",
+        encoding="utf-8",
+    )
+    return executable
+
+
 def _minimal_bundle_root(tmp_path: Path) -> Path:
     root = tmp_path / "source"
     scripts = root / "scripts"
@@ -294,6 +319,7 @@ def test_runtime_scripts_use_resolved_python_without_bare_operational_invocation
     for name in ("start.ps1", "build_bundle.ps1", "smoke.ps1"):
         script = Path("scripts", name).read_text(encoding="utf-8")
         assert "-Strict" in script, name
+        assert "Invoke-CheckedNativeCommand" in script, name
 
 
 def test_doctor_python_check_reports_structured_exact_version_mismatch():
@@ -314,6 +340,9 @@ def test_doctor_python_check_reports_structured_exact_version_mismatch():
 def test_build_bundle_rejects_mismatch_before_creating_zip(tmp_path: Path):
     dist = tmp_path / "mismatch-bundle"
     root = _minimal_bundle_root(tmp_path)
+    dist.mkdir()
+    (dist / "stale.txt").write_text("stale\n", encoding="utf-8")
+    dist.with_suffix(".zip").write_bytes(b"stale-success")
     env = os.environ.copy()
     env["MANUAL_AGENT_PYTHON"] = sys.executable
 
@@ -329,6 +358,7 @@ def test_build_bundle_rejects_mismatch_before_creating_zip(tmp_path: Path):
 
     assert completed.returncode != 0
     assert "Expected Python 3.13.14" in completed.stderr
+    assert not dist.exists()
     assert not dist.with_suffix(".zip").exists()
 
 
@@ -354,6 +384,211 @@ def test_build_bundle_manifest_records_resolved_python_runtime(tmp_path: Path):
     assert versions["required_python"] == "3.13.14"
     assert versions["python"] == "3.13.14"
     assert Path(versions["python_executable"]) == fake_python
+
+
+def test_build_bundle_excludes_secret_env_files_but_keeps_example(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    (root / ".env").write_text("SECRET=top-secret\n", encoding="utf-8")
+    (root / ".env.local").write_text("SECRET=local\n", encoding="utf-8")
+    (root / "service.env").write_text("SECRET=service\n", encoding="utf-8")
+    (root / "service.env.local").write_text("SECRET=service-local\n", encoding="utf-8")
+    (root / ".ENV").write_text("SECRET=uppercase\n", encoding="utf-8")
+    (root / ".env.example").write_text("SECRET=placeholder\n", encoding="utf-8")
+    nested = root / "backend" / "private"
+    nested.mkdir(parents=True)
+    (nested / ".env.production").write_text("SECRET=prod\n", encoding="utf-8")
+    dist = tmp_path / "bundle"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    manifest = json.loads((dist / "versions.json").read_text(encoding="utf-8-sig"))
+    manifest_paths = {item["path"].replace("\\", "/") for item in manifest["files"]}
+    with zipfile.ZipFile(dist.with_suffix(".zip")) as archive:
+        zip_paths = {name.replace("\\", "/") for name in archive.namelist()}
+    assert ".env.example" in manifest_paths
+    assert any(name.endswith("/.env.example") or name == ".env.example" for name in zip_paths)
+    secret_names = {".env", ".env.local", "service.env", "service.env.local", ".env.production", ".env"}
+    for paths in (manifest_paths, zip_paths):
+        assert not any(Path(name).name.lower() in secret_names for name in paths)
+        assert not any(
+            Path(name).name.lower() != ".env.example"
+            and (Path(name).name.lower().startswith(".env") or Path(name).name.lower().endswith(".env"))
+            for name in paths
+        )
+
+
+@pytest.mark.parametrize("failure_stage", ["pip", "playwright", "npx"])
+def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, failure_stage: str):
+    root = _minimal_bundle_root(tmp_path)
+    dist = tmp_path / f"{failure_stage}-bundle"
+    stale_zip = dist.with_suffix(".zip")
+    stale_zip.write_bytes(b"stale-success")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_controlled_python_3_13_14(tmp_path))
+    env["FAKE_FAIL_STAGE"] = failure_stage
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "npx.cmd").write_text(
+        '@if "%FAKE_FAIL_STAGE%"=="npx" @exit /b 37\n@exit /b 0\n', encoding="utf-8"
+    )
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode != 0
+    expected_exit = {"pip": 35, "playwright": 36, "npx": 37}[failure_stage]
+    assert f"exit code {expected_exit}" in completed.stderr
+    assert not dist.exists()
+    assert not stale_zip.exists()
+
+
+def test_build_bundle_cleans_stale_dist_before_success(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    dist = tmp_path / "clean-bundle"
+    dist.mkdir()
+    (dist / "deleted-source.txt").write_text("stale\n", encoding="utf-8")
+    dist.with_suffix(".zip").write_bytes(b"stale-success")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (dist / "deleted-source.txt").exists()
+    with zipfile.ZipFile(dist.with_suffix(".zip")) as archive:
+        assert not any(name.endswith("deleted-source.txt") for name in archive.namelist())
+
+
+def test_build_bundle_rejects_source_root_as_dist_without_deleting_it(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    marker = root / "keep-me.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(root), env=env
+    )
+
+    assert completed.returncode != 0
+    assert marker.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_build_bundle_rejects_reparse_point_dist_without_touching_target(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    target = tmp_path / "junction-target"
+    target.mkdir()
+    marker = target / "keep-me.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    dist = tmp_path / "bundle-junction"
+    linked = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(dist), str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if linked.returncode != 0:
+        pytest.skip("Windows junction creation is unavailable")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode != 0
+    assert "reparse point" in completed.stderr.lower()
+    assert marker.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_doctor_json_collect_keeps_stdout_parseable(tmp_path: Path):
+    output_dir = tmp_path / "diagnostics-output"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_OUTPUT_DIR"] = str(output_dir)
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("doctor.ps1", "-Json", "-Collect", env=env)
+
+    checks = json.loads(completed.stdout)
+    assert any(item["name"] == "python" for item in checks)
+    assert list((output_dir / "diagnostics").glob("*.zip"))
+
+
+def test_bootstrap_rejects_mismatch_before_creating_output_directory(tmp_path: Path):
+    output_dir = tmp_path / "must-not-exist"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_OUTPUT_DIR"] = str(output_dir)
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("bootstrap.ps1", env=env)
+
+    assert completed.returncode != 0
+    assert not output_dir.exists()
+
+
+def test_start_propagates_uvicorn_native_failure(tmp_path: Path):
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_controlled_python_3_13_14(tmp_path))
+    env["FAKE_FAIL_STAGE"] = "uvicorn"
+
+    completed = _powershell_script("start.ps1", env=env)
+
+    assert completed.returncode != 0
+    assert "Uvicorn failed with exit code 34" in completed.stderr
+
+
+def _smoke_env(tmp_path: Path, failure_stage: str) -> dict[str, str]:
+    browser_dir = tmp_path / "browsers" / "chromium"
+    browser_dir.mkdir(parents=True)
+    (browser_dir / "chrome.exe").write_bytes(b"")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_controlled_python_3_13_14(tmp_path))
+    env["FAKE_FAIL_STAGE"] = failure_stage
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path / "browsers")
+    env["HF_HOME"] = str(tmp_path / "hf-cache")
+    Path(env["HF_HOME"]).mkdir()
+    return env
+
+
+def test_smoke_stops_when_doctor_fails(tmp_path: Path):
+    env = _smoke_env(tmp_path, "")
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path / "missing-browsers")
+
+    completed = _powershell_script("smoke.ps1", "-SkipTests", env=env)
+
+    assert completed.returncode != 0
+    assert "Doctor failed with exit code" in completed.stderr
+    assert "== Python imports ==" not in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "later_marker", "expected_error"),
+    [
+        ("import", "== Pipeline smoke ==", "Python import check failed with exit code 31"),
+        ("verify", "== Pytest ==", "Package verification failed with exit code 32"),
+        ("pytest", None, "Pytest failed with exit code 33"),
+    ],
+)
+def test_smoke_propagates_native_failures(
+    tmp_path: Path, failure_stage: str, later_marker: str | None, expected_error: str
+):
+    env = _smoke_env(tmp_path, failure_stage)
+    completed = _powershell_script("smoke.ps1", env=env)
+
+    assert completed.returncode != 0
+    assert expected_error in completed.stderr
+    if later_marker:
+        assert later_marker not in completed.stdout
 
 
 def test_build_bundle_skip_downloads_creates_manifest_and_zip(tmp_path: Path):
