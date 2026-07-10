@@ -194,7 +194,6 @@ if ($Collect) {
     $diagRoot = Join-Path $env:MANUAL_AGENT_OUTPUT_DIR "diagnostics"
     $diag = Join-Path $diagRoot $stamp
     New-Item -ItemType Directory -Force -Path $diag | Out-Null
-    $checks | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $diag "doctor.json")
     $safeManualAgentVariables = @(
         "MANUAL_AGENT_BROWSER_CHANNEL",
         "MANUAL_AGENT_BUNDLE_ROOT",
@@ -237,45 +236,70 @@ if ($Collect) {
             placeholder = "<redacted:$($_.Name)>"
         })
     }
-    $serializedReplacements = New-Object System.Collections.Generic.List[object]
+    $diagnosticReplacements = @($diagnosticReplacements | Sort-Object { ([string]$_.value).Length } -Descending)
+    $diagnosticReplacementMap = @{}
     foreach ($replacement in $diagnosticReplacements) {
-        $serializedReplacements.Add($replacement)
-        $jsonValue = ([string]$replacement.value | ConvertTo-Json -Compress)
-        if ($jsonValue.Length -ge 2) {
-            $jsonValue = $jsonValue.Substring(1, $jsonValue.Length - 2)
-            if ($jsonValue -ne [string]$replacement.value) {
-                $serializedReplacements.Add([pscustomobject]@{
-                    value = $jsonValue
-                    placeholder = $replacement.placeholder
-                })
-            }
+        if (-not $diagnosticReplacementMap.ContainsKey([string]$replacement.value)) {
+            $diagnosticReplacementMap[[string]$replacement.value] = [string]$replacement.placeholder
         }
     }
-    $diagnosticReplacements = @($serializedReplacements | Sort-Object { ([string]$_.value).Length } -Descending)
+    $diagnosticReplacementPattern = @($diagnosticReplacementMap.Keys |
+        Sort-Object { ([string]$_).Length } -Descending |
+        ForEach-Object { [regex]::Escape([string]$_) }) -join "|"
 
     function Protect-DiagnosticText {
         param([AllowEmptyString()][string]$Text)
-        $protected = $Text
-        foreach ($replacement in $diagnosticReplacements) {
-            $protected = $protected -replace [regex]::Escape([string]$replacement.value), [string]$replacement.placeholder
+        if (-not $diagnosticReplacementPattern -or -not $Text) { return $Text }
+        $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            return [string]$diagnosticReplacementMap[$match.Value]
         }
-        return $protected
+        return [regex]::Replace(
+            $Text,
+            $diagnosticReplacementPattern,
+            $evaluator,
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
     }
+
+    function Protect-DiagnosticValue {
+        param([AllowNull()]$Value)
+        if ($null -eq $Value) { return $null }
+        if ($Value -is [string]) { return Protect-DiagnosticText -Text $Value }
+        if ($Value -is [System.Collections.IDictionary]) {
+            $protectedDictionary = [ordered]@{}
+            foreach ($key in $Value.Keys) {
+                $protectedDictionary[$key] = Protect-DiagnosticValue -Value $Value[$key]
+            }
+            return $protectedDictionary
+        }
+        if ($Value -is [pscustomobject]) {
+            $protectedObject = [ordered]@{}
+            foreach ($property in $Value.PSObject.Properties) {
+                $protectedObject[$property.Name] = Protect-DiagnosticValue -Value $property.Value
+            }
+            return [pscustomobject]$protectedObject
+        }
+        if ($Value -is [System.Collections.IEnumerable]) {
+            return @($Value | ForEach-Object { Protect-DiagnosticValue -Value $_ })
+        }
+        return $Value
+    }
+
+    $protectedChecks = @($checks | ForEach-Object { Protect-DiagnosticValue -Value $_ })
+    $protectedChecks | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $diag "doctor.json")
 
     Get-ChildItem Env: | Where-Object { $_.Name -like "MANUAL_AGENT_*" -or $_.Name -in $safeRuntimeVariables } |
         ForEach-Object {
             $value = if ($_.Name -like "MANUAL_AGENT_*" -and $_.Name -notin $safeManualAgentVariables) {
                 "<redacted:$($_.Name)>"
             } else {
-                $_.Value
+                Protect-DiagnosticText -Text $_.Value
             }
             "$($_.Name)=$value"
         } | Set-Content -Encoding UTF8 (Join-Path $diag "environment.redacted.txt")
-    netsh winhttp show proxy | Set-Content -Encoding UTF8 (Join-Path $diag "winhttp-proxy.txt")
-    Get-ChildItem -Path $diag -File -Recurse | ForEach-Object {
-        $content = Get-Content -Path $_.FullName -Raw -Encoding UTF8
-        Protect-DiagnosticText -Text $content | Set-Content -Path $_.FullName -Encoding UTF8
-    }
+    $proxyText = (netsh winhttp show proxy | Out-String)
+    Protect-DiagnosticText -Text $proxyText | Set-Content -Encoding UTF8 (Join-Path $diag "winhttp-proxy.txt")
     Compress-Archive -Path (Join-Path $diag "*") -DestinationPath "$diag.zip" -Force
     if (-not $Json) {
         Write-Host "Diagnostics collected: $diag.zip"

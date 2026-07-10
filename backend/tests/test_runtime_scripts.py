@@ -932,9 +932,42 @@ def test_doctor_collect_sanitizes_every_text_artifact_before_archive(tmp_path: P
         }
     for name, content in contents.items():
         assert not any(value in content for value in forbidden), name
-    assert isinstance(json.loads(contents["doctor.json"]), list)
-    assert "<user-profile>" in contents["doctor.json"]
+    doctor_checks = json.loads(contents["doctor.json"])
+    assert isinstance(doctor_checks, list)
+    assert any(
+        "<user-profile>" in str(value) for check in doctor_checks for value in check.values()
+    )
     assert "<redacted:MANUAL_AGENT_USER_ID>" in contents["environment.redacted.txt"]
+
+
+def test_doctor_collect_short_username_sanitizes_values_without_corrupting_json_schema(tmp_path: Path):
+    test_profile = tmp_path / "a"
+    root = test_profile / "manual-agent"
+    root.mkdir(parents=True)
+    output_dir = tmp_path / "diagnostics-output"
+    env = os.environ.copy()
+    env.update(
+        {
+            "USERPROFILE": str(test_profile),
+            "USERNAME": "a",
+            "MANUAL_AGENT_OUTPUT_DIR": str(output_dir),
+            "MANUAL_AGENT_USER_ID": "E123456",
+            "MANUAL_AGENT_LOGIN_USERNAME": "a",
+        }
+    )
+
+    _powershell_script("doctor.ps1", "-Root", str(root), "-Collect", env=env)
+
+    [archive_path] = list((output_dir / "diagnostics").glob("*.zip"))
+    with zipfile.ZipFile(archive_path) as archive:
+        doctor_text = archive.read("doctor.json").decode("utf-8-sig")
+    checks = json.loads(doctor_text)
+    assert checks
+    for check in checks:
+        assert {"name", "status", "message", "action"}.issubset(check)
+    assert str(test_profile) not in doctor_text
+    assert "E123456" not in doctor_text
+    assert any("<user-profile>" in str(value) for check in checks for value in check.values())
 
 
 def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_path: Path):
@@ -1023,6 +1056,30 @@ def _start_listener(port: int) -> subprocess.Popen[str]:
     return process
 
 
+def _start_parent_with_child_listener(port: int) -> tuple[subprocess.Popen[str], int]:
+    child_code = (
+        "import socket,time; "
+        "s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); "
+        f"s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(30)"
+    )
+    parent_code = (
+        "import subprocess,sys; "
+        f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}],stdout=subprocess.PIPE,text=True); "
+        "child.stdout.readline(); print(child.pid,flush=True); "
+        "sys.stdin.read(); child.terminate(); child.wait(timeout=5)"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert parent.stdout is not None
+    child_pid = int(parent.stdout.readline().strip())
+    return parent, child_pid
+
+
 def _test_port_owner(port: int, root_process_id: int) -> subprocess.CompletedProcess[str]:
     command = (
         ". .\\scripts\\smoke_port.ps1; "
@@ -1061,3 +1118,37 @@ def test_smoke_port_ownership_distinguishes_spawned_listener_from_competitor():
     assert accepted.stdout.strip().lower() == "true"
     assert rejected.returncode == 0, rejected.stderr
     assert rejected.stdout.strip().lower() == "false"
+
+
+def test_smoke_port_ownership_accepts_descendant_listener_and_cleans_process_tree():
+    if os.name != "nt":
+        pytest.skip("Windows TCP ownership contract")
+    port = _available_loopback_port()
+    parent, child_pid = _start_parent_with_child_listener(port)
+    try:
+        time.sleep(0.2)
+        accepted = _test_port_owner(port, parent.pid)
+        assert accepted.returncode == 0, accepted.stderr
+        assert accepted.stdout.strip().lower() == "true"
+    finally:
+        if parent.stdin:
+            parent.stdin.close()
+        try:
+            parent.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            parent.kill()
+            parent.wait(timeout=5)
+        subprocess.run(
+            ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    assert parent.poll() is not None
+    child_check = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert str(child_pid) not in child_check.stdout
