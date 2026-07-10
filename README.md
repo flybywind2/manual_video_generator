@@ -324,11 +324,10 @@ opencode run --help
 MANUAL_AGENT_ENABLE_OPENCODE=true
 MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json
 MANUAL_AGENT_OPENCODE_AGENT=build
-MANUAL_AGENT_OPENCODE_MODEL=
 MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=600
 ```
 
-OpenCode 어댑터는 각 job 패키지에 `opencode_prompt.md`를 만들고, 그 prompt를 `opencode run` 마지막 인자로 넘깁니다. 기본 prompt는 `hyperframes/index.html`, `hyperframes/hyperframes_manifest.json`, `opencode_notes.md`만 편집 대상으로 제한합니다. 실행 결과는 `opencode_agent.json`에 저장됩니다.
+OpenCode 어댑터는 각 job 패키지에 `opencode_prompt.md`를 만들고, 그 prompt를 `opencode run` 마지막 인자로 넘깁니다. `--model`은 전달하지 않으며 OpenCode 자체 설정의 기본 모델을 사용합니다. 기존 `.env`에 `MANUAL_AGENT_OPENCODE_MODEL`이 남아 있어도 무시됩니다. 기본 prompt는 `hyperframes/index.html`, `hyperframes/hyperframes_manifest.json`, `opencode_notes.md`만 편집 대상으로 제한합니다. 실행 결과는 `opencode_agent.json`에 저장됩니다.
 
 ## 실행 방법
 
@@ -512,7 +511,6 @@ MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND
 MANUAL_AGENT_ENABLE_OPENCODE
 MANUAL_AGENT_OPENCODE_COMMAND
 MANUAL_AGENT_OPENCODE_AGENT
-MANUAL_AGENT_OPENCODE_MODEL
 MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS
 ```
 

@@ -15,7 +15,6 @@
 MANUAL_AGENT_ENABLE_OPENCODE=true
 MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json
 MANUAL_AGENT_OPENCODE_AGENT=
-MANUAL_AGENT_OPENCODE_MODEL=
 
 MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=manifest
 MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
@@ -23,6 +22,8 @@ MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
 MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=false
 MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx skills add heygen-com/hyperframes
 ```
+
+OpenCode 실행에는 `--model`을 전달하지 않습니다. 회사 PC의 OpenCode 설정에 지정된 기본 모델을 그대로 사용하며, 기존 `MANUAL_AGENT_OPENCODE_MODEL` 값은 호환성을 위해 읽기만 하고 실행에서는 무시합니다.
 
 ## 내부 LLM과 OpenCode 역할 분리
 

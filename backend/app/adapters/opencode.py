@@ -42,7 +42,9 @@ def run_opencode_agent(
         "prompt_path": str(prompt_path),
         "cwd": str(package_dir),
         "agent": settings.opencode_agent,
-        "model": settings.opencode_model,
+        "model_source": "opencode-default",
+        "model_override": "",
+        "configured_model_ignored": bool(settings.opencode_model),
     }
     if not settings.enable_opencode:
         metadata["reason"] = "MANUAL_AGENT_ENABLE_OPENCODE is false"
@@ -86,8 +88,6 @@ def _build_command(settings: AppSettings, prompt: str) -> list[str]:
             command[0] = resolved
     if settings.opencode_agent:
         command.extend(["--agent", settings.opencode_agent])
-    if settings.opencode_model:
-        command.extend(["--model", settings.opencode_model])
     command.append(prompt)
     return command
 

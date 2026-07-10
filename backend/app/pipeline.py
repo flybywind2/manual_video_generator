@@ -337,7 +337,8 @@ def _record_runtime_tool_inventory(
         details={
             "command_set": bool(settings.opencode_command),
             "agent_set": bool(settings.opencode_agent),
-            "model_set": bool(settings.opencode_model),
+            "model_source": "opencode-default",
+            "model_override_ignored": bool(settings.opencode_model),
             "timeout_seconds": settings.opencode_timeout_seconds,
         },
     )
@@ -1422,7 +1423,8 @@ def _complete_pipeline_execution(
         details={
             "enabled": settings.enable_opencode,
             "agent_set": bool(settings.opencode_agent),
-            "model_set": bool(settings.opencode_model),
+            "model_source": "opencode-default",
+            "model_override_ignored": bool(settings.opencode_model),
         },
     )
     opencode_result = run_opencode_agent(plan=media_plan, package_dir=dirs.package, settings=settings)
@@ -1438,7 +1440,8 @@ def _complete_pipeline_execution(
         terminal_details={
             "enabled": settings.enable_opencode,
             "agent_set": bool(settings.opencode_agent),
-            "model_set": bool(settings.opencode_model),
+            "model_source": "opencode-default",
+            "model_override_ignored": bool(settings.opencode_model),
         },
     )
 

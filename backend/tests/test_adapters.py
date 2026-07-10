@@ -3929,7 +3929,7 @@ def test_hyperframes_skills_command_runs_when_enabled(tmp_path: Path):
     assert metadata["stdout"] == "skills installed"
 
 
-def test_opencode_agent_runs_prompt_in_package_directory(tmp_path: Path):
+def test_opencode_agent_uses_opencode_default_model_without_model_flag(tmp_path: Path):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_OPENCODE": "true",
@@ -3951,7 +3951,8 @@ def test_opencode_agent_runs_prompt_in_package_directory(tmp_path: Path):
         assert Path(args[0]).name.lower() in {"opencode", "opencode.exe", "opencode.cmd"}
         assert args[1:4] == ["run", "--format", "json"]
         assert "--agent" in args
-        assert "--model" in args
+        assert "--model" not in args
+        assert "openai/gpt-5" not in args
         assert "Manual Video Agent" in args[-1]
         return subprocess.CompletedProcess(args=args, returncode=0, stdout='{"type":"message","text":"ok"}', stderr="")
 
@@ -3966,7 +3967,9 @@ def test_opencode_agent_runs_prompt_in_package_directory(tmp_path: Path):
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["enabled"] is True
     assert metadata["agent"] == "build"
-    assert metadata["model"] == "openai/gpt-5"
+    assert metadata["model_source"] == "opencode-default"
+    assert metadata["model_override"] == ""
+    assert metadata["configured_model_ignored"] is True
     assert metadata["stdout"] == '{"type":"message","text":"ok"}'
 
 
