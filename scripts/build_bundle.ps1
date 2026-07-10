@@ -35,6 +35,27 @@ function Test-IsSecretEnvironmentFile {
         $normalizedName.Contains(".env.")
 }
 
+function Assert-NoReparsePointInPath {
+    param([string]$Target)
+    $fullTarget = [System.IO.Path]::GetFullPath($Target)
+    $pathRoot = [System.IO.Path]::GetPathRoot($fullTarget)
+    $current = $pathRoot
+    $relative = $fullTarget.Substring($pathRoot.Length)
+    $segments = $relative.Split(
+        [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )
+    foreach ($segment in $segments) {
+        $current = Join-Path $current $segment
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Unsafe bundle target: reparse point found in Dist path at $current."
+            }
+        }
+    }
+}
+
 function Assert-SafeBuildTarget {
     param(
         [string]$Target,
@@ -49,13 +70,47 @@ function Assert-SafeBuildTarget {
     if (Test-IsInsidePath -Path $fullSource -Parent $fullTarget) {
         throw "Unsafe bundle target: Dist must not equal or contain the source root."
     }
-    if (Test-Path -LiteralPath $fullTarget) {
-        $targetItem = Get-Item -LiteralPath $fullTarget -Force
-        if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Unsafe bundle target: Dist must not be a reparse point."
+    Assert-NoReparsePointInPath -Target $fullTarget
+    return $fullTarget
+}
+
+$ownershipMarkerName = ".manual-video-agent-bundle-owned"
+$ownershipMarkerContent = "manual-video-agent-bundle:v1"
+
+function Test-BundleOwnership {
+    param([string]$Target)
+    $marker = Join-Path $Target $ownershipMarkerName
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+        return $false
+    }
+    return (Get-Content -LiteralPath $marker -Raw).Trim() -eq $ownershipMarkerContent
+}
+
+function Write-BundleOwnershipMarker {
+    param([string]$Target)
+    $marker = Join-Path $Target $ownershipMarkerName
+    $temporaryMarker = Join-Path $Target "$ownershipMarkerName.tmp.$PID"
+    try {
+        [System.IO.File]::WriteAllText($temporaryMarker, $ownershipMarkerContent, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporaryMarker -Destination $marker -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryMarker) {
+            Remove-Item -LiteralPath $temporaryMarker -Force -ErrorAction SilentlyContinue
         }
     }
-    return $fullTarget
+}
+
+function Clear-OwnedBundleDirectory {
+    param([string]$Target)
+    if (-not (Test-BundleOwnership -Target $Target)) {
+        throw "Refusing to clean bundle Dist without a valid ownership marker: $Target"
+    }
+    Get-ChildItem -LiteralPath $Target -Force |
+        Where-Object { $_.Name -ne $ownershipMarkerName } |
+        Remove-Item -Recurse -Force
+    if (-not (Test-BundleOwnership -Target $Target)) {
+        Write-BundleOwnershipMarker -Target $Target
+    }
 }
 
 function Test-ExcludedSource {
@@ -95,15 +150,9 @@ function Get-Sha256 {
     }
 }
 
+$pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 $Dist = Assert-SafeBuildTarget -Target $Dist -SourceRoot $Root
 $zipPath = "$Dist.zip"
-if (Test-Path -LiteralPath $Dist) {
-    Remove-Item -LiteralPath $Dist -Recurse -Force
-}
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
-$pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 
 $Runtime = Join-Path $Dist "runtime"
 $Wheels = Join-Path $Runtime "wheels"
@@ -111,8 +160,32 @@ $Browsers = Join-Path $Runtime "browsers"
 $NpmCache = Join-Path $Runtime "npm-cache"
 $HfCache = Join-Path $Runtime "hf-cache"
 $buildSucceeded = $false
+$ownershipProven = $false
+$createdByThisRun = $false
 
 try {
+    if (Test-Path -LiteralPath $Dist) {
+        if (-not (Test-Path -LiteralPath $Dist -PathType Container)) {
+            throw "Bundle Dist exists but is not a directory: $Dist"
+        }
+        if (-not (Test-BundleOwnership -Target $Dist)) {
+            throw "Refusing to clean existing bundle Dist without a valid ownership marker: $Dist"
+        }
+        $ownershipProven = $true
+    } else {
+        if (Test-Path -LiteralPath $zipPath) {
+            throw "Refusing to replace bundle zip without a matching owned Dist: $zipPath"
+        }
+        New-Item -ItemType Directory -Path $Dist | Out-Null
+        $createdByThisRun = $true
+        Write-BundleOwnershipMarker -Target $Dist
+        $ownershipProven = $true
+    }
+
+    Clear-OwnedBundleDirectory -Target $Dist
+    if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
+    }
     New-Item -ItemType Directory -Force -Path $Dist, $Runtime, $Wheels, $Browsers, $NpmCache, $HfCache | Out-Null
 
     Write-Host "Copying source files"
@@ -176,12 +249,19 @@ try {
     $buildSucceeded = $true
     Write-Host "Bundle created: $zipPath"
 } finally {
-    if (-not $buildSucceeded) {
-        if (Test-Path -LiteralPath $Dist) {
-            Remove-Item -LiteralPath $Dist -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not $buildSucceeded -and $ownershipProven) {
+        try {
+            Clear-OwnedBundleDirectory -Target $Dist
+        } catch {
+            Write-Warning "Unable to clean owned bundle Dist after failure: $($_.Exception.Message)"
         }
         if (Test-Path -LiteralPath $zipPath) {
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        }
+    } elseif (-not $buildSucceeded -and $createdByThisRun -and (Test-Path -LiteralPath $Dist)) {
+        $remaining = @(Get-ChildItem -LiteralPath $Dist -Force -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) {
+            Remove-Item -LiteralPath $Dist -Force -ErrorAction SilentlyContinue
         }
     }
 }

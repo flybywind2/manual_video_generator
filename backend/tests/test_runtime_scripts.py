@@ -53,6 +53,7 @@ OPERATIONAL_SCRIPTS = (
     "build_bundle.ps1",
     "smoke.ps1",
 )
+BUNDLE_OWNERSHIP_MARKER = ".manual-video-agent-bundle-owned"
 
 
 def _powershell_script(name: str, *arguments: str, env: dict[str, str] | None = None):
@@ -337,11 +338,12 @@ def test_doctor_python_check_reports_structured_exact_version_mismatch():
     assert Path(python_check["executable"]).resolve() == Path(sys.executable).resolve()
 
 
-def test_build_bundle_rejects_mismatch_before_creating_zip(tmp_path: Path):
+def test_build_bundle_rejects_mismatch_without_touching_existing_unmarked_dist(tmp_path: Path):
     dist = tmp_path / "mismatch-bundle"
     root = _minimal_bundle_root(tmp_path)
     dist.mkdir()
-    (dist / "stale.txt").write_text("stale\n", encoding="utf-8")
+    keep = dist / "keep-me.txt"
+    keep.write_text("keep\n", encoding="utf-8")
     dist.with_suffix(".zip").write_bytes(b"stale-success")
     env = os.environ.copy()
     env["MANUAL_AGENT_PYTHON"] = sys.executable
@@ -358,8 +360,29 @@ def test_build_bundle_rejects_mismatch_before_creating_zip(tmp_path: Path):
 
     assert completed.returncode != 0
     assert "Expected Python 3.13.14" in completed.stderr
-    assert not dist.exists()
-    assert not dist.with_suffix(".zip").exists()
+    assert keep.read_text(encoding="utf-8") == "keep\n"
+    assert dist.with_suffix(".zip").read_bytes() == b"stale-success"
+
+
+def test_build_bundle_rejects_valid_runtime_for_existing_unmarked_dist_without_modifying_it(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    dist = tmp_path / "unmarked-bundle"
+    dist.mkdir()
+    keep = dist / "keep-me.txt"
+    keep.write_text("keep\n", encoding="utf-8")
+    stale_zip = dist.with_suffix(".zip")
+    stale_zip.write_bytes(b"stale-success")
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode != 0
+    assert "ownership marker" in completed.stderr.lower()
+    assert keep.read_text(encoding="utf-8") == "keep\n"
+    assert stale_zip.read_bytes() == b"stale-success"
 
 
 def test_build_bundle_manifest_records_resolved_python_runtime(tmp_path: Path):
@@ -384,6 +407,8 @@ def test_build_bundle_manifest_records_resolved_python_runtime(tmp_path: Path):
     assert versions["required_python"] == "3.13.14"
     assert versions["python"] == "3.13.14"
     assert Path(versions["python_executable"]) == fake_python
+    assert (dist / BUNDLE_OWNERSHIP_MARKER).is_file()
+    assert any(item["path"] == BUNDLE_OWNERSHIP_MARKER for item in versions["files"])
 
 
 def test_build_bundle_excludes_secret_env_files_but_keeps_example(tmp_path: Path):
@@ -427,7 +452,13 @@ def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, fai
     root = _minimal_bundle_root(tmp_path)
     dist = tmp_path / f"{failure_stage}-bundle"
     stale_zip = dist.with_suffix(".zip")
-    stale_zip.write_bytes(b"stale-success")
+    initial_env = os.environ.copy()
+    initial_env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+    initial = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=initial_env
+    )
+    assert initial.returncode == 0, initial.stderr
+    (dist / "stale.txt").write_text("stale\n", encoding="utf-8")
     env = os.environ.copy()
     env["MANUAL_AGENT_PYTHON"] = str(_controlled_python_3_13_14(tmp_path))
     env["FAKE_FAIL_STAGE"] = failure_stage
@@ -445,24 +476,28 @@ def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, fai
     assert completed.returncode != 0
     expected_exit = {"pip": 35, "playwright": 36, "npx": 37}[failure_stage]
     assert f"exit code {expected_exit}" in completed.stderr
-    assert not dist.exists()
+    assert dist.is_dir()
+    assert {item.name for item in dist.iterdir()} == {BUNDLE_OWNERSHIP_MARKER}
     assert not stale_zip.exists()
 
 
 def test_build_bundle_cleans_stale_dist_before_success(tmp_path: Path):
     root = _minimal_bundle_root(tmp_path)
     dist = tmp_path / "clean-bundle"
-    dist.mkdir()
-    (dist / "deleted-source.txt").write_text("stale\n", encoding="utf-8")
-    dist.with_suffix(".zip").write_bytes(b"stale-success")
     env = os.environ.copy()
     env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+    initial = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+    assert initial.returncode == 0, initial.stderr
+    (dist / "deleted-source.txt").write_text("stale\n", encoding="utf-8")
 
     completed = _powershell_script(
         "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert (dist / BUNDLE_OWNERSHIP_MARKER).is_file()
     assert not (dist / "deleted-source.txt").exists()
     with zipfile.ZipFile(dist.with_suffix(".zip")) as archive:
         assert not any(name.endswith("deleted-source.txt") for name in archive.namelist())
@@ -509,6 +544,36 @@ def test_build_bundle_rejects_reparse_point_dist_without_touching_target(tmp_pat
     assert completed.returncode != 0
     assert "reparse point" in completed.stderr.lower()
     assert marker.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_build_bundle_rejects_reparse_point_ancestor_without_touching_target(tmp_path: Path):
+    root = _minimal_bundle_root(tmp_path)
+    target = tmp_path / "junction-parent-target"
+    target.mkdir()
+    marker = target / "keep-me.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    junction_parent = tmp_path / "junction-parent"
+    linked = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction_parent), str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if linked.returncode != 0:
+        pytest.skip("Windows junction creation is unavailable")
+    dist = junction_parent / "bundle"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
+
+    completed = _powershell_script(
+        "build_bundle.ps1", "-Root", str(root), "-SkipDownloads", "-Dist", str(dist), env=env
+    )
+
+    assert completed.returncode != 0
+    assert "reparse point" in completed.stderr.lower()
+    assert marker.read_text(encoding="utf-8") == "keep\n"
+    assert not (target / "bundle").exists()
 
 
 def test_doctor_json_collect_keeps_stdout_parseable(tmp_path: Path):
