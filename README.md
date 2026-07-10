@@ -633,6 +633,7 @@ OneDrive, 한글 사용자명 아래의 깊은 경로, 공백이 많은 경로�
 
 ```text
 runtime/
+  python/python.exe # exact Python 3.13.14; python_runtime.ps1 bundled runtime
   browsers/       # PLAYWRIGHT_BROWSERS_PATH
   hf-cache/       # HF_HOME
   supertonic3/    # SUPERTONIC_CACHE_DIR; onnx/, voice_styles/, img/
@@ -643,6 +644,8 @@ config/
   corp-root-ca.pem
 output/
 ```
+
+`python_runtime.ps1`은 명시적으로 설정한 Python 다음으로 `runtime/python/python.exe`를 번들 Python 후보로 탐색하며, 이 파일도 정확히 Python 3.13.14여야 합니다.
 
 앱은 실행 시 `MANUAL_AGENT_BUNDLE_ROOT` 기준으로 `PLAYWRIGHT_BROWSERS_PATH`, `HF_HOME`, `SUPERTONIC_CACHE_DIR`, `NPM_CONFIG_CACHE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` 같은 환경값을 기본 보정합니다. Supertonic 모델은 `HF_HOME`이 아닌 `SUPERTONIC_CACHE_DIR`에서 찾습니다. 기존 프로세스 환경변수가 있으면 그 값을 우선합니다.
 

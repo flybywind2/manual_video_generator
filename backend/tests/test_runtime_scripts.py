@@ -31,6 +31,10 @@ def test_current_docs_target_python_3_13_14_only():
     assert "py -3.13 -m venv .venv" in environment_setup
     assert "py -3.10 -m venv" not in environment_setup
 
+    runtime_layout = _markdown_section(readme, "### 런타임 디렉터리 규칙", "### ")
+    assert "runtime/python/python.exe" in runtime_layout
+    assert "exact Python 3.13.14" in runtime_layout
+
     scenario = Path("test_secnario.md").read_text(encoding="utf-8")
     common_setup = _markdown_section(scenario, "## 공통 준비", "## ")
     assert "Python `3.13.14` 가상환경" in common_setup
