@@ -2,8 +2,10 @@ import base64
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import tomllib
 import zipfile
 from pathlib import Path
@@ -68,6 +70,9 @@ def test_readme_documents_supertonic_preload_and_runtime_cache_layout():
         "text_encoder.onnx",
         "vector_estimator.onnx",
         "vocoder.onnx",
+        "tts.json",
+        "unicode_indexer.json",
+        "M1.json",
     ):
         assert model in tts_setup
 
@@ -187,6 +192,22 @@ def _minimal_bundle_root(tmp_path: Path) -> Path:
     (scripts / "doctor.ps1").write_text("Write-Host 'fixture'\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
     return root
+
+
+def _complete_supertonic_cache(cache: Path, voice: str = "M1") -> list[Path]:
+    required = [
+        cache / "onnx" / "duration_predictor.onnx",
+        cache / "onnx" / "text_encoder.onnx",
+        cache / "onnx" / "vector_estimator.onnx",
+        cache / "onnx" / "vocoder.onnx",
+        cache / "onnx" / "tts.json",
+        cache / "onnx" / "unicode_indexer.json",
+        cache / "voice_styles" / f"{voice}.json",
+    ]
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    return required
 
 
 @pytest.mark.parametrize(
@@ -785,6 +806,8 @@ def test_smoke_script_supports_live_browser_and_output_smoke_dir():
     assert "continue_pipeline_draft" in script
     assert "output\") / \"smoke\"" in script
     assert '"uvicorn", "backend.app.main:app"' in script
+    assert 'Join-Path $PSScriptRoot "smoke_port.ps1"' in script
+    assert "Test-PortOwnedByProcessTree" in script
 
 
 def test_smoke_live_browser_uses_isolated_port_process_and_app_identity_contract():
@@ -822,8 +845,8 @@ def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp
     assert zips
     with zipfile.ZipFile(zips[0]) as archive:
         env_text = archive.read("environment.redacted.txt").decode("utf-8-sig")
-    assert "MANUAL_AGENT_OPENAI_API_KEY=<redacted>" in env_text
-    assert "MANUAL_AGENT_DEP_TICKET=<redacted>" in env_text
+    assert "MANUAL_AGENT_OPENAI_API_KEY=<redacted:MANUAL_AGENT_OPENAI_API_KEY>" in env_text
+    assert "MANUAL_AGENT_DEP_TICKET=<redacted:MANUAL_AGENT_DEP_TICKET>" in env_text
     assert "super-secret" not in env_text
     assert "credential:SECRET" not in env_text
 
@@ -859,7 +882,7 @@ def test_doctor_collect_redacts_all_non_allowlisted_manual_agent_identity_and_au
         "MANUAL_AGENT_AUTH_HEADER",
         "MANUAL_AGENT_CREDENTIAL",
     ):
-        assert f"{name}=<redacted>" in env_text
+        assert f"{name}=<redacted:{name}>" in env_text
     for sensitive_value in (
         "employee.one",
         "E123456",
@@ -871,19 +894,55 @@ def test_doctor_collect_redacts_all_non_allowlisted_manual_agent_identity_and_au
         assert sensitive_value not in env_text
 
 
+def test_doctor_collect_sanitizes_every_text_artifact_before_archive(tmp_path: Path):
+    test_profile = tmp_path / "employee.one"
+    root = test_profile / "manual-agent"
+    root.mkdir(parents=True)
+    output_dir = tmp_path / "diagnostics-output"
+    env = os.environ.copy()
+    env.update(
+        {
+            "USERPROFILE": str(test_profile),
+            "USERNAME": "employee.one",
+            "MANUAL_AGENT_OUTPUT_DIR": str(output_dir),
+            "MANUAL_AGENT_LOGIN_USERNAME": "employee.one",
+            "MANUAL_AGENT_USER_ID": "E123456",
+            "MANUAL_AGENT_OPENAI_API_KEY": "top-secret-value",
+            "MANUAL_AGENT_AUTH_HEADER": "Bearer private-auth-value",
+        }
+    )
+
+    _powershell_script("doctor.ps1", "-Root", str(root), "-Collect", env=env)
+
+    [archive_path] = list((output_dir / "diagnostics").glob("*.zip"))
+    forbidden = ("employee.one", "E123456", "top-secret-value", "private-auth-value")
+    with zipfile.ZipFile(archive_path) as archive:
+        text_entries = [
+            name
+            for name in archive.namelist()
+            if Path(name).suffix.lower() in {".json", ".jsonl", ".txt", ".log", ".md"}
+        ]
+        assert {Path(name).name for name in text_entries} >= {
+            "doctor.json",
+            "environment.redacted.txt",
+            "winhttp-proxy.txt",
+        }
+        contents = {
+            name: archive.read(name).decode("utf-8-sig", errors="replace") for name in text_entries
+        }
+    for name, content in contents.items():
+        assert not any(value in content for value in forbidden), name
+    assert isinstance(json.loads(contents["doctor.json"]), list)
+    assert "<user-profile>" in contents["doctor.json"]
+    assert "<redacted:MANUAL_AGENT_USER_ID>" in contents["environment.redacted.txt"]
+
+
 def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_path: Path):
     cache = tmp_path / "supertonic3"
-    onnx = cache / "onnx"
-    onnx.mkdir(parents=True)
-    for model in (
-        "duration_predictor.onnx",
-        "text_encoder.onnx",
-        "vector_estimator.onnx",
-        "vocoder.onnx",
-    ):
-        (onnx / model).write_bytes(b"fixture")
+    _complete_supertonic_cache(cache, voice="F2")
     env = os.environ.copy()
     env["SUPERTONIC_CACHE_DIR"] = str(cache)
+    env["MANUAL_AGENT_SUPERTONIC_VOICE"] = "F2"
     env["MANUAL_AGENT_PYTHON"] = sys.executable
 
     completed = _powershell_script("doctor.ps1", "-Json", env=env)
@@ -892,6 +951,37 @@ def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_pat
     check = next(item for item in checks if item["name"] == "supertonic_cache")
     assert check["status"] == "PASS"
     assert str(cache) in check["message"]
+
+
+@pytest.mark.parametrize(
+    "missing_relative_path",
+    [
+        "onnx/duration_predictor.onnx",
+        "onnx/text_encoder.onnx",
+        "onnx/vector_estimator.onnx",
+        "onnx/vocoder.onnx",
+        "onnx/tts.json",
+        "onnx/unicode_indexer.json",
+        "voice_styles/M1.json",
+    ],
+)
+def test_doctor_supertonic_cache_requires_every_adapter_prerequisite(
+    tmp_path: Path, missing_relative_path: str
+):
+    cache = tmp_path / "supertonic3"
+    _complete_supertonic_cache(cache)
+    (cache / missing_relative_path).unlink()
+    env = os.environ.copy()
+    env["SUPERTONIC_CACHE_DIR"] = str(cache)
+    env["MANUAL_AGENT_SUPERTONIC_VOICE"] = "M1"
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("doctor.ps1", "-Json", env=env)
+
+    checks = json.loads(completed.stdout)
+    check = next(item for item in checks if item["name"] == "supertonic_cache")
+    assert check["status"] == "WARN"
+    assert missing_relative_path.replace("/", "\\") in check["message"]
 
 
 def test_doctor_supertonic_cache_warning_uses_current_preload_guidance(tmp_path: Path):
@@ -908,3 +998,66 @@ def test_doctor_supertonic_cache_warning_uses_current_preload_guidance(tmp_path:
     assert "SUPERTONIC_CACHE_DIR" in check["action"]
     assert "preload" in check["action"].lower()
     assert "MeloTTS" not in check["action"]
+
+
+def _available_loopback_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _start_listener(port: int) -> subprocess.Popen[str]:
+    code = (
+        "import socket,time; "
+        "s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); "
+        f"s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(30)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
+    return process
+
+
+def _test_port_owner(port: int, root_process_id: int) -> subprocess.CompletedProcess[str]:
+    command = (
+        ". .\\scripts\\smoke_port.ps1; "
+        f"Test-PortOwnedByProcessTree -Port {port} -RootProcessId {root_process_id}"
+    )
+    return subprocess.run(
+        [_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def test_smoke_port_ownership_distinguishes_spawned_listener_from_competitor():
+    if os.name != "nt":
+        pytest.skip("Windows TCP ownership contract")
+    owned_port = _available_loopback_port()
+    competitor_port = _available_loopback_port()
+    while competitor_port == owned_port:
+        competitor_port = _available_loopback_port()
+    owned = _start_listener(owned_port)
+    competitor = _start_listener(competitor_port)
+    try:
+        time.sleep(0.2)
+        accepted = _test_port_owner(owned_port, owned.pid)
+        rejected = _test_port_owner(competitor_port, owned.pid)
+    finally:
+        for process in (owned, competitor):
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip().lower() == "true"
+    assert rejected.returncode == 0, rejected.stderr
+    assert rejected.stdout.strip().lower() == "false"

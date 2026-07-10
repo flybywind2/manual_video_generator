@@ -268,7 +268,7 @@ $env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
 python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'supertonic_offline_smoke.wav'); print(duration)"
 ```
 
-Supertonic 모델 루트는 `HF_HOME`이 아니라 `SUPERTONIC_CACHE_DIR`입니다. 값을 생략하면 앱 bootstrap이 `<MANUAL_AGENT_BUNDLE_ROOT>\runtime\supertonic3`로 설정합니다. 현재 어댑터는 다음 네 ONNX 파일이 있어야 cache를 준비된 모델로 판정하고, 합성 시 `voice_styles` 아래 preset voice 자료도 사용합니다.
+Supertonic 모델 루트는 `HF_HOME`이 아니라 `SUPERTONIC_CACHE_DIR`입니다. 값을 생략하면 앱 bootstrap이 `<MANUAL_AGENT_BUNDLE_ROOT>\runtime\supertonic3`로 설정합니다. doctor의 PASS는 네 ONNX 모델뿐 아니라 모델 설정, Unicode indexer, 현재 `MANUAL_AGENT_SUPERTONIC_VOICE` preset 파일까지 모두 있을 때만 반환됩니다. voice를 지정하지 않거나 잘못 지정하면 앱과 doctor 모두 `M1`을 사용합니다.
 
 ```text
 runtime\supertonic3\
@@ -277,7 +277,10 @@ runtime\supertonic3\
     text_encoder.onnx
     vector_estimator.onnx
     vocoder.onnx
-  voice_styles\              # M1 등 preset voice 자료
+    tts.json
+    unicode_indexer.json
+  voice_styles\
+    M1.json                  # 설정한 preset voice와 동일한 파일
   img\                       # 패키지가 내려받는 부가 asset
 ```
 

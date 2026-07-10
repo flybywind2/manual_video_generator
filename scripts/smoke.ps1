@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet
 $pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
+. (Join-Path $PSScriptRoot "smoke_port.ps1")
 Set-Location $Root
 
 function Get-AvailableLoopbackPort {
@@ -84,15 +85,22 @@ if ($LiveBrowser) {
                 $server.Refresh()
                 throw "Live smoke app process exited before readiness with exit code $($server.ExitCode)."
             }
+            $identityReady = $false
             try {
                 $health = Invoke-RestMethod "$liveBaseUrl/api/health" -TimeoutSec 2
                 $openApi = Invoke-RestMethod "$liveBaseUrl/openapi.json" -TimeoutSec 2
                 if ($health.status -eq "ok" -and $openApi.info.title -eq "Manual Video Agent") {
-                    $ready = $true
-                    break
+                    $identityReady = $true
                 }
             } catch {
                 Start-Sleep -Milliseconds 500
+            }
+            if ($identityReady) {
+                if (-not (Test-PortOwnedByProcessTree -Port $livePort -RootProcessId $server.Id)) {
+                    throw "Live smoke port $livePort is owned by a process outside spawned process tree $($server.Id)."
+                }
+                $ready = $true
+                break
             }
         } while ((Get-Date) -lt $deadline)
         if (-not $ready) {
@@ -102,6 +110,9 @@ if ($LiveBrowser) {
         if ($server.HasExited) {
             $server.Refresh()
             throw "Live smoke app process exited after readiness with exit code $($server.ExitCode)."
+        }
+        if (-not (Test-PortOwnedByProcessTree -Port $livePort -RootProcessId $server.Id)) {
+            throw "Live smoke lost ownership of port $livePort before pipeline execution."
         }
         $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")
         $manifest = Invoke-CheckedNativeCommand `

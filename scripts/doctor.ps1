@@ -132,22 +132,31 @@ $supertonicCache = if ($env:SUPERTONIC_CACHE_DIR) {
 } else {
     Join-Path $Root "runtime\supertonic3"
 }
-$supertonicModels = @(
-    "duration_predictor.onnx",
-    "text_encoder.onnx",
-    "vector_estimator.onnx",
-    "vocoder.onnx"
+$supertonicVoice = if ($env:MANUAL_AGENT_SUPERTONIC_VOICE) {
+    $env:MANUAL_AGENT_SUPERTONIC_VOICE.Trim().ToUpperInvariant()
+} else {
+    "M1"
+}
+if ($supertonicVoice -notmatch "^[MF][1-5]$") { $supertonicVoice = "M1" }
+$supertonicRequiredFiles = @(
+    "onnx\duration_predictor.onnx",
+    "onnx\text_encoder.onnx",
+    "onnx\vector_estimator.onnx",
+    "onnx\vocoder.onnx",
+    "onnx\tts.json",
+    "onnx\unicode_indexer.json",
+    "voice_styles\$supertonicVoice.json"
 )
-$missingSupertonicModels = @(
-    $supertonicModels | Where-Object { -not (Test-Path (Join-Path $supertonicCache "onnx\$_") -PathType Leaf) }
+$missingSupertonicFiles = @(
+    $supertonicRequiredFiles | Where-Object { -not (Test-Path (Join-Path $supertonicCache $_) -PathType Leaf) }
 )
-if ($missingSupertonicModels.Count -eq 0) {
-    Add-Check "supertonic_cache" "PASS" "$supertonicCache (required ONNX models ready)"
+if ($missingSupertonicFiles.Count -eq 0) {
+    Add-Check "supertonic_cache" "PASS" "$supertonicCache (model config and $supertonicVoice voice ready)"
 } else {
     Add-Check `
         "supertonic_cache" `
         "WARN" `
-        "$supertonicCache missing: $($missingSupertonicModels -join ', ')" `
+        "$supertonicCache missing: $($missingSupertonicFiles -join ', ')" `
         "Preload the Supertonic model into SUPERTONIC_CACHE_DIR on a connected build PC."
 }
 
@@ -205,19 +214,68 @@ if ($Collect) {
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS"
     )
+    $diagnosticReplacements = New-Object System.Collections.Generic.List[object]
+    if ($env:USERPROFILE) {
+        $diagnosticReplacements.Add([pscustomobject]@{ value = $env:USERPROFILE; placeholder = "<user-profile>" })
+        $diagnosticReplacements.Add([pscustomobject]@{
+            value = $env:USERPROFILE.Replace("/", "\")
+            placeholder = "<user-profile>"
+        })
+        $diagnosticReplacements.Add([pscustomobject]@{
+            value = $env:USERPROFILE.Replace("\", "/")
+            placeholder = "<user-profile>"
+        })
+    }
+    if ($env:USERNAME) {
+        $diagnosticReplacements.Add([pscustomobject]@{ value = $env:USERNAME; placeholder = "<username>" })
+    }
+    Get-ChildItem Env: | Where-Object {
+        $_.Name -like "MANUAL_AGENT_*" -and $_.Name -notin $safeManualAgentVariables -and $_.Value
+    } | ForEach-Object {
+        $diagnosticReplacements.Add([pscustomobject]@{
+            value = $_.Value
+            placeholder = "<redacted:$($_.Name)>"
+        })
+    }
+    $serializedReplacements = New-Object System.Collections.Generic.List[object]
+    foreach ($replacement in $diagnosticReplacements) {
+        $serializedReplacements.Add($replacement)
+        $jsonValue = ([string]$replacement.value | ConvertTo-Json -Compress)
+        if ($jsonValue.Length -ge 2) {
+            $jsonValue = $jsonValue.Substring(1, $jsonValue.Length - 2)
+            if ($jsonValue -ne [string]$replacement.value) {
+                $serializedReplacements.Add([pscustomobject]@{
+                    value = $jsonValue
+                    placeholder = $replacement.placeholder
+                })
+            }
+        }
+    }
+    $diagnosticReplacements = @($serializedReplacements | Sort-Object { ([string]$_.value).Length } -Descending)
+
+    function Protect-DiagnosticText {
+        param([AllowEmptyString()][string]$Text)
+        $protected = $Text
+        foreach ($replacement in $diagnosticReplacements) {
+            $protected = $protected -replace [regex]::Escape([string]$replacement.value), [string]$replacement.placeholder
+        }
+        return $protected
+    }
+
     Get-ChildItem Env: | Where-Object { $_.Name -like "MANUAL_AGENT_*" -or $_.Name -in $safeRuntimeVariables } |
         ForEach-Object {
             $value = if ($_.Name -like "MANUAL_AGENT_*" -and $_.Name -notin $safeManualAgentVariables) {
-                "<redacted>"
+                "<redacted:$($_.Name)>"
             } else {
                 $_.Value
-            }
-            if ($value -ne "<redacted>" -and $env:USERPROFILE) {
-                $value = $value -replace [regex]::Escape($env:USERPROFILE), "<user-profile>"
             }
             "$($_.Name)=$value"
         } | Set-Content -Encoding UTF8 (Join-Path $diag "environment.redacted.txt")
     netsh winhttp show proxy | Set-Content -Encoding UTF8 (Join-Path $diag "winhttp-proxy.txt")
+    Get-ChildItem -Path $diag -File -Recurse | ForEach-Object {
+        $content = Get-Content -Path $_.FullName -Raw -Encoding UTF8
+        Protect-DiagnosticText -Text $content | Set-Content -Path $_.FullName -Encoding UTF8
+    }
     Compress-Archive -Path (Join-Path $diag "*") -DestinationPath "$diag.zip" -Force
     if (-not $Json) {
         Write-Host "Diagnostics collected: $diag.zip"
