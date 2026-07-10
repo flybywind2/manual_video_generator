@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -122,6 +123,35 @@ def test_python_runtime_falls_back_to_path_python_when_py_313_is_unavailable(tmp
     result = json.loads(completed.stdout)
     assert result["command"] == "python"
     assert Path(result["executable"]) == path_python
+    assert result["actual_version"] == "3.13.14"
+    assert result["valid"] is True
+
+
+def test_python_runtime_cli_decodes_multiple_arguments_for_command_path_with_spaces(tmp_path: Path):
+    command_dir = tmp_path / "runtime with spaces"
+    command_dir.mkdir()
+    command = command_dir / "fake python.cmd"
+    command.write_text(
+        '@if "%~1"=="first value" if "%~2"=="second value" @echo 3.13.14 & @exit /b 0\n'
+        "@exit /b 9\n",
+        encoding="utf-8",
+    )
+    encoded_arguments = base64.b64encode(
+        json.dumps(["first value", "second value"]).encode("utf-8")
+    ).decode("ascii")
+
+    completed = _run_python_runtime(
+        "-Command",
+        str(command),
+        "-CommandArgumentsBase64",
+        encoded_arguments,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["command"] == str(command)
+    assert Path(result["executable"]) == command
+    assert result["arguments"] == ["first value", "second value"]
     assert result["actual_version"] == "3.13.14"
     assert result["valid"] is True
 

@@ -5,7 +5,7 @@ param(
     [AllowEmptyString()]
     [string]$VersionOutput,
     [string]$Command,
-    [string[]]$CommandArguments = @()
+    [string]$CommandArgumentsBase64
 )
 
 Set-StrictMode -Version Latest
@@ -65,6 +65,29 @@ function Resolve-ExecutablePath {
     return $resolved.Path
 }
 
+function ConvertFrom-CommandArgumentsBase64 {
+    param([string]$EncodedArguments)
+
+    try {
+        $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedArguments))
+        if ($json.Trim() -notmatch '^\[.*\]$') {
+            throw "Decoded value is not a JSON array."
+        }
+        $parsed = $json | ConvertFrom-Json
+        $decoded = if ($null -eq $parsed) { [object[]]@() } else { [object[]]$parsed }
+    }
+    catch {
+        throw "CommandArgumentsBase64 must be a Base64-encoded UTF-8 JSON string array."
+    }
+
+    foreach ($argument in $decoded) {
+        if ($argument -isnot [string]) {
+            throw "CommandArgumentsBase64 must decode to a JSON array containing only strings."
+        }
+    }
+    return [object[]]$decoded
+}
+
 function Invoke-PythonVersion {
     param(
         [string]$Executable,
@@ -100,7 +123,9 @@ else {
 
     if ($PSBoundParameters.ContainsKey("Command")) {
         $selectedCommand = $Command
-        $selectedArguments = [object[]]$CommandArguments
+        if ($PSBoundParameters.ContainsKey("CommandArgumentsBase64")) {
+            $selectedArguments = ConvertFrom-CommandArgumentsBase64 $CommandArgumentsBase64
+        }
         $selectedExecutable = Resolve-ExecutablePath $Command
     }
     elseif (-not [string]::IsNullOrWhiteSpace($env:MANUAL_AGENT_PYTHON)) {
