@@ -181,6 +181,25 @@ def test_python_runtime_cli_accepts_multiline_json_command_arguments(tmp_path: P
     assert result["valid"] is True
 
 
+def test_python_runtime_cli_preserves_empty_json_command_arguments(tmp_path: Path):
+    command = tmp_path / "fake-python.cmd"
+    command.write_text("@echo 3.13.14\n", encoding="utf-8")
+    encoded_arguments = base64.b64encode(b"[]").decode("ascii")
+
+    completed = _run_python_runtime(
+        "-Command",
+        str(command),
+        "-CommandArgumentsBase64",
+        encoded_arguments,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["arguments"] == []
+    assert result["actual_version"] == "3.13.14"
+    assert result["valid"] is True
+
+
 def test_doctor_script_emits_machine_readable_json_contract():
     command = [
         _powershell(),

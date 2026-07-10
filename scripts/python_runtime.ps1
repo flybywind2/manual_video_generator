@@ -86,7 +86,7 @@ function ConvertFrom-CommandArgumentsBase64 {
             throw "CommandArgumentsBase64 must decode to a JSON array containing only strings."
         }
     }
-    return [object[]]$decoded
+    Write-Output -NoEnumerate ([object[]]$decoded)
 }
 
 function Invoke-PythonVersion {
