@@ -23,6 +23,109 @@ def _powershell() -> str:
     return executable
 
 
+def _run_python_runtime(*arguments: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    command = [
+        _powershell(),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".\\scripts\\python_runtime.ps1",
+        "-Json",
+        *arguments,
+    ]
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+    )
+
+
+@pytest.mark.parametrize(
+    ("version_output", "expected_actual", "expected_valid"),
+    [
+        ("3.13.14", "3.13.14", True),
+        ("3.13.13", "3.13.13", False),
+        ("3.14.0", "3.14.0", False),
+        ("not-a-python-version", None, False),
+    ],
+)
+def test_python_runtime_json_mode_validates_exact_version_output(
+    version_output: str,
+    expected_actual: str | None,
+    expected_valid: bool,
+):
+    completed = _run_python_runtime("-VersionOutput", version_output)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result == {
+        "command": "<version-output>",
+        "arguments": [],
+        "executable": None,
+        "expected_version": "3.13.14",
+        "actual_version": expected_actual,
+        "valid": expected_valid,
+    }
+
+
+def test_python_runtime_strict_mode_rejects_patch_mismatch():
+    completed = _run_python_runtime("-Strict", "-VersionOutput", "3.13.13")
+
+    assert completed.returncode != 0
+    assert "Expected Python 3.13.14 but found 3.13.13" in completed.stderr
+
+
+def test_python_runtime_reports_missing_configured_executable(tmp_path: Path):
+    missing_python = tmp_path / "missing-python.exe"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(missing_python)
+
+    completed = _run_python_runtime(env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["command"] == str(missing_python)
+    assert result["arguments"] == []
+    assert result["executable"] == str(missing_python)
+    assert result["expected_version"] == "3.13.14"
+    assert result["actual_version"] is None
+    assert result["valid"] is False
+
+
+def test_python_runtime_strict_mode_identifies_missing_configured_executable(tmp_path: Path):
+    missing_python = tmp_path / "missing-python.exe"
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(missing_python)
+
+    completed = _run_python_runtime("-Strict", env=env)
+
+    assert completed.returncode != 0
+    assert str(missing_python) in completed.stderr
+    assert "Expected Python 3.13.14" in completed.stderr
+
+
+def test_python_runtime_falls_back_to_path_python_when_py_313_is_unavailable(tmp_path: Path):
+    (tmp_path / "py.cmd").write_text("@exit /b 1\n", encoding="utf-8")
+    path_python = tmp_path / "python.cmd"
+    path_python.write_text("@echo 3.13.14\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.pop("MANUAL_AGENT_PYTHON", None)
+    env["PATH"] = str(tmp_path)
+
+    completed = _run_python_runtime(env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["command"] == "python"
+    assert Path(result["executable"]) == path_python
+    assert result["actual_version"] == "3.13.14"
+    assert result["valid"] is True
+
+
 def test_doctor_script_emits_machine_readable_json_contract():
     command = [
         _powershell(),
