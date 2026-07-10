@@ -125,14 +125,14 @@ fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=tr
 
 ## 환경 준비
 
-이 프로젝트의 Python 표준 버전은 `3.10.19`입니다. Python 3.11 이상을 전제로 설치하지 않습니다.
+사내 배포와 운영에서 지원하는 Python은 정확히 `3.13.14`뿐입니다. `pyproject.toml`, `.python-version`, 시작/진단/스모크/번들 스크립트가 모두 이 버전을 강제합니다. 다른 Python에서 소스 단위 테스트를 실행할 수는 있지만 이는 개발 편의를 위한 비지원 실행이며, 사내 배포 합격 판정으로 사용할 수 없습니다.
 
-### 1. Python 3.10.19 가상환경
+### 1. Python 3.13.14 가상환경
 
 Windows에서 Python Launcher가 설치되어 있으면 다음처럼 만듭니다.
 
 ```powershell
-py -3.10 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version
 ```
@@ -140,7 +140,7 @@ python --version
 `python --version`은 다음처럼 보여야 합니다.
 
 ```text
-Python 3.10.19
+Python 3.13.14
 ```
 
 필요 패키지를 설치합니다.
@@ -267,29 +267,14 @@ python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.g
 - Generated manuals include an AI voice disclosure when `MANUAL_AGENT_TTS_PROVIDER=supertonic`
 - Generated `tts_metadata.json` includes the model license and preset-only voice policy
 
-MeloTTS는 대체 어댑터로 남겨둡니다. 현재 MVP는 TTS 라이브러리가 없으면 silent wav placeholder를 생성합니다. MeloTTS로 실제 한국어 내레이션을 만들려면 MeloTTS 어댑터를 사용합니다.
-
-권장 방식은 별도 TTS 가상환경을 두는 것입니다. 이 앱의 표준 Python은 `3.10.19`지만, MeloTTS 공식 문서는 Ubuntu 20.04/Python 3.9 개발·테스트 기준과 Windows Docker 사용 권장을 함께 안내합니다. Windows native 설치가 실패하면 WSL 또는 별도 Python 3.9 TTS 환경으로 분리하는 편이 안전합니다.
-
-Python 3.10.19에서 먼저 시도할 수 있는 설치 흐름:
+사내 Python 3.13.14 배포의 기본 TTS는 Supertonic이며 ONNX Runtime을 같은 가상환경에서 사용합니다. 별도 Python 3.9 환경이나 MeloTTS 격리는 현재 사내 배포 절차가 아닙니다. MeloTTS 어댑터는 레거시 선택지로 남아 있지만, 회사 인수 테스트와 오프라인 번들은 Supertonic preset voice와 Python 3.13용 ONNX Runtime wheel을 기준으로 검증합니다.
 
 ```powershell
-git clone https://github.com/myshell-ai/MeloTTS.git third_party\MeloTTS
-python -m pip install -e third_party\MeloTTS
-python -m unidic download
+python -m pip install supertonic onnxruntime
+python -c "import platform, onnxruntime; assert platform.python_version() == '3.13.14'; print(onnxruntime.__version__)"
 ```
 
-한국어 음성 생성 smoke test:
-
-```powershell
-python -c "from melo.api import TTS; model=TTS(language='KR', device='cpu'); spk=model.hps.data.spk2id; model.tts_to_file('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', spk['KR'], 'kr.wav', speed=1.0)"
-```
-
-VRAM 6GB 환경에서는 먼저 `device='cuda:0'`를 시도하고, OOM이 나면 `device='cpu'`로 운영합니다.
-
-```powershell
-python -c "import torch; print(torch.cuda.is_available())"
-```
+폐쇄망에서는 Python 3.13 Windows wheel과 Supertonic 모델 assets를 온라인 빌드 PC에서 미리 확보해야 합니다. `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false` 상태에서 위 smoke test와 실제 음성 생성을 모두 통과해야 TTS 준비 완료로 판정합니다.
 
 ### 6. 설치 확인
 
@@ -653,7 +638,7 @@ Set-Location C:\AppBundle\manualgen
 .\scripts\start.ps1
 ```
 
-`doctor.ps1`는 Python 3.10, Node/npm/npx, FFmpeg, Playwright browser cache, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
+`doctor.ps1`는 Python이 정확히 3.13.14인지 확인하고, Node/npm/npx, FFmpeg, Playwright browser cache, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 다른 Python이면 경고가 아니라 `FAIL`이며 사내 배포를 진행하지 않습니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
 
 ```powershell
 .\scripts\doctor.ps1 -Collect
@@ -666,6 +651,7 @@ Set-Location C:\AppBundle\manualgen
 온라인 접근이 가능한 빌드 PC에서 다음 명령으로 번들 골격을 만들 수 있습니다.
 
 ```powershell
+py -3.13 -c "import platform; assert platform.python_version() == '3.13.14'"
 .\scripts\build_bundle.ps1
 ```
 
@@ -675,7 +661,7 @@ Set-Location C:\AppBundle\manualgen
 .\scripts\build_bundle.ps1 -SkipDownloads
 ```
 
-실제 운영 번들은 Python wheels, Playwright Chromium, npm cache, FFmpeg, MeloTTS 모델 캐시, HyperFrames/OpenCode CLI, 사내 루트 CA를 포함해야 합니다. 생성된 `versions.json`은 포함 파일의 SHA256과 버전 식별 정보를 담으며, 설치 PC의 장애 분석 기준점으로 사용합니다.
+실제 운영 번들은 Python 3.13 Windows wheels, Playwright Chromium, npm cache, FFmpeg, Supertonic/ONNX Runtime 모델 캐시, HyperFrames/OpenCode CLI, 사내 루트 CA를 포함해야 합니다. 번들 생성 스크립트는 정확히 Python 3.13.14에서만 성공하며, 생성된 `versions.json`은 요구/실제 Python 버전, 실행 파일, 포함 파일의 SHA256을 담아 설치 PC의 장애 분석 기준점으로 사용합니다.
 
 ### 패키지 검증
 

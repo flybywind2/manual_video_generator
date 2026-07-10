@@ -4,7 +4,7 @@
 
 검증 목표:
 
-1. Python `3.10.19` 런타임에서 전체 테스트가 통과하는지 확인
+1. Python `3.13.14` 런타임에서 전체 테스트가 통과하는지 확인
 2. Qwen3.5 + Playwright MCP live + HyperFrames/FFmpeg + TTS 실제 의존성으로 샘플 e2e 영상 생성
 3. 실제 사내 시스템 로그인/직접 시연 모드로 영상 1개 생성
 
@@ -16,10 +16,10 @@ PowerShell에서 repo root로 이동한다.
 cd "C:\Users\xiro1\OneDrive\Documents\New project 5"
 ```
 
-Python `3.10.19` 가상환경을 만든다.
+Python `3.13.14` 가상환경을 만든다.
 
 ```powershell
-py -3.10 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version
 ```
@@ -27,7 +27,7 @@ python --version
 기대값:
 
 ```text
-Python 3.10.19
+Python 3.13.14
 ```
 
 패키지와 Playwright Chromium을 설치한다.
@@ -109,9 +109,11 @@ MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=900
 $env:MANUAL_AGENT_ENV_FILE=".env.qwen35.internal"
 ```
 
-## 1. Python 3.10.19 전체 테스트
+## 1. Python 3.13.14 전체 테스트
 
 목적: 배포 대상 Python 버전에서 코드/테스트가 깨지지 않는지 확인한다. 이 단계는 외부 LLM/MCP/TTS 호출 검증이 아니라 런타임 호환성 검증이다.
+
+다른 Python에서 수행한 소스 테스트는 개발 참고 결과일 뿐이다. 회사 합격 판정은 정확히 Python 3.13.14에서 `doctor`, 전체 pytest, compile, bundle, smoke를 실행한 결과만 인정한다.
 
 테스트가 실서비스 호출에 끌려가지 않도록 안전한 테스트 env를 별도로 만든다.
 
@@ -132,13 +134,18 @@ MANUAL_AGENT_ENABLE_TERMINAL_LOGS=false
 $env:MANUAL_AGENT_ENV_FILE=".env.test-safe"
 python -m pytest -q --basetemp .pytest_tmp
 python -m compileall backend\app
+.\scripts\doctor.ps1
+.\scripts\build_bundle.ps1 -SkipDownloads
+.\scripts\smoke.ps1 -SkipTests
 ```
 
 합격 기준:
 
 - pytest가 모두 통과한다.
 - `compileall`이 exit code 0으로 끝난다.
-- Python 버전이 반드시 `3.10.19`다.
+- Python 버전이 반드시 `3.13.14`다.
+- `doctor.ps1`의 Python 항목이 `PASS`이고, 번들 `versions.json`의 요구/실제 버전이 모두 `3.13.14`다.
+- `smoke.ps1`이 정확한 런타임 검증 후 exit code 0으로 끝난다.
 
 완료 후 Qwen3.5 env로 되돌린다.
 

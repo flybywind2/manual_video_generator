@@ -18,6 +18,30 @@ def test_python_runtime_contract_is_exact_3_13_14():
     assert pyproject["project"]["requires-python"] == "==3.13.14"
 
 
+def test_current_docs_target_python_3_13_14_only():
+    setup_docs = (
+        Path("README.md"),
+        Path("test_secnario.md"),
+    )
+    for path in setup_docs:
+        content = path.read_text(encoding="utf-8")
+        assert "3.13.14" in content, f"{path} must name the exact company runtime"
+        assert "py -3.13" in content, f"{path} must use the Python 3.13 launcher"
+        assert "3.10.19" not in content, f"{path} contains obsolete active runtime guidance"
+        assert "py -3.10" not in content, f"{path} contains an obsolete launcher command"
+
+    july_10_docs = tuple(Path("docs/plans").glob("2026-07-10*.md"))
+    assert july_10_docs, "current July 10 design documents must exist"
+    obsolete_compatibility_claims = (
+        "Python 3.10-compatible",
+        "**Tech Stack:** Python 3.10,",
+    )
+    for path in july_10_docs:
+        content = path.read_text(encoding="utf-8")
+        for claim in obsolete_compatibility_claims:
+            assert claim not in content, f"{path} still claims Python 3.10 compatibility"
+
+
 def _powershell() -> str:
     executable = shutil.which("powershell") or shutil.which("pwsh")
     if not executable:

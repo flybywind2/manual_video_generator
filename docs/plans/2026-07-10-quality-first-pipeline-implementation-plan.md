@@ -6,7 +6,7 @@
 
 **Architecture:** Add shared LLM contracts and a browser action quality policy around the existing adapters. Keep Playwright as the final executor, enrich each observation with Page Agent candidates, use VLM on every meaningful turn in `quality_first`, validate and repair its output once, then build media only from verified actions and enforce final render quality metadata.
 
-**Tech Stack:** Python 3.10, FastAPI, Pydantic, Ollama OpenAI-compatible API, Playwright, FFmpeg, Supertonic, HyperFrames, pytest
+**Tech Stack:** Python 3.13.14, FastAPI, Pydantic, Ollama OpenAI-compatible API, Playwright, FFmpeg, Supertonic, HyperFrames, pytest
 
 ---
 

@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing FastAPI, Playwright, TTS, and render pipeline unchanged. Define separate contracts for input extraction, planning, DOM browser action, and screenshot-assisted browser action, then validate representative responses against the current parsers and action schemas.
 
-**Tech Stack:** Markdown, Ollama OpenAI-compatible API, Python 3.10-compatible JSON contracts, Playwright action schema
+**Tech Stack:** Markdown, Ollama OpenAI-compatible API, Python 3.13.14 JSON contracts, Playwright action schema
 
 ---
 
