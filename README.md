@@ -248,16 +248,42 @@ MANUAL_AGENT_TTS_PROVIDER=supertonic
 MANUAL_AGENT_SUPERTONIC_VOICE=M1
 MANUAL_AGENT_SUPERTONIC_LANG=ko
 MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
+SUPERTONIC_CACHE_DIR=runtime\supertonic3
 ```
 
-설치/검증:
+인터넷 연결이 가능한 빌드 PC에서 Python 3.13용 패키지를 설치하고 모델을 지정 경로에 preload합니다. Supertonic은 `SUPERTONIC_CACHE_DIR`를 생성 시점에 읽으므로, 환경변수를 먼저 설정하면 기본 `TTS(auto_download=True)` 호출도 실제 어댑터가 찾는 경로를 사용합니다.
 
 ```powershell
-python -m pip install supertonic
-python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'kr.wav')"
+$env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
+New-Item -ItemType Directory -Force $env:SUPERTONIC_CACHE_DIR | Out-Null
+python -m pip install supertonic onnxruntime
+python -c "import platform, onnxruntime; assert platform.python_version() == '3.13.14'; print(onnxruntime.__version__)"
+python -c "from supertonic import TTS; TTS(auto_download=True); print('Supertonic preload complete')"
 ```
 
-사내망/폐쇄망에서는 첫 실행 다운로드를 막기 위해 `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false`를 권장합니다. 모델 assets와 preset voice styles는 빌드 PC에서 미리 받아 번들 캐시(`HF_HOME` 또는 런타임 assets 경로)에 포함하세요.
+네트워크를 끊거나 다운로드가 차단된 사내 환경을 모사한 뒤 같은 경로에서 `auto_download=False`로 실제 합성을 검증합니다.
+
+```powershell
+$env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
+python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'supertonic_offline_smoke.wav'); print(duration)"
+```
+
+Supertonic 모델 루트는 `HF_HOME`이 아니라 `SUPERTONIC_CACHE_DIR`입니다. 값을 생략하면 앱 bootstrap이 `<MANUAL_AGENT_BUNDLE_ROOT>\runtime\supertonic3`로 설정합니다. 현재 어댑터는 다음 네 ONNX 파일이 있어야 cache를 준비된 모델로 판정하고, 합성 시 `voice_styles` 아래 preset voice 자료도 사용합니다.
+
+```text
+runtime\supertonic3\
+  onnx\
+    duration_predictor.onnx
+    text_encoder.onnx
+    vector_estimator.onnx
+    vocoder.onnx
+  voice_styles\              # M1 등 preset voice 자료
+  img\                       # 패키지가 내려받는 부가 asset
+```
+
+사내망/폐쇄망에서는 `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false`를 유지하고, preload한 `runtime\supertonic3` 전체와 Python 3.13용 `supertonic`/`onnxruntime` wheels를 별도로 staging합니다.
+
+사내 Python 3.13.14 배포의 기본 TTS는 Supertonic입니다. MeloTTS 어댑터는 레거시 선택지로 남아 있지만 별도 Python 환경은 현재 회사 인수 테스트와 오프라인 배포 기준에 포함되지 않습니다.
 
 라이선스/고지 정책:
 
@@ -266,15 +292,6 @@ python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.g
 - Voice source: `preset voice` only
 - Generated manuals include an AI voice disclosure when `MANUAL_AGENT_TTS_PROVIDER=supertonic`
 - Generated `tts_metadata.json` includes the model license and preset-only voice policy
-
-사내 Python 3.13.14 배포의 기본 TTS는 Supertonic이며 ONNX Runtime을 같은 가상환경에서 사용합니다. 별도 Python 3.9 환경이나 MeloTTS 격리는 현재 사내 배포 절차가 아닙니다. MeloTTS 어댑터는 레거시 선택지로 남아 있지만, 회사 인수 테스트와 오프라인 번들은 Supertonic preset voice와 Python 3.13용 ONNX Runtime wheel을 기준으로 검증합니다.
-
-```powershell
-python -m pip install supertonic onnxruntime
-python -c "import platform, onnxruntime; assert platform.python_version() == '3.13.14'; print(onnxruntime.__version__)"
-```
-
-폐쇄망에서는 Python 3.13 Windows wheel과 Supertonic 모델 assets를 온라인 빌드 PC에서 미리 확보해야 합니다. `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false` 상태에서 위 smoke test와 실제 음성 생성을 모두 통과해야 TTS 준비 완료로 판정합니다.
 
 ### 6. 설치 확인
 
@@ -618,6 +635,7 @@ OneDrive, 한글 사용자명 아래의 깊은 경로, 공백이 많은 경로�
 runtime/
   browsers/       # PLAYWRIGHT_BROWSERS_PATH
   hf-cache/       # HF_HOME
+  supertonic3/    # SUPERTONIC_CACHE_DIR; onnx/, voice_styles/, img/
   npm-cache/      # NPM_CONFIG_CACHE
   ffmpeg/bin/     # ffmpeg.exe, ffprobe.exe
   node/           # portable Node.js
@@ -626,7 +644,7 @@ config/
 output/
 ```
 
-앱은 실행 시 `MANUAL_AGENT_BUNDLE_ROOT` 기준으로 `PLAYWRIGHT_BROWSERS_PATH`, `HF_HOME`, `NPM_CONFIG_CACHE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` 같은 환경값을 기본 보정합니다. 기존 프로세스 환경변수가 있으면 그 값을 우선합니다.
+앱은 실행 시 `MANUAL_AGENT_BUNDLE_ROOT` 기준으로 `PLAYWRIGHT_BROWSERS_PATH`, `HF_HOME`, `SUPERTONIC_CACHE_DIR`, `NPM_CONFIG_CACHE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` 같은 환경값을 기본 보정합니다. Supertonic 모델은 `HF_HOME`이 아닌 `SUPERTONIC_CACHE_DIR`에서 찾습니다. 기존 프로세스 환경변수가 있으면 그 값을 우선합니다.
 
 ### 운영자 실행 절차
 
@@ -648,7 +666,7 @@ Set-Location C:\AppBundle\manualgen
 
 ### 오프라인 번들 생성
 
-온라인 접근이 가능한 빌드 PC에서 다음 명령으로 번들 골격을 만들 수 있습니다.
+온라인 접근이 가능한 빌드 PC에서 다음 명령으로 부분 번들 골격을 만들 수 있습니다.
 
 ```powershell
 py -3.13 -c "import platform; assert platform.python_version() == '3.13.14'"
@@ -661,7 +679,18 @@ py -3.13 -c "import platform; assert platform.python_version() == '3.13.14'"
 .\scripts\build_bundle.ps1 -SkipDownloads
 ```
 
-실제 운영 번들은 Python 3.13 Windows wheels, Playwright Chromium, npm cache, FFmpeg, Supertonic/ONNX Runtime 모델 캐시, HyperFrames/OpenCode CLI, 사내 루트 CA를 포함해야 합니다. 번들 생성 스크립트는 정확히 Python 3.13.14에서만 성공하며, 생성된 `versions.json`은 요구/실제 Python 버전, 실행 파일, 포함 파일의 SHA256을 담아 설치 PC의 장애 분석 기준점으로 사용합니다.
+현재 `build_bundle.ps1` 산출물은 완전한 오프라인 배포 번들이 아닙니다. 스크립트가 자동으로 받는 범위는 core Python wheels(FastAPI/Uvicorn/Pydantic/Pillow/Playwright/httpx/pytest), Playwright Chromium, Playwright MCP npm cache뿐입니다. `-SkipDownloads`는 이 항목도 받지 않는 구조 검증용 skeleton입니다.
+
+다음 항목은 builder가 지원할 때까지 배포 담당자가 별도 staging하고 설치 PC에서 검증해야 합니다.
+
+- Python 3.13.14 runtime
+- Supertonic/ONNX Runtime wheels와 모델(`runtime\supertonic3`)
+- FFmpeg
+- HyperFrames
+- OpenCode
+- 사내 루트 CA
+
+번들 생성 스크립트 자체는 정확히 Python 3.13.14에서만 실행됩니다. 생성된 `versions.json`은 builder가 실제 포함한 파일과 요구/실제 Python 버전, 실행 파일의 SHA256 기준점이며, 위 별도 staging 항목의 존재나 실행 가능성을 보증하지 않습니다.
 
 ### 패키지 검증
 

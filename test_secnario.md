@@ -52,9 +52,16 @@ python -c "import playwright; print('playwright ok')"
 Supertonic preset voice를 쓸 경우:
 
 ```powershell
-python -m pip install supertonic
+$env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
+New-Item -ItemType Directory -Force $env:SUPERTONIC_CACHE_DIR | Out-Null
+python -m pip install supertonic onnxruntime
+# 연결 PC preload
+python -c "from supertonic import TTS; TTS(auto_download=True); print('preload complete')"
+# 네트워크 차단 후 동일 cache 오프라인 검증
 python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'supertonic_smoke.wav'); print(duration)"
 ```
+
+`SUPERTONIC_CACHE_DIR`에는 `runtime\supertonic3\onnx`의 네 ONNX 모델과 `voice_styles` preset 자료가 있어야 한다. `HF_HOME`은 Supertonic 모델 경로를 대신하지 않는다.
 
 ## Qwen3.5 환경 파일
 
@@ -89,6 +96,7 @@ MANUAL_AGENT_TTS_PROVIDER=supertonic
 MANUAL_AGENT_SUPERTONIC_VOICE=M1
 MANUAL_AGENT_SUPERTONIC_LANG=ko
 MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
+SUPERTONIC_CACHE_DIR=runtime\supertonic3
 
 MANUAL_AGENT_LOGIN_MODE=none
 MANUAL_AGENT_LOGIN_USERNAME_SELECTOR=

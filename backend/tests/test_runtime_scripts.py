@@ -18,28 +18,74 @@ def test_python_runtime_contract_is_exact_3_13_14():
     assert pyproject["project"]["requires-python"] == "==3.13.14"
 
 
-def test_current_docs_target_python_3_13_14_only():
-    setup_docs = (
-        Path("README.md"),
-        Path("test_secnario.md"),
-    )
-    for path in setup_docs:
-        content = path.read_text(encoding="utf-8")
-        assert "3.13.14" in content, f"{path} must name the exact company runtime"
-        assert "py -3.13" in content, f"{path} must use the Python 3.13 launcher"
-        assert "3.10.19" not in content, f"{path} contains obsolete active runtime guidance"
-        assert "py -3.10" not in content, f"{path} contains an obsolete launcher command"
+def _markdown_section(content: str, heading: str, next_heading_prefix: str) -> str:
+    start = content.index(heading)
+    end = content.find(f"\n{next_heading_prefix}", start + len(heading))
+    return content[start:] if end == -1 else content[start:end]
 
-    july_10_docs = tuple(Path("docs/plans").glob("2026-07-10*.md"))
-    assert july_10_docs, "current July 10 design documents must exist"
-    obsolete_compatibility_claims = (
-        "Python 3.10-compatible",
-        "**Tech Stack:** Python 3.10,",
-    )
-    for path in july_10_docs:
-        content = path.read_text(encoding="utf-8")
-        for claim in obsolete_compatibility_claims:
-            assert claim not in content, f"{path} still claims Python 3.10 compatibility"
+
+def test_current_docs_target_python_3_13_14_only():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    environment_setup = _markdown_section(readme, "## 환경 준비", "## ")
+    assert "정확히 `3.13.14`" in environment_setup
+    assert "py -3.13 -m venv .venv" in environment_setup
+    assert "py -3.10 -m venv" not in environment_setup
+
+    scenario = Path("test_secnario.md").read_text(encoding="utf-8")
+    common_setup = _markdown_section(scenario, "## 공통 준비", "## ")
+    assert "Python `3.13.14` 가상환경" in common_setup
+    assert "py -3.13 -m venv .venv" in common_setup
+    assert "py -3.10 -m venv" not in common_setup
+
+    expected_tech_stacks = {
+        Path("docs/plans/2026-07-10-gemma4-12b-qat-video-prompt-implementation-plan.md"):
+            "Python 3.13.14 JSON contracts",
+        Path("docs/plans/2026-07-10-quality-first-pipeline-implementation-plan.md"):
+            "**Tech Stack:** Python 3.13.14,",
+    }
+    for path, expected in expected_tech_stacks.items():
+        assert expected in path.read_text(encoding="utf-8")
+
+
+def test_readme_documents_supertonic_preload_and_runtime_cache_layout():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    tts_setup = _markdown_section(readme, "### 5. Supertonic", "### ")
+
+    preload = "TTS(auto_download=True)"
+    offline_verify = "TTS(auto_download=False)"
+    assert preload in tts_setup
+    assert offline_verify in tts_setup
+    assert tts_setup.index(preload) < tts_setup.index(offline_verify)
+    assert "SUPERTONIC_CACHE_DIR=runtime\\supertonic3" in tts_setup
+    assert "runtime\\supertonic3\\" in tts_setup
+    assert "onnx\\" in tts_setup
+    for model in (
+        "duration_predictor.onnx",
+        "text_encoder.onnx",
+        "vector_estimator.onnx",
+        "vocoder.onnx",
+    ):
+        assert model in tts_setup
+
+
+def test_readme_describes_current_bundle_builder_scope_without_overclaiming():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    bundle_setup = _markdown_section(readme, "### 오프라인 번들 생성", "### ")
+
+    assert "완전한 오프라인 배포 번들이 아닙니다" in bundle_setup
+    assert "core Python wheels" in bundle_setup
+    assert "Playwright Chromium" in bundle_setup
+    assert "Playwright MCP npm cache" in bundle_setup
+    for prerequisite in (
+        "Python 3.13.14 runtime",
+        "Supertonic/ONNX Runtime wheels와 모델",
+        "FFmpeg",
+        "HyperFrames",
+        "OpenCode",
+        "사내 루트 CA",
+    ):
+        assert prerequisite in bundle_setup
+    assert "별도 staging" in bundle_setup
 
 
 def _powershell() -> str:
