@@ -42,7 +42,8 @@ DOM_BROWSER_SYSTEM_PROMPT = """
 역할: 현재 Playwright observation과 최근 history를 근거로 다음 안전한 행동 하나만 선택한다.
 
 JSON 객체 하나만 반환한다. 허용 type은 fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish이다.
-현재 observation에 없는 selector, text, label을 만들지 않는다. 입력값은 input_values의 key를 value_key로 참조한다.
+현재 observation에 없는 selector, ref, text, label을 만들지 않는다. 입력값은 input_values의 key를 value_key로 참조한다.
+observation_source가 browser_snapshot_compact이면 fields와 clickables는 전체 접근성 트리에서 추출한 상호작용 후보이므로 body_text보다 우선한다.
 selector가 관찰되면 원문을 복사하고, 최근 실패한 같은 대상과 화면 변화 없는 성공 action을 반복하지 않는다.
 모달 확인이나 닫기가 요청되었고 실제 요소가 보이면 본 작업 전에 처리한다.
 Web Search, 모델 선택, 도구 선택, 설정, 선택형 토글과 업무 데이터 쓰기 동작을 선택하지 않는다.
@@ -57,7 +58,8 @@ VLM_BROWSER_SYSTEM_PROMPT = """
 
 JSON 객체 하나만 반환하고 정확히 한 행동만 반환한다.
 허용 type은 fill_by_label, click_by_text, click_by_selector, press_key, wait, capture_step, finish이다.
-스크린샷은 시각 상태를 확인하는 데 사용하고 실행 label과 selector는 DOM observation에서 가져온다.
+스크린샷은 시각 상태를 확인하는 데 사용하고 실행 label, selector 또는 ref는 DOM observation에서 가져온다.
+observation_source가 browser_snapshot_compact이면 fields와 clickables의 ref 후보를 신뢰하고 거대한 원본 트리를 다시 요구하지 않는다.
 스크린샷과 DOM의 입력값, 모달, 결과 상태가 다르면 클릭하거나 finish하지 말고 wait로 재관찰한다.
 DOM에 대응 요소가 없는 시각 대상은 클릭하지 않는다. 텍스트 없는 아이콘은 class, title, aria, agent_name과 시각 의미가 일치할 때만 선택한다.
 검색 또는 전송은 대응 field가 비어 있지 않고 성공한 fill history가 있을 때만 선택한다.

@@ -384,6 +384,27 @@ def test_compact_observation_bounds_large_dom_and_preserves_selectors():
     assert compacted["page_agent"]["candidate_count"] == 100
 
 
+def test_compact_observation_preserves_mcp_refs_and_source_metadata():
+    from backend.app.adapters.browser_quality import compact_observation
+
+    compacted = compact_observation(
+        {
+            "fields": [{"label": "질문", "ref": "e_input", "role": "textbox", "type": "textbox"}],
+            "clickables": [{"text": "전송", "ref": "e_send", "role": "button"}],
+            "body_text": "질문 입력 화면",
+            "observation_source": "browser_snapshot_compact",
+            "snapshot_truncated": True,
+            "snapshot_total_chars": 250000,
+        }
+    )
+
+    assert compacted["fields"][0]["ref"] == "e_input"
+    assert compacted["clickables"][0]["ref"] == "e_send"
+    assert compacted["observation_source"] == "browser_snapshot_compact"
+    assert compacted["snapshot_truncated"] is True
+    assert compacted["snapshot_total_chars"] == 250000
+
+
 def test_compact_history_keeps_recent_action_evidence_without_nested_payloads():
     from backend.app.adapters.browser_quality import compact_history
 

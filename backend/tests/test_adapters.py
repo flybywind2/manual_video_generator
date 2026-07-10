@@ -3374,6 +3374,321 @@ def test_playwright_mcp_live_agent_captures_screenshot_before_each_action(tmp_pa
     assert (tmp_path / "mcp_screenshots" / "mcp_step_01_before.png").exists()
 
 
+def test_playwright_mcp_compacts_large_snapshot_and_types_by_ref(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="대화 입력창에 테스트 질문 입력",
+        target_url="http://internal.example.local/chat",
+        role="사용자",
+        completion_condition="입력 완료",
+        input_values={"대화 입력창": "테스트 질문"},
+        agent_brief={"task_type": "chat_prompt"},
+    )
+    calls = []
+    observations = []
+    large_snapshot = "\n".join(
+        [f'- textbox "기타 입력 {index}" [ref=e_field_{index}]' for index in range(65)]
+        + [f'- generic "메뉴 항목 {index}" [ref=e{index}]' for index in range(10000)]
+        + [
+            '- textbox "대화 입력창" [ref=e_input]',
+            '- button "전송" [ref=e_send]',
+        ]
+    )
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_snapshot", "browser_type", "browser_click"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_snapshot":
+                return {"content": [{"type": "text", "text": large_snapshot}]}
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    def decide_next(_request, _settings, observation, history, **_kwargs):
+        observations.append(observation)
+        if not history:
+            return {
+                "status": "ok",
+                "type": "fill_by_label",
+                "label": "대화 입력창",
+                "value": "테스트 질문",
+                "value_key": "대화 입력창",
+                "reason": "입력창 채우기",
+            }
+        return {"status": "ok", "type": "finish", "reason": "입력 완료"}
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=decide_next,
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    assert observations[0]["fields"][0] == {
+        "label": "대화 입력창",
+        "ref": "e_input",
+        "role": "textbox",
+        "type": "textbox",
+    }
+    assert len(observations[0]["fields"]) <= 60
+    assert observations[0]["clickables"] == [
+        {"text": "전송", "ref": "e_send", "role": "button"}
+    ]
+    assert observations[0]["observation_source"] == "browser_snapshot_compact"
+    assert observations[0]["snapshot_truncated"] is True
+    assert len(observations[0]["body_text"]) <= 4000
+    type_calls = [arguments for name, arguments in calls if name == "browser_type"]
+    assert type_calls == [{"element": "대화 입력창", "ref": "e_input", "text": "테스트 질문"}]
+
+
+def test_playwright_mcp_empty_run_code_observation_recovers_from_snapshot(tmp_path: Path):
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_PLAYWRIGHT_MCP_MODE": "live",
+            "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS": "2",
+        }
+    )
+    request = SimpleNamespace(
+        request_text="검색창 확인",
+        target_url="http://internal.example.local/search",
+        role="사용자",
+        completion_condition="검색창 확인",
+        input_values={"검색창": "품질"},
+        agent_brief={"task_type": "lookup"},
+    )
+    calls = []
+    observed = []
+
+    class FakeMcpClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def initialize(self):
+            return {}
+
+        def list_tools(self):
+            return {"browser_navigate", "browser_run_code", "browser_snapshot", "browser_type"}
+
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_run_code" and "manualMcpObserve" in arguments.get("code", ""):
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                '### Result\n{"marker":true,"body_text":"검색","fields":[],"clickables":[]}'
+                                '\n### Ran Playwright code\nasync (page) => { return page; }'
+                            ),
+                        }
+                    ]
+                }
+            if name == "browser_snapshot":
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                '- searchbox "검색창 추가 옵션" [ref=e_wrong]\n'
+                                '- searchbox "검색창" [ref=e_search]'
+                            ),
+                        }
+                    ]
+                }
+            return {"content": [{"type": "text", "text": f"{name} ok"}]}
+
+    def decide_next(_request, _settings, observation, history, **_kwargs):
+        observed.append(observation)
+        if not history:
+            return {
+                "status": "ok",
+                "type": "fill_by_label",
+                "label": "검색창",
+                "value": "품질",
+                "value_key": "검색창",
+                "reason": "복구된 입력창 채우기",
+            }
+        return {"status": "ok", "type": "finish", "reason": "복구 관찰 확인"}
+
+    result = rehearse_plan(
+        {"steps": [], "actions": [{"id": "a1", "type": "navigate", "target": request.target_url}]},
+        settings,
+        tmp_path,
+        request=request,
+        decide_next=decide_next,
+        mcp_client_factory=lambda *_args, **_kwargs: FakeMcpClient(),
+    )
+
+    assert result["status"] == "live-agent-completed"
+    assert observed[0]["fields"][0]["ref"] == "e_search"
+    assert observed[0]["observation_source"] == "browser_run_code+browser_snapshot_compact"
+    type_calls = [arguments for name, arguments in calls if name == "browser_type"]
+    assert type_calls == [{"element": "검색창", "ref": "e_search", "text": "품질"}]
+
+
+def test_mcp_observation_parser_skips_unrelated_json_and_bounds_brace_scan():
+    from backend.app.adapters.rehearsal import _parse_mcp_observation
+
+    result = {
+        "content": [
+            {
+                "type": "text",
+                    "text": (
+                        '{"status":"ok"}\n'
+                        '{"url":"https://metadata.invalid","title":"not an observation"}\n'
+                        + ("{" * 5000)
+                        + '\n{"body_text":"챗봇","fields":[{"label":"질문","ref":"e1"}],"clickables":[]}'
+                ),
+            }
+        ]
+    }
+
+    parsed = _parse_mcp_observation(result)
+
+    assert parsed["fields"][0]["ref"] == "e1"
+    assert "status" not in parsed
+    assert parsed.get("url") != "https://metadata.invalid"
+
+
+def test_mcp_snapshot_recovers_fields_without_input_values():
+    from backend.app.adapters.rehearsal import _observe_with_mcp
+
+    calls = []
+
+    class FakeClient:
+        def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name == "browser_run_code":
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "body_text": "홈",
+                                    "fields": [],
+                                    "clickables": [{"text": "메뉴", "selector": "#menu"}],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ]
+                }
+            return {"content": [{"type": "text", "text": '- textbox "질문" [ref=e_question]'}]}
+
+    observation = _observe_with_mcp(
+        FakeClient(),
+        {"browser_run_code", "browser_snapshot"},
+        expect_inputs=False,
+    )
+
+    assert observation["fields"][0]["ref"] == "e_question"
+    assert [name for name, _arguments in calls] == ["browser_run_code", "browser_snapshot"]
+
+
+def test_mcp_snapshot_extracts_page_identity_and_password_field():
+    from backend.app.adapters.rehearsal import _compact_mcp_snapshot
+
+    observation = _compact_mcp_snapshot(
+        """### Page state
+- Page URL: https://adfs.internal.example.com/adfs/ls/
+- Page Title: Sign in
+- textbox "Password" [ref=e_password]
+- button "Sign in" [ref=e_submit]
+"""
+    )
+
+    assert observation["url"] == "https://adfs.internal.example.com/adfs/ls/"
+    assert observation["title"] == "Sign in"
+    assert observation["fields"][0]["type"] == "password"
+    assert observation["fields"][0]["value"] == "<redacted>"
+    assert observation["snapshot_truncated"] is False
+
+
+def test_snapshot_ref_matching_rejects_ambiguous_partial_labels():
+    from backend.app.adapters.rehearsal import _action_to_live_mcp_call
+
+    observation = {
+        "fields": [
+            {"label": "검색어 입력", "ref": "e1"},
+            {"label": "검색어 상세 입력", "ref": "e2"},
+        ],
+        "clickables": [],
+        "observation_source": "browser_snapshot_compact",
+    }
+
+    call = _action_to_live_mcp_call(
+        {"type": "fill_by_label", "label": "검색어", "value": "품질"},
+        {"browser_type", "browser_run_code"},
+        observation=observation,
+    )
+
+    assert call is None
+
+
+def test_mcp_snapshot_preserves_duplicate_exact_priority_fields_for_ambiguity_detection():
+    from backend.app.adapters.rehearsal import _action_to_live_mcp_call, _compact_mcp_snapshot
+
+    observation = _compact_mcp_snapshot(
+        '- textbox "검색어" [ref=e_first]\n- textbox "검색어" [ref=e_second]',
+        priority_labels=["검색어"],
+    )
+
+    assert [field["ref"] for field in observation["fields"]] == ["e_first", "e_second"]
+    call = _action_to_live_mcp_call(
+        {"type": "fill_by_label", "label": "검색어", "value": "품질"},
+        {"browser_type", "browser_run_code"},
+        observation=observation,
+    )
+    assert call is None
+
+
+def test_mcp_snapshot_marks_long_accessible_text_as_truncated():
+    from backend.app.adapters.rehearsal import _compact_mcp_snapshot
+
+    long_name = "긴이름" * 3000
+    observation = _compact_mcp_snapshot(f'- button "{long_name}" [ref=e_long]')
+
+    assert len(observation["body_text"]) == 4000
+    assert observation["snapshot_truncated"] is True
+
+
+def test_browser_agent_normalization_preserves_explicit_snapshot_ref():
+    from backend.app.adapters.browser_agent import _normalize_browser_agent_action
+
+    request = SimpleNamespace(input_values={"질문": "테스트"})
+
+    action = _normalize_browser_agent_action(
+        {"type": "fill_by_label", "label": "질문", "value_key": "질문", "ref": "e_question"},
+        request,
+    )
+
+    assert action["ref"] == "e_question"
+
+
 def test_playwright_mcp_live_agent_clicks_icon_only_plus_controls(tmp_path: Path):
     settings = load_settings(
         environ={

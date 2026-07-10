@@ -13,8 +13,8 @@ FIELD_LIMIT = 40
 CLICKABLE_LIMIT = 60
 HISTORY_LIMIT = 6
 
-_FIELD_KEYS = ("selector", "label", "name", "placeholder", "type", "value", "agent_name", "agent_role")
-_CLICKABLE_KEYS = ("selector", "text", "title", "aria", "class_name", "role", "href", "agent_name", "agent_role")
+_FIELD_KEYS = ("selector", "ref", "label", "name", "placeholder", "type", "role", "value", "agent_name", "agent_role")
+_CLICKABLE_KEYS = ("selector", "ref", "text", "title", "aria", "class_name", "role", "href", "agent_name", "agent_role")
 _HISTORY_KEYS = (
     "step",
     "action_id",
@@ -43,6 +43,17 @@ def compact_observation(observation: dict[str, Any]) -> dict[str, Any]:
     compacted["fields"] = _compact_items(observation.get("fields"), _FIELD_KEYS, FIELD_LIMIT)
     compacted["clickables"] = _compact_items(observation.get("clickables"), _CLICKABLE_KEYS, CLICKABLE_LIMIT)
     compacted["body_text"] = str(observation.get("body_text") or "")[:BODY_TEXT_LIMIT]
+
+    for key in (
+        "observation_source",
+        "snapshot_truncated",
+        "snapshot_candidates_truncated",
+        "snapshot_total_chars",
+        "snapshot_total_lines",
+    ):
+        value = observation.get(key)
+        if value not in (None, ""):
+            compacted[key] = value
 
     screenshot = observation.get("screenshot")
     if isinstance(screenshot, dict):
@@ -93,6 +104,11 @@ def validate_browser_action(
         for item in [*fields, *clickables]
         if str(item.get("selector") or "").strip()
     }
+    observed_refs = {
+        str(item.get("ref") or "").strip()
+        for item in [*fields, *clickables]
+        if str(item.get("ref") or "").strip()
+    }
 
     if str(action.get("status") or "ok") not in {"ok", ""}:
         errors.append("action_status_not_ok")
@@ -102,6 +118,9 @@ def validate_browser_action(
         if value_key not in input_values:
             errors.append("fill_value_key_not_provided")
         selector = str(action.get("selector") or "").strip()
+        ref = str(action.get("ref") or "").strip()
+        if ref and ref not in observed_refs:
+            errors.append("ref_not_observed")
         label = str(action.get("label") or "").strip()
         if selector and selector not in observed_selectors:
             errors.append("selector_not_observed")
@@ -120,7 +139,10 @@ def validate_browser_action(
         texts = _text_values(action.get("texts") or action.get("text") or action.get("label"))
         if is_disallowed_click_texts(texts):
             errors.append("disallowed_click")
-        if not any(_text_matches(text, _clickable_name(item)) for text in texts for item in clickables):
+        ref = str(action.get("ref") or "").strip()
+        if ref and ref not in observed_refs:
+            errors.append("ref_not_observed")
+        if not ref and not any(_text_matches(text, _clickable_name(item)) for text in texts for item in clickables):
             errors.append("click_target_not_observed")
         if any(_is_submission_target(text) for text in texts) and _has_pending_visible_input(request, fields):
             errors.append("click_before_required_input")

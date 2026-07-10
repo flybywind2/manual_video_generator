@@ -171,6 +171,7 @@ def decide_browser_agent_action(
                             "value_key": "key from input_values",
                             "texts": ["button/link text candidates for click_by_text"],
                             "selector": "CSS selector for click_by_selector, such as .icon-plus-bold or button[data-action='add']",
+                            "ref": "optional exact ref copied from observation fields or clickables",
                             "key": "Enter for press_key",
                             "timeout_ms": "wait duration for wait",
                             "reason": "short Korean reason",
@@ -374,6 +375,7 @@ def _vlm_prompt_text(
             "value_key": "key from input_values",
             "texts": ["button/link text candidates for click_by_text"],
             "selector": "CSS selector for click_by_selector",
+            "ref": "optional exact ref copied from observation fields or clickables",
             "key": "Enter for press_key",
             "timeout_ms": "wait duration for wait",
             "reason": "short Korean reason",
@@ -425,6 +427,8 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
         if not label or value is None or str(value) == "":
             return {"status": "failed", "type": "finish", "reason": "missing_fill_label_or_value"}
         action.update({"label": label, "value": str(value), "value_key": value_key})
+        if str(data.get("ref") or "").strip():
+            action["ref"] = str(data["ref"]).strip()
     elif action_type == "click_by_text":
         texts = _text_candidates(data.get("texts", data.get("text", data.get("label", ""))))
         if not texts:
@@ -442,6 +446,8 @@ def _normalize_browser_agent_action(data: dict[str, Any], request: Any) -> dict[
         if is_disallowed_click_texts(texts):
             return {"status": "blocked", "type": "finish", "reason": "disallowed_click_text", "texts": texts}
         action["texts"] = texts
+        if str(data.get("ref") or "").strip():
+            action["ref"] = str(data["ref"]).strip()
     elif action_type == "click_by_selector":
         selector = str(data.get("selector") or data.get("css_selector") or data.get("target") or "").strip()
         if not selector:

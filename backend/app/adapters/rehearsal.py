@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import base64
 from pathlib import Path
@@ -285,7 +286,14 @@ def _run_live_mcp_browser_agent(
                 functional_steps = 0
                 sso_wait_turns = 0
                 while functional_steps < max_steps and step_index <= max_steps + max_sso_wait_turns:
-                    observation = _observe_with_mcp(client, available_tools)
+                    expect_inputs = bool(getattr(request, "input_values", {}) or {})
+                    priority_labels = _observation_priority_labels(request)
+                    observation = _observe_with_mcp(
+                        client,
+                        available_tools,
+                        expect_inputs=expect_inputs,
+                        priority_labels=priority_labels,
+                    )
                     screenshot_before = _take_mcp_step_screenshot(client, available_tools, package_dir, step_index)
                     if screenshot_before:
                         observation["screenshot"] = screenshot_before
@@ -330,7 +338,7 @@ def _run_live_mcp_browser_agent(
                         execution["status"] = "blocked-login"
                         execution["blocked_reason"] = "sso_auth_redirect_timeout"
                         break
-                    live_call = _action_to_live_mcp_call(action, available_tools)
+                    live_call = _action_to_live_mcp_call(action, available_tools, observation=observation)
                     if live_call is None:
                         turn["result"] = {"status": "skipped", "reason": "no_mcp_tool_for_action"}
                         turn["verification"] = {"phase": "verify", "status": "failed", "reason": "no_mcp_tool_for_action"}
@@ -353,7 +361,13 @@ def _run_live_mcp_browser_agent(
                         execution["blocked_reason"] = "login_required"
                         execution["blocked_action_id"] = action.get("id")
                         break
-                    verification = _verify_mcp_agent_turn(client, available_tools, observation)
+                    verification = _verify_mcp_agent_turn(
+                        client,
+                        available_tools,
+                        observation,
+                        expect_inputs=expect_inputs,
+                        priority_labels=priority_labels,
+                    )
                     turn["verification"] = verification
                     execution["turns"].append(turn)
                     history.append(
@@ -552,28 +566,63 @@ def _is_sso_wait_action(action: dict[str, Any]) -> bool:
     return str(action.get("type") or "") == "wait" and str(action.get("reason") or "") == "sso_auth_redirect_wait"
 
 
-def _observe_with_mcp(client: Any, available_tools: set[str]) -> dict[str, Any]:
+def _observe_with_mcp(
+    client: Any,
+    available_tools: set[str],
+    *,
+    expect_inputs: bool = False,
+    priority_labels: list[str] | None = None,
+) -> dict[str, Any]:
     tool = _run_code_tool(available_tools)
     if not tool:
         if "browser_evaluate" in available_tools:
             result = client.call_tool("browser_evaluate", {"function": _mcp_observe_function()})
             parsed = _parse_mcp_observation(result)
             if parsed:
-                return parsed
+                return _recover_sparse_mcp_observation(
+                    client,
+                    available_tools,
+                    parsed,
+                    source="browser_evaluate",
+                    expect_inputs=expect_inputs,
+                    priority_labels=priority_labels,
+                )
         if "browser_snapshot" in available_tools:
-            result = client.call_tool("browser_snapshot", {})
-            return {"body_text": _flatten_mcp_result_text(result), "fields": [], "clickables": []}
+            return _snapshot_observation(client, priority_labels=priority_labels)
         return {"body_text": "", "fields": [], "clickables": []}
     result = client.call_tool(tool, {"code": _mcp_observe_code()})
     parsed = _parse_mcp_observation(result)
     if parsed:
-        return parsed
+        return _recover_sparse_mcp_observation(
+            client,
+            available_tools,
+            parsed,
+            source=tool,
+            expect_inputs=expect_inputs,
+            priority_labels=priority_labels,
+        )
+    if "browser_snapshot" in available_tools:
+        snapshot = _snapshot_observation(client, priority_labels=priority_labels)
+        snapshot["observation_source"] = f"{tool}+browser_snapshot_compact"
+        return snapshot
     return {"body_text": _flatten_mcp_result_text(result), "fields": [], "clickables": []}
 
 
-def _verify_mcp_agent_turn(client: Any, available_tools: set[str], before_observation: dict[str, Any]) -> dict[str, Any]:
+def _verify_mcp_agent_turn(
+    client: Any,
+    available_tools: set[str],
+    before_observation: dict[str, Any],
+    *,
+    expect_inputs: bool = False,
+    priority_labels: list[str] | None = None,
+) -> dict[str, Any]:
     try:
-        after = _observe_with_mcp(client, available_tools)
+        after = _observe_with_mcp(
+            client,
+            available_tools,
+            expect_inputs=expect_inputs,
+            priority_labels=priority_labels,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"phase": "verify", "status": "failed", "reason": f"observe_failed:{type(exc).__name__}"}
     return {
@@ -658,23 +707,226 @@ def _mcp_observation_signature(observation: dict[str, Any]) -> tuple[Any, ...]:
 
 def _parse_mcp_observation(result: Any) -> dict[str, Any]:
     if isinstance(result, dict) and isinstance(result.get("observation"), dict):
-        return result["observation"]
+        candidate = result["observation"]
+        return candidate if _is_mcp_observation(candidate) else {}
     text = _flatten_mcp_result_text(result).strip()
     if not text:
         return {}
-    candidates = [text]
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        candidates.insert(0, text[start : end + 1])
-    for candidate in candidates:
+    decoder = json.JSONDecoder()
+    starts: list[int] = []
+    stripped_start = len(text) - len(text.lstrip())
+    if stripped_start < len(text) and text[stripped_start] == "{":
+        starts.append(stripped_start)
+    for match in re.finditer(r'"(?:fields|clickables|body_text)"\s*:', text):
+        start = text.rfind("{", 0, match.start())
+        if start >= 0 and start not in starts:
+            starts.append(start)
+        if len(starts) >= 32:
+            break
+    for start in starts:
         try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
+            parsed, _end = decoder.raw_decode(text, start)
+        except (json.JSONDecodeError, TypeError):
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and _is_mcp_observation(parsed):
             return parsed
     return {}
+
+
+def _is_mcp_observation(value: dict[str, Any]) -> bool:
+    if not any(key in value for key in ("fields", "clickables", "body_text")):
+        return False
+    if "fields" in value and not isinstance(value.get("fields"), list):
+        return False
+    if "clickables" in value and not isinstance(value.get("clickables"), list):
+        return False
+    return True
+
+
+_SNAPSHOT_LINE_RE = re.compile(
+    r'^\s*-\s*(?P<role>[A-Za-z][\w-]*)\s*(?:"(?P<name>(?:\\.|[^"])*)")?.*?\[ref=(?P<ref>[^\]\s]+)\]'
+)
+_SNAPSHOT_FIELD_ROLES = {"textbox", "searchbox", "combobox", "spinbutton", "slider"}
+_SNAPSHOT_CLICKABLE_ROLES = {"button", "link", "checkbox", "radio", "menuitem", "option", "tab", "switch"}
+_SNAPSHOT_HEADING_ROLES = {"heading"}
+_SNAPSHOT_BODY_LIMIT = 4000
+
+
+def _snapshot_observation(client: Any, *, priority_labels: list[str] | None = None) -> dict[str, Any]:
+    result = client.call_tool("browser_snapshot", {})
+    return _compact_mcp_snapshot(_flatten_mcp_result_text(result), priority_labels=priority_labels)
+
+
+def _compact_mcp_snapshot(text: str, *, priority_labels: list[str] | None = None) -> dict[str, Any]:
+    exact_priority_fields: list[dict[str, Any]] = []
+    partial_priority_fields: list[dict[str, Any]] = []
+    regular_fields: list[dict[str, Any]] = []
+    clickables: list[dict[str, Any]] = []
+    headings: list[str] = []
+    interaction_text: list[str] = []
+    first_context: list[str] = []
+    tail_context: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    priorities = [_normalize_match_text(item) for item in (priority_labels or []) if _normalize_match_text(item)]
+    url = ""
+    title = ""
+    total_lines = 0
+    context_lines = 0
+    total_fields = 0
+    total_clickables = 0
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        total_lines += 1
+        url_match = re.match(r"^-?\s*Page URL:\s*(.+)$", line, flags=re.IGNORECASE)
+        if url_match:
+            url = url_match.group(1).strip()
+            continue
+        title_match = re.match(r"^-?\s*Page Title:\s*(.+)$", line, flags=re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+            continue
+        match = _SNAPSHOT_LINE_RE.match(line)
+        if match:
+            role = match.group("role").lower()
+            name = _decode_snapshot_name(match.group("name") or role)
+            ref = match.group("ref")
+            identity = (role, ref)
+            if identity in seen:
+                continue
+            if role in _SNAPSHOT_FIELD_ROLES:
+                total_fields += 1
+                password = _is_password_snapshot_field(name, line)
+                field = {
+                    "label": name,
+                    "ref": ref,
+                    "role": role,
+                    "type": "password" if password else role,
+                }
+                if password:
+                    field["value"] = "<redacted>"
+                normalized_name = _normalize_match_text(name)
+                is_exact_priority = any(priority == normalized_name for priority in priorities)
+                is_partial_priority = not is_exact_priority and any(
+                    priority in normalized_name or normalized_name in priority for priority in priorities
+                )
+                if is_exact_priority:
+                    destination = exact_priority_fields
+                elif is_partial_priority:
+                    destination = partial_priority_fields
+                else:
+                    destination = regular_fields
+                destination_limit = min(max(len(priorities) * 2, 2), 20) if (is_exact_priority or is_partial_priority) else 60
+                if len(destination) < destination_limit:
+                    destination.append(field)
+                    seen.add(identity)
+                    if len(interaction_text) < 140:
+                        interaction_text.append(f"{role}: {name}")
+                continue
+            if role in _SNAPSHOT_CLICKABLE_ROLES:
+                total_clickables += 1
+                if len(clickables) < 80:
+                    clickables.append({"text": name, "ref": ref, "role": role})
+                    seen.add(identity)
+                    if len(interaction_text) < 140:
+                        interaction_text.append(f"{role}: {name}")
+                continue
+            if role in _SNAPSHOT_HEADING_ROLES:
+                if len(headings) < 20:
+                    headings.append(name)
+        context = re.sub(r"\s*\[ref=[^\]]+\]", "", line)
+        context_lines += 1
+        if len(first_context) < 24:
+            first_context.append(context[:240])
+        tail_context.append(context[:240])
+        if len(tail_context) > 24:
+            tail_context.pop(0)
+
+    priority_fields = [*exact_priority_fields, *partial_priority_fields]
+    priority_refs = {item["ref"] for item in priority_fields}
+    fields = [*priority_fields, *(item for item in regular_fields if item["ref"] not in priority_refs)][:60]
+    identity_context = [item for item in (f"Page URL: {url}" if url else "", f"Page Title: {title}" if title else "") if item]
+    body_source = " ".join([*identity_context, *interaction_text, *first_context, *tail_context])
+    body_text = body_source[:_SNAPSHOT_BODY_LIMIT]
+    candidates_truncated = total_fields > len(fields) or total_clickables > len(clickables)
+    context_truncated = context_lines > len(first_context) + len(tail_context)
+    body_truncated = len(body_source) > len(body_text)
+    observation = {
+        "headings": headings[:20],
+        "fields": fields,
+        "clickables": clickables,
+        "body_text": body_text,
+        "observation_source": "browser_snapshot_compact",
+        "snapshot_truncated": candidates_truncated or context_truncated or body_truncated,
+        "snapshot_candidates_truncated": candidates_truncated,
+        "snapshot_total_chars": len(text),
+        "snapshot_total_lines": total_lines,
+    }
+    if url:
+        observation["url"] = url
+    if title:
+        observation["title"] = title
+    return observation
+
+
+def _decode_snapshot_name(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except (json.JSONDecodeError, TypeError):
+        return str(value).replace('\\"', '"').strip()
+
+
+def _is_password_snapshot_field(name: str, raw_line: str) -> bool:
+    normalized = _normalize_match_text(f"{name} {raw_line}")
+    return any(token in normalized for token in ("password", "passwd", "비밀번호", "암호"))
+
+
+def _recover_sparse_mcp_observation(
+    client: Any,
+    available_tools: set[str],
+    observation: dict[str, Any],
+    *,
+    source: str,
+    expect_inputs: bool,
+    priority_labels: list[str] | None,
+) -> dict[str, Any]:
+    base = dict(observation)
+    base.setdefault("fields", [])
+    base.setdefault("clickables", [])
+    base.setdefault("body_text", "")
+    base.setdefault("observation_source", source)
+    sparse = not base["fields"]
+    if not sparse or "browser_snapshot" not in available_tools:
+        return base
+
+    snapshot = _snapshot_observation(client, priority_labels=priority_labels)
+    if snapshot.get("fields"):
+        base["fields"] = snapshot["fields"]
+    if snapshot.get("clickables") and not base["clickables"]:
+        base["clickables"] = snapshot["clickables"]
+    if snapshot.get("headings") and not base.get("headings"):
+        base["headings"] = snapshot["headings"]
+    if snapshot.get("body_text") and not base["body_text"]:
+        base["body_text"] = snapshot["body_text"]
+    base["observation_source"] = f"{source}+browser_snapshot_compact"
+    base["snapshot_truncated"] = snapshot.get("snapshot_truncated", False)
+    base["snapshot_candidates_truncated"] = snapshot.get("snapshot_candidates_truncated", False)
+    base["snapshot_total_chars"] = snapshot.get("snapshot_total_chars", 0)
+    base["snapshot_total_lines"] = snapshot.get("snapshot_total_lines", 0)
+    if snapshot.get("url") and not base.get("url"):
+        base["url"] = snapshot["url"]
+    if snapshot.get("title") and not base.get("title"):
+        base["title"] = snapshot["title"]
+    return base
+
+
+def _observation_priority_labels(request: Any) -> list[str]:
+    labels = [str(item) for item in (getattr(request, "input_values", {}) or {}).keys()]
+    brief = getattr(request, "agent_brief", {}) or {}
+    labels.extend(str(item) for item in brief.get("safe_click_intents", []) or [])
+    return list(dict.fromkeys(item.strip() for item in labels if item.strip()))
 
 
 def _mcp_observe_code() -> str:
@@ -926,11 +1178,28 @@ def _action_to_mcp_call(action: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) -> dict[str, Any] | None:
+def _action_to_live_mcp_call(
+    action: dict[str, Any],
+    available_tools: set[str],
+    *,
+    observation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     action_type = action.get("type")
     if action_type == "navigate" and "browser_navigate" in available_tools:
         return {"tool": "browser_navigate", "arguments": {"url": action.get("target", "")}}
     if action_type == "fill_by_label":
+        field = _match_snapshot_field(action, observation)
+        if field and "browser_type" in available_tools:
+            return {
+                "tool": "browser_type",
+                "arguments": {
+                    "element": str(field.get("label") or action.get("label") or "입력 필드"),
+                    "ref": field["ref"],
+                    "text": str(action.get("value") or ""),
+                },
+            }
+        if _snapshot_ref_candidates(observation, "fields"):
+            return None
         tool = _run_code_tool(available_tools)
         if tool:
             return {
@@ -944,6 +1213,17 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
             }
         return None
     if action_type == "click_by_text":
+        target = _match_snapshot_clickable(action, observation)
+        if target and "browser_click" in available_tools:
+            return {
+                "tool": "browser_click",
+                "arguments": {
+                    "element": str(target.get("text") or "클릭 대상"),
+                    "ref": target["ref"],
+                },
+            }
+        if _snapshot_ref_candidates(observation, "clickables"):
+            return None
         tool = _run_code_tool(available_tools)
         if tool:
             return {"tool": tool, "arguments": {"code": _click_by_text_code(_text_candidates(action))}}
@@ -1004,6 +1284,59 @@ def _action_to_live_mcp_call(action: dict[str, Any], available_tools: set[str]) 
     if action_type == "capture_step" and "browser_snapshot" in available_tools:
         return {"tool": "browser_snapshot", "arguments": {}}
     return None
+
+
+def _match_snapshot_field(action: dict[str, Any], observation: dict[str, Any] | None) -> dict[str, Any] | None:
+    fields = _snapshot_ref_candidates(observation, "fields")
+    explicit_ref = str(action.get("ref") or "").strip()
+    if explicit_ref:
+        return next((field for field in fields if str(field.get("ref")) == explicit_ref), None)
+    label = _normalize_match_text(action.get("label"))
+    return _unique_text_match(fields, label, ("label", "placeholder", "name", "agent_name"))
+
+
+def _match_snapshot_clickable(action: dict[str, Any], observation: dict[str, Any] | None) -> dict[str, Any] | None:
+    clickables = _snapshot_ref_candidates(observation, "clickables")
+    explicit_ref = str(action.get("ref") or "").strip()
+    if explicit_ref:
+        return next((item for item in clickables if str(item.get("ref")) == explicit_ref), None)
+    for text in [_normalize_match_text(item) for item in _text_candidates(action)]:
+        matched = _unique_text_match(clickables, text, ("text", "aria", "title", "agent_name"))
+        if matched:
+            return matched
+    return None
+
+
+def _snapshot_ref_candidates(observation: dict[str, Any] | None, key: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (observation or {}).get(key) or []
+        if isinstance(item, dict) and str(item.get("ref") or "").strip()
+    ]
+
+
+def _unique_text_match(
+    candidates: list[dict[str, Any]],
+    target: str,
+    keys: tuple[str, ...],
+) -> dict[str, Any] | None:
+    if not target:
+        return None
+    named = [
+        (item, _normalize_match_text(next((item.get(key) for key in keys if item.get(key)), "")))
+        for item in candidates
+    ]
+    exact = [item for item, name in named if name == target]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return None
+    partial = [item for item, name in named if name and (target in name or name in target)]
+    return partial[0] if len(partial) == 1 else None
+
+
+def _normalize_match_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
 
 
 def _bounded_wait_timeout_ms(value: Any) -> int:
