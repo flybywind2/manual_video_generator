@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path $Root).Path
 Set-Location $Root
+$pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 if (-not $Dist) {
     $Dist = Join-Path $Root "dist\manual-video-agent-bundle"
 }
@@ -77,11 +78,16 @@ Get-ChildItem -Force $Root | Where-Object { -not (Test-ExcludedSource $_) } | Fo
 
 if (-not $SkipDownloads) {
     Write-Host "Downloading Python wheels"
-    python -m pip download -d $Wheels fastapi "uvicorn[standard]" pydantic pillow playwright httpx pytest
+    $wheelArguments = [object[]]@($pythonRuntime.arguments) + @(
+        "-m", "pip", "download", "-d", $Wheels,
+        "fastapi", "uvicorn[standard]", "pydantic", "pillow", "playwright", "httpx", "pytest"
+    )
+    & ([string]$pythonRuntime.executable) @wheelArguments
 
     Write-Host "Installing Playwright Chromium into bundle browsers"
     $env:PLAYWRIGHT_BROWSERS_PATH = $Browsers
-    python -m playwright install chromium
+    $playwrightArguments = [object[]]@($pythonRuntime.arguments) + @("-m", "playwright", "install", "chromium")
+    & ([string]$pythonRuntime.executable) @playwrightArguments
 
     Write-Host "Priming npm cache for Playwright MCP"
     $env:NPM_CONFIG_CACHE = $NpmCache
@@ -93,7 +99,9 @@ if (-not $SkipDownloads) {
 $versions = [ordered]@{
     created_at = (Get-Date).ToString("s")
     root = $Root
-    python = (python --version 2>&1 | Select-Object -First 1)
+    required_python = $pythonRuntime.expected_version
+    python = $pythonRuntime.actual_version
+    python_executable = $pythonRuntime.executable
     node = if (Get-Command node -ErrorAction SilentlyContinue) { (node --version 2>&1 | Select-Object -First 1) } else { "missing" }
     npm = if (Get-Command npm -ErrorAction SilentlyContinue) { (npm --version 2>&1 | Select-Object -First 1) } else { "missing" }
     playwright_browsers_path = $Browsers

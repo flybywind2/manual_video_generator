@@ -6,7 +6,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet
+$ManualAgentPythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1") -Strict
 Set-Location $Root
 
 Write-Host "Starting Manual Video Agent on http://$HostName`:$Port"
-python -m uvicorn backend.app.main:app --host $HostName --port $Port
+$pythonArguments = [object[]]@($ManualAgentPythonRuntime.arguments) + @(
+    "-m", "uvicorn", "backend.app.main:app", "--host", $HostName, "--port", [string]$Port
+)
+& ([string]$ManualAgentPythonRuntime.executable) @pythonArguments

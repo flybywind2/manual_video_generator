@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 from pathlib import Path
@@ -43,6 +44,49 @@ def _run_python_runtime(*arguments: str, env: dict[str, str] | None = None) -> s
         encoding="utf-8",
         env=env,
     )
+
+
+OPERATIONAL_SCRIPTS = (
+    "bootstrap.ps1",
+    "start.ps1",
+    "doctor.ps1",
+    "build_bundle.ps1",
+    "smoke.ps1",
+)
+
+
+def _powershell_script(name: str, *arguments: str, env: dict[str, str] | None = None):
+    return subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            f".\\scripts\\{name}",
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+    )
+
+
+def _fake_python_3_13_14(tmp_path: Path) -> Path:
+    executable = tmp_path / "fake python 3.13.14.cmd"
+    executable.write_text("@echo 3.13.14\n", encoding="utf-8")
+    return executable
+
+
+def _minimal_bundle_root(tmp_path: Path) -> Path:
+    root = tmp_path / "source"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "doctor.ps1").write_text("Write-Host 'fixture'\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    return root
 
 
 @pytest.mark.parametrize(
@@ -233,8 +277,90 @@ def test_doctor_script_emits_machine_readable_json_contract():
         assert any(item["status"] == "FAIL" for item in checks)
 
 
+def test_runtime_scripts_use_resolved_python_without_bare_operational_invocations():
+    forbidden = (
+        "python -m ",
+        "python -c ",
+        "| python -",
+        "python tools\\",
+        '-FilePath "python"',
+    )
+
+    for name in OPERATIONAL_SCRIPTS:
+        script = Path("scripts", name).read_text(encoding="utf-8")
+        assert "python_runtime.ps1" in script, name
+        assert not any(token in script for token in forbidden), name
+
+    for name in ("start.ps1", "build_bundle.ps1", "smoke.ps1"):
+        script = Path("scripts", name).read_text(encoding="utf-8")
+        assert "-Strict" in script, name
+
+
+def test_doctor_python_check_reports_structured_exact_version_mismatch():
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script("doctor.ps1", "-Json", env=env)
+
+    assert completed.returncode != 0
+    checks = json.loads(completed.stdout)
+    python_check = next(item for item in checks if item["name"] == "python")
+    assert python_check["status"] == "FAIL"
+    assert python_check["expected_version"] == "3.13.14"
+    assert python_check["actual_version"] != "3.13.14"
+    assert Path(python_check["executable"]).resolve() == Path(sys.executable).resolve()
+
+
+def test_build_bundle_rejects_mismatch_before_creating_zip(tmp_path: Path):
+    dist = tmp_path / "mismatch-bundle"
+    root = _minimal_bundle_root(tmp_path)
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = sys.executable
+
+    completed = _powershell_script(
+        "build_bundle.ps1",
+        "-Root",
+        str(root),
+        "-SkipDownloads",
+        "-Dist",
+        str(dist),
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "Expected Python 3.13.14" in completed.stderr
+    assert not dist.with_suffix(".zip").exists()
+
+
+def test_build_bundle_manifest_records_resolved_python_runtime(tmp_path: Path):
+    dist = tmp_path / "valid-bundle"
+    root = _minimal_bundle_root(tmp_path)
+    fake_python = _fake_python_3_13_14(tmp_path)
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(fake_python)
+
+    completed = _powershell_script(
+        "build_bundle.ps1",
+        "-Root",
+        str(root),
+        "-SkipDownloads",
+        "-Dist",
+        str(dist),
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    versions = json.loads((dist / "versions.json").read_text(encoding="utf-8-sig"))
+    assert versions["required_python"] == "3.13.14"
+    assert versions["python"] == "3.13.14"
+    assert Path(versions["python_executable"]) == fake_python
+
+
 def test_build_bundle_skip_downloads_creates_manifest_and_zip(tmp_path: Path):
     dist = tmp_path / "bundle"
+    root = _minimal_bundle_root(tmp_path)
+    env = os.environ.copy()
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_13_14(tmp_path))
     command = [
         _powershell(),
         "-NoProfile",
@@ -242,12 +368,21 @@ def test_build_bundle_skip_downloads_creates_manifest_and_zip(tmp_path: Path):
         "Bypass",
         "-File",
         ".\\scripts\\build_bundle.ps1",
+        "-Root",
+        str(root),
         "-SkipDownloads",
         "-Dist",
         str(dist),
     ]
 
-    completed = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert (dist / "versions.json").is_file()
@@ -274,7 +409,7 @@ def test_smoke_script_supports_live_browser_and_output_smoke_dir():
     assert "create_pipeline_draft" in script
     assert "continue_pipeline_draft" in script
     assert "output\") / \"smoke\"" in script
-    assert "uvicorn backend.app.main:app" in script
+    assert '"uvicorn", "backend.app.main:app"' in script
 
 
 def test_doctor_collect_writes_redacted_diagnostics_to_configured_output_dir(tmp_path: Path):

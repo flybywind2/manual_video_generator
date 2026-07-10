@@ -42,6 +42,10 @@ Add-PathEntry (Join-Path $Runtime "node")
 Add-PathEntry (Join-Path $Runtime "node\bin")
 Add-PathEntry (Join-Path $Runtime "ffmpeg\bin")
 
+$script:ManualAgentPythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1")
+$script:ManualAgentPythonExecutable = [string]$script:ManualAgentPythonRuntime.executable
+$script:ManualAgentPythonPrefixArguments = [object[]]@($script:ManualAgentPythonRuntime.arguments)
+
 if ($EnvFile -and (Test-Path $EnvFile)) {
     $env:MANUAL_AGENT_ENV_FILE = (Resolve-Path $EnvFile).Path
 }
@@ -55,4 +59,5 @@ if (-not $Quiet) {
     Write-Host "Playwright browsers: $env:PLAYWRIGHT_BROWSERS_PATH"
     Write-Host "HF_HOME: $env:HF_HOME"
     Write-Host "NPM cache: $env:NPM_CONFIG_CACHE"
+    Write-Host "Python: $($script:ManualAgentPythonRuntime.actual_version) ($script:ManualAgentPythonExecutable)"
 }

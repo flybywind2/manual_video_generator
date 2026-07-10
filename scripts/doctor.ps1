@@ -5,7 +5,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$doctorJson = $Json
 . (Join-Path $PSScriptRoot "bootstrap.ps1") -Root $Root -Quiet
+$pythonRuntime = . (Join-Path $PSScriptRoot "python_runtime.ps1")
+$Json = $doctorJson
 $Root = (Resolve-Path $Root).Path
 Set-Location $Root
 
@@ -55,7 +58,21 @@ function Test-Command {
     Add-Check $Name "PASS" $text
 }
 
-Test-Command "python" @("python", "--version") "Python 3.10"
+$pythonStatus = if ($pythonRuntime.valid) { "PASS" } else { "FAIL" }
+$pythonMessage = if ($null -eq $pythonRuntime.actual_version) {
+    "Python runtime unavailable; expected $($pythonRuntime.expected_version)"
+} else {
+    "Python $($pythonRuntime.actual_version); expected $($pythonRuntime.expected_version)"
+}
+$checks.Add([ordered]@{
+    name = "python"
+    status = $pythonStatus
+    message = $pythonMessage
+    action = if ($pythonRuntime.valid) { "" } else { "Set MANUAL_AGENT_PYTHON to the Python $($pythonRuntime.expected_version) executable." }
+    expected_version = $pythonRuntime.expected_version
+    actual_version = $pythonRuntime.actual_version
+    executable = $pythonRuntime.executable
+}) | Out-Null
 Test-Command "node" @("node", "--version")
 Test-Command "npm" @("npm", "--version")
 Test-Command "npx" @("npx", "--version")
@@ -67,7 +84,7 @@ if (Test-Path $pwPath) {
     if ($chromium) {
         Add-Check "playwright_browsers" "PASS" $chromium.FullName
     } else {
-        Add-Check "playwright_browsers" "WARN" "No chrome.exe under $pwPath" "Run python -m playwright install chromium on a connected build PC and bundle the browsers directory."
+        Add-Check "playwright_browsers" "WARN" "No chrome.exe under $pwPath" "Run the resolved Python runtime with -m playwright install chromium on a connected build PC."
     }
 } else {
     Add-Check "playwright_browsers" "FAIL" "$pwPath missing" "Set PLAYWRIGHT_BROWSERS_PATH to a bundled browsers directory."
@@ -110,15 +127,23 @@ if (Test-Path $hfHome) {
     Add-Check "hf_cache" "WARN" "$hfHome missing" "Needed before enabling MeloTTS in restricted networks."
 }
 
-try {
-    $configStatus = python -c "from backend.app.config import load_settings; import json; print(json.dumps(load_settings().safe_status(), ensure_ascii=False))" 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Add-Check "app_config" "PASS" "settings loaded"
-    } else {
-        Add-Check "app_config" "FAIL" ($configStatus -join " ") "Fix .env or Python path."
+if (-not $pythonRuntime.valid) {
+    Add-Check "app_config" "FAIL" "Skipped because the Python runtime contract failed." "Fix Python runtime before starting the app."
+} else {
+    try {
+        $configArguments = [object[]]@($pythonRuntime.arguments) + @(
+            "-c",
+            "from backend.app.config import load_settings; import json; print(json.dumps(load_settings().safe_status(), ensure_ascii=False))"
+        )
+        $configStatus = & ([string]$pythonRuntime.executable) @configArguments 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Add-Check "app_config" "PASS" "settings loaded"
+        } else {
+            Add-Check "app_config" "FAIL" ($configStatus -join " ") "Fix .env or Python path."
+        }
+    } catch {
+        Add-Check "app_config" "FAIL" $_.Exception.Message "Fix Python runtime before starting the app."
     }
-} catch {
-    Add-Check "app_config" "FAIL" $_.Exception.Message "Fix Python runtime before starting the app."
 }
 
 if ($Json) {
