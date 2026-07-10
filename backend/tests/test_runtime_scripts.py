@@ -105,8 +105,9 @@ def test_python_runtime_strict_mode_identifies_missing_configured_executable(tmp
     completed = _run_python_runtime("-Strict", env=env)
 
     assert completed.returncode != 0
-    assert str(missing_python) in completed.stderr
-    assert "Expected Python 3.13.14" in completed.stderr
+    compact_stderr = "".join(completed.stderr.split())
+    assert missing_python.name in compact_stderr
+    assert "ExpectedPython3.13.14" in compact_stderr
 
 
 def test_python_runtime_falls_back_to_path_python_when_py_313_is_unavailable(tmp_path: Path):
