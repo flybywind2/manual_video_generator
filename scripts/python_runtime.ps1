@@ -70,16 +70,17 @@ function ConvertFrom-CommandArgumentsBase64 {
 
     try {
         $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedArguments))
-        if ($json.Trim() -notmatch '^\[.*\]$') {
-            throw "Decoded value is not a JSON array."
-        }
         $parsed = $json | ConvertFrom-Json
-        $decoded = if ($null -eq $parsed) { [object[]]@() } else { [object[]]$parsed }
     }
     catch {
-        throw "CommandArgumentsBase64 must be a Base64-encoded UTF-8 JSON string array."
+        throw "CommandArgumentsBase64 must contain valid Base64-encoded UTF-8 JSON."
     }
 
+    if ($null -eq $parsed -or $parsed -isnot [System.Collections.IList]) {
+        throw "CommandArgumentsBase64 must decode to a JSON array of strings."
+    }
+
+    $decoded = [object[]]$parsed
     foreach ($argument in $decoded) {
         if ($argument -isnot [string]) {
             throw "CommandArgumentsBase64 must decode to a JSON array containing only strings."

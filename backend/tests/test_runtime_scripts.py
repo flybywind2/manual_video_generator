@@ -157,6 +157,30 @@ def test_python_runtime_cli_decodes_multiple_arguments_for_command_path_with_spa
     assert result["valid"] is True
 
 
+def test_python_runtime_cli_accepts_multiline_json_command_arguments(tmp_path: Path):
+    command = tmp_path / "fake-python.cmd"
+    command.write_text(
+        '@if "%~1"=="first value" if "%~2"=="second value" @echo 3.13.14 & @exit /b 0\n'
+        "@exit /b 9\n",
+        encoding="utf-8",
+    )
+    multiline_json = json.dumps(["first value", "second value"], indent=2)
+    encoded_arguments = base64.b64encode(multiline_json.encode("utf-8")).decode("ascii")
+
+    completed = _run_python_runtime(
+        "-Command",
+        str(command),
+        "-CommandArgumentsBase64",
+        encoded_arguments,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["arguments"] == ["first value", "second value"]
+    assert result["actual_version"] == "3.13.14"
+    assert result["valid"] is True
+
+
 def test_doctor_script_emits_machine_readable_json_contract():
     command = [
         _powershell(),
