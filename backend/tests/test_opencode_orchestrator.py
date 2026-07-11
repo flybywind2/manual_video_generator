@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +13,11 @@ from backend.app.execution_trace import (
     ExecutionTracePolicy,
     TraceValidationError,
     validate_execution_trace,
+)
+from backend.app.config import load_settings
+from backend.app.adapters.opencode_browser import (
+    OpenCodeBrowserDiscovery,
+    OpenCodeBrowserDiscoveryError,
 )
 
 
@@ -268,3 +276,215 @@ def test_malformed_trace_url_is_reported_as_a_trace_validation_error() -> None:
         _validate(raw)
 
     assert exc_info.value.code == "invalid_url"
+
+
+def _browser_request(**overrides: object) -> SimpleNamespace:
+    values = {
+        "request_text": "QSike 서비스를 소개하고 최근 글을 여는 방법을 보여줘",
+        "target_url": "https://qsike.com/",
+        "role": "방문자",
+        "completion_condition": "최근 글 상세 화면 확인",
+        "input_values": {"search_query": "Playwright", "password": "plain-password"},
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _opencode_settings(**overrides: str):
+    environ = {
+        "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+        "MANUAL_AGENT_OPENCODE_COMMAND": "opencode run --format json",
+        "MANUAL_AGENT_OPENCODE_AGENT": "browser",
+        "MANUAL_AGENT_OPENCODE_MODEL": "ignored/model",
+        "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND": "npx @playwright/mcp@1.2.3 --headless",
+        "MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS": "45",
+    }
+    environ.update(overrides)
+    return load_settings(environ=environ)
+
+
+def _opencode_stdout(trace: dict[str, object] | None = None) -> str:
+    events = [{"type": "step_start", "name": "browser discovery"}]
+    if trace is not None:
+        events.append({"type": "text", "part": {"text": json.dumps(trace, ensure_ascii=False)}})
+    return "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+
+
+def test_opencode_browser_discovery_writes_isolated_mcp_config_and_extracts_trace(
+    tmp_path: Path,
+) -> None:
+    settings = _opencode_settings()
+    request = _browser_request()
+    expected_trace = _valid_trace()
+    endpoint = "http://127.0.0.1:43129"
+
+    def fake_runner(args, **kwargs):
+        assert kwargs["cwd"] == str(tmp_path)
+        assert kwargs["timeout"] == 45.0
+        assert args[1:4] == ["run", "--format", "json"]
+        assert "--agent" in args
+        assert "--model" not in args
+        assert "ignored/model" not in args
+
+        config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+        assert list(config["mcp"]) == ["playwright"]
+        mcp_command = config["mcp"]["playwright"]["command"]
+        assert Path(mcp_command[0]).name.lower() in {"npx", "npx.cmd"}
+        assert mcp_command[1] == "@playwright/mcp@1.2.3"
+        assert mcp_command[-2:] == ["--cdp-endpoint", endpoint]
+        assert "--headless" not in mcp_command
+        assert config["tools"] == {"*": False, "playwright_*": True}
+        assert config["permission"]["*"] == "deny"
+        assert config["permission"]["playwright_*"] == "allow"
+
+        prompt = (tmp_path / "opencode_browser_prompt.md").read_text(encoding="utf-8")
+        assert "QSike 서비스를 소개" in prompt
+        assert "https://qsike.com/" in prompt
+        assert "search_query" in prompt
+        assert "Playwright" in prompt
+        assert "plain-password" not in prompt
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=_opencode_stdout(expected_trace),
+            stderr="diagnostic stderr",
+        )
+
+    result = OpenCodeBrowserDiscovery(settings, command_runner=fake_runner).run(
+        request=request,
+        job_dir=tmp_path,
+        cdp_endpoint=endpoint,
+    )
+
+    assert result.status == "completed"
+    assert result.trace == expected_trace
+    assert result.config_path == tmp_path / "opencode.json"
+    assert result.event_log_path.read_text(encoding="utf-8") == _opencode_stdout(expected_trace)
+    assert json.loads(result.trace_path.read_text(encoding="utf-8")) == expected_trace
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["returncode"] == 0
+    assert metadata["stderr"] == "diagnostic stderr"
+    assert metadata["model_source"] == "opencode-default"
+    assert result.support_summary_path.read_text(encoding="utf-8").startswith("OPENCODE_BROWSER_OK")
+
+
+def test_opencode_browser_discovery_fails_when_disabled_and_still_writes_support_files(
+    tmp_path: Path,
+) -> None:
+    settings = _opencode_settings(MANUAL_AGENT_ENABLE_OPENCODE="false")
+
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(settings).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == "opencode_disabled"
+    assert (tmp_path / "opencode_browser_metadata.json").exists()
+    assert "opencode_disabled" in (tmp_path / "opencode_support_summary.txt").read_text(encoding="utf-8")
+
+
+def test_opencode_browser_discovery_fails_fast_on_timeout(tmp_path: Path) -> None:
+    def fake_runner(args, **kwargs):
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"], output="partial", stderr="slow")
+
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == "opencode_timeout"
+    metadata = json.loads((tmp_path / "opencode_browser_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["status"] == "failed"
+    assert metadata["stderr"] == "slow"
+
+
+def test_opencode_browser_discovery_fails_fast_on_nonzero_exit(tmp_path: Path) -> None:
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 7, stdout="partial", stderr="command failed")
+
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == "opencode_nonzero_exit"
+    metadata = json.loads((tmp_path / "opencode_browser_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["returncode"] == 7
+    assert metadata["stderr"] == "command failed"
+
+
+def test_opencode_browser_discovery_rejects_malformed_jsonl(tmp_path: Path) -> None:
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout='{"type":"step"}\nnot-json', stderr="")
+
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == "opencode_malformed_output"
+
+
+def test_opencode_browser_discovery_rejects_success_without_final_trace(tmp_path: Path) -> None:
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout=_opencode_stdout(), stderr="")
+
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == "opencode_trace_missing"
+
+
+def test_opencode_browser_discovery_combines_split_final_text_events(tmp_path: Path) -> None:
+    trace_text = json.dumps(_valid_trace(), ensure_ascii=False)
+    midpoint = len(trace_text) // 2
+    stdout = "\n".join(
+        json.dumps({"type": "text", "part": {"text": chunk}}, ensure_ascii=False)
+        for chunk in (trace_text[:midpoint], trace_text[midpoint:])
+    )
+
+    def fake_runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    result = OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+        request=_browser_request(),
+        job_dir=tmp_path,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    assert result.trace == _valid_trace()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_code"),
+    [
+        ({"MANUAL_AGENT_OPENCODE_COMMAND": ""}, "opencode_command_empty"),
+        ({"MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND": ""}, "playwright_mcp_command_invalid"),
+    ],
+)
+def test_opencode_browser_discovery_reports_invalid_required_commands(
+    tmp_path: Path,
+    overrides: dict[str, str],
+    expected_code: str,
+) -> None:
+    with pytest.raises(OpenCodeBrowserDiscoveryError) as exc_info:
+        OpenCodeBrowserDiscovery(_opencode_settings(**overrides)).run(
+            request=_browser_request(),
+            job_dir=tmp_path,
+            cdp_endpoint="http://127.0.0.1:9222",
+        )
+
+    assert exc_info.value.code == expected_code
+    assert expected_code in (tmp_path / "opencode_support_summary.txt").read_text(encoding="utf-8")

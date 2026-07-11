@@ -81,7 +81,13 @@ def run_opencode_agent(
 
 
 def _build_command(settings: AppSettings, prompt: str) -> list[str]:
+    return build_opencode_run_command(settings, prompt)
+
+
+def build_opencode_run_command(settings: AppSettings, prompt: str) -> list[str]:
     command = shlex.split(settings.opencode_command, posix=False)
+    if not command:
+        return []
     if command:
         resolved = shutil.which(command[0])
         if resolved:
