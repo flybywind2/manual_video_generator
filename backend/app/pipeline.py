@@ -454,6 +454,15 @@ def run_pipeline(
     capture_browser: bool = True,
 ) -> PipelineResult:
     apply_runtime_environment()
+    from backend.app.opencode_orchestrator import OpenCodeVideoOrchestrator
+
+    return OpenCodeVideoOrchestrator().run(
+        request,
+        base_dir=base_dir,
+        capture_browser=capture_browser,
+    )
+
+    # Legacy implementation retained temporarily below for artifact helper compatibility.
     settings = load_settings()
     output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -626,6 +635,15 @@ def create_pipeline_draft(
     capture_browser: bool = True,
 ) -> PipelineDraftResult:
     apply_runtime_environment()
+    from backend.app.opencode_orchestrator import OpenCodeVideoOrchestrator
+
+    return OpenCodeVideoOrchestrator().create_draft(
+        request,
+        base_dir=base_dir,
+        capture_browser=capture_browser,
+    )
+
+    # Legacy implementation retained temporarily below for artifact helper compatibility.
     settings = load_settings()
     output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -810,6 +828,15 @@ def continue_pipeline_draft(
     capture_browser: bool | None = None,
 ) -> PipelineResult:
     apply_runtime_environment()
+    from backend.app.opencode_orchestrator import OpenCodeVideoOrchestrator
+
+    return OpenCodeVideoOrchestrator().continue_draft(
+        job_id,
+        base_dir=base_dir,
+        capture_browser=capture_browser,
+    )
+
+    # Legacy implementation retained temporarily below for artifact helper compatibility.
     settings = load_settings()
     output_root = Path(base_dir) if base_dir else Path(settings.output_dir).resolve()
     package_dir = (output_root / "jobs" / job_id).resolve()

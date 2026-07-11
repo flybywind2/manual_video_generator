@@ -47,7 +47,7 @@ class WorkflowGraph:
     def metadata(self) -> dict[str, object]:
         return {
             "name": "manual-video-agent-workflow",
-            "version": 1,
+            "version": 2,
             "nodes": [
                 {
                     "step": node.step,
@@ -64,41 +64,46 @@ class WorkflowGraph:
 WORKFLOW_GRAPH = WorkflowGraph(
     [
         WorkflowNode(
+            step=WorkflowStep.REQUEST_VALIDATION,
+            actor="pipeline",
+            label="요청 검증",
+            next_steps=(WorkflowStep.BROWSER_SESSION, WorkflowStep.EXECUTION_FAILED),
+        ),
+        WorkflowNode(
             step=WorkflowStep.PLAN_REVIEW,
             actor="approval",
-            label="계획 검수",
-            next_steps=(WorkflowStep.CAPTURE, WorkflowStep.EXECUTION_FAILED),
+            label="요청 검수",
+            next_steps=(WorkflowStep.BROWSER_SESSION, WorkflowStep.EXECUTION_FAILED),
         ),
         WorkflowNode(
-            step=WorkflowStep.CAPTURE,
-            actor="capture",
-            label="브라우저 캡처",
-            next_steps=(
-                WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
-                WorkflowStep.REPLAY,
-                WorkflowStep.TTS,
-                WorkflowStep.EXECUTION_FAILED,
-            ),
+            step=WorkflowStep.BROWSER_SESSION,
+            actor="browser_session",
+            label="Edge CDP 세션",
+            next_steps=(WorkflowStep.OPENCODE_DISCOVERY, WorkflowStep.EXECUTION_FAILED),
         ),
         WorkflowNode(
-            step=WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
-            actor="rehearsal",
-            label="로그인 후 MCP 리허설",
+            step=WorkflowStep.OPENCODE_DISCOVERY,
+            actor="opencode",
+            label="OpenCode 브라우저 탐색",
+            next_steps=(WorkflowStep.TRACE_VALIDATION, WorkflowStep.EXECUTION_FAILED),
+        ),
+        WorkflowNode(
+            step=WorkflowStep.TRACE_VALIDATION,
+            actor="trace_validation",
+            label="실행 추적 검증",
             next_steps=(WorkflowStep.TTS, WorkflowStep.EXECUTION_FAILED),
-            optional=True,
-        ),
-        WorkflowNode(
-            step=WorkflowStep.REPLAY,
-            actor="replay",
-            label="직접 시연 재녹화",
-            next_steps=(WorkflowStep.MASKING, WorkflowStep.EXECUTION_FAILED),
-            optional=True,
         ),
         WorkflowNode(
             step=WorkflowStep.TTS,
             actor="tts",
-            label="자막과 음성 생성",
-            next_steps=(WorkflowStep.REPLAY, WorkflowStep.MASKING, WorkflowStep.EXECUTION_FAILED),
+            label="Supertonic 음성 생성",
+            next_steps=(WorkflowStep.REPLAY, WorkflowStep.EXECUTION_FAILED),
+        ),
+        WorkflowNode(
+            step=WorkflowStep.REPLAY,
+            actor="replay",
+            label="음성 동기화 재생",
+            next_steps=(WorkflowStep.MASKING, WorkflowStep.EXECUTION_FAILED),
         ),
         WorkflowNode(
             step=WorkflowStep.MASKING,
@@ -116,14 +121,7 @@ WORKFLOW_GRAPH = WorkflowGraph(
             step=WorkflowStep.RENDER,
             actor="render",
             label="영상 렌더",
-            next_steps=(WorkflowStep.OPENCODE, WorkflowStep.EXECUTION_FAILED),
-        ),
-        WorkflowNode(
-            step=WorkflowStep.OPENCODE,
-            actor="opencode",
-            label="OpenCode 후처리",
             next_steps=(WorkflowStep.MANIFEST, WorkflowStep.EXECUTION_FAILED),
-            optional=True,
         ),
         WorkflowNode(
             step=WorkflowStep.MANIFEST,
@@ -135,7 +133,7 @@ WORKFLOW_GRAPH = WorkflowGraph(
             step=WorkflowStep.EXECUTION_FAILED,
             actor="pipeline",
             label="실행 실패",
-            next_steps=(WorkflowStep.PLAN_REVIEW, WorkflowStep.CAPTURE),
+            next_steps=(WorkflowStep.BROWSER_SESSION,),
         ),
         WorkflowNode(
             step=WorkflowStep.COMPLETED,

@@ -9,6 +9,10 @@ class WorkflowStatus:
 
 
 class WorkflowStep:
+    REQUEST_VALIDATION = "request_validation"
+    BROWSER_SESSION = "browser_session"
+    OPENCODE_DISCOVERY = "opencode_discovery"
+    TRACE_VALIDATION = "trace_validation"
     PLAN_REVIEW = "plan_review"
     CAPTURE = "capture"
     MCP_REHEARSAL_AFTER_LOGIN = "mcp_rehearsal_after_login"
@@ -24,6 +28,10 @@ class WorkflowStep:
 
 
 WORKFLOW_STEPS = {
+    WorkflowStep.REQUEST_VALIDATION,
+    WorkflowStep.BROWSER_SESSION,
+    WorkflowStep.OPENCODE_DISCOVERY,
+    WorkflowStep.TRACE_VALIDATION,
     WorkflowStep.PLAN_REVIEW,
     WorkflowStep.CAPTURE,
     WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,

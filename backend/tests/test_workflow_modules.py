@@ -7,17 +7,32 @@ from backend.app.workflow_graph import WORKFLOW_GRAPH, WorkflowGraph, WorkflowNo
 
 
 def test_workflow_graph_exposes_ordered_nodes_and_edges():
-    assert WORKFLOW_GRAPH.ordered_steps()[0] == WorkflowStep.PLAN_REVIEW
+    assert WORKFLOW_GRAPH.ordered_steps()[0] == WorkflowStep.REQUEST_VALIDATION
     assert WORKFLOW_GRAPH.ordered_steps()[-1] == WorkflowStep.COMPLETED
-    assert WORKFLOW_GRAPH.next_steps(WorkflowStep.CAPTURE) == [
-        WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN,
-        WorkflowStep.REPLAY,
+    assert WORKFLOW_GRAPH.next_steps(WorkflowStep.BROWSER_SESSION) == [
+        WorkflowStep.OPENCODE_DISCOVERY,
+        WorkflowStep.EXECUTION_FAILED,
+    ]
+    assert WORKFLOW_GRAPH.next_steps(WorkflowStep.OPENCODE_DISCOVERY) == [
+        WorkflowStep.TRACE_VALIDATION,
+        WorkflowStep.EXECUTION_FAILED,
+    ]
+    assert WORKFLOW_GRAPH.next_steps(WorkflowStep.TRACE_VALIDATION) == [
         WorkflowStep.TTS,
         WorkflowStep.EXECUTION_FAILED,
     ]
     assert WORKFLOW_GRAPH.node(WorkflowStep.TTS).actor == "tts"
-    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.RENDER, WorkflowStep.OPENCODE) is True
-    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.TTS, WorkflowStep.CAPTURE) is False
+    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.RENDER, WorkflowStep.MANIFEST) is True
+    assert WORKFLOW_GRAPH.transition_allowed(WorkflowStep.TTS, WorkflowStep.BROWSER_SESSION) is False
+    assert WORKFLOW_GRAPH.metadata()["version"] == 2
+
+
+def test_workflow_graph_excludes_legacy_runtime_steps():
+    active_steps = set(WORKFLOW_GRAPH.ordered_steps())
+
+    assert WorkflowStep.CAPTURE not in active_steps
+    assert WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN not in active_steps
+    assert WorkflowStep.OPENCODE not in active_steps
 
 
 def test_workflow_graph_rejects_unknown_steps():

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -21,6 +23,9 @@ from backend.app.adapters.opencode_browser import (
 )
 from backend.app.browser_session import BrowserSessionError, BrowserSessionManager
 from backend.app.env_bootstrap import discover_browser_executable
+from backend.app.opencode_orchestrator import OpenCodeVideoOrchestrator, OrchestratorServices
+from backend.app.adapters.tts import SupertonicTtsError
+from backend.app.pipeline import PipelineInput
 
 
 def _request(**overrides: object) -> SimpleNamespace:
@@ -679,3 +684,354 @@ def test_discover_browser_executable_uses_configuration_or_path_without_fixed_dr
         environ={"PATH": str(path_edge.parent)},
         which=lambda _name, **_kwargs: str(path_edge),
     ) == path_edge.resolve()
+
+
+def _orchestrator_request() -> PipelineInput:
+    return PipelineInput(
+        request_text="QSike 서비스를 소개하고 최근 글을 여는 방법을 보여줘",
+        target_url="https://qsike.com/",
+        role="방문자",
+        completion_condition="최근 글 상세 화면 확인",
+        input_values={"search_query": "Playwright"},
+    )
+
+
+def _orchestrator_services(calls: list[str], *, fail_stage: str = "") -> OrchestratorServices:
+    @contextmanager
+    def browser_session_factory(_settings):
+        calls.append("browser_session.enter")
+        try:
+            yield SimpleNamespace(
+                cdp_endpoint="http://127.0.0.1:43129",
+                to_safe_dict=lambda: {"cdp_endpoint": "http://127.0.0.1:43129", "owned": True},
+            )
+        finally:
+            calls.append("browser_session.exit")
+
+    class Discovery:
+        def run(self, *, request, job_dir, cdp_endpoint):
+            calls.append("opencode_discovery")
+            prompt = job_dir / "opencode_browser_prompt.md"
+            events = job_dir / "opencode_events.jsonl"
+            trace_path = job_dir / "opencode_execution_trace.json"
+            config = job_dir / "opencode.json"
+            metadata = job_dir / "opencode_browser_metadata.json"
+            support = job_dir / "opencode_support_summary.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            events.write_text("{}\n", encoding="utf-8")
+            trace_path.write_text(json.dumps(_valid_trace(), ensure_ascii=False), encoding="utf-8")
+            config.write_text("{}", encoding="utf-8")
+            metadata.write_text('{"status":"completed"}', encoding="utf-8")
+            support.write_text("OPENCODE_BROWSER_OK\n", encoding="utf-8")
+            if fail_stage == "opencode":
+                raise OpenCodeBrowserDiscoveryError(
+                    "opencode_nonzero_exit",
+                    "failed",
+                    metadata_path=metadata,
+                    support_summary_path=support,
+                )
+            return SimpleNamespace(
+                status="completed",
+                trace=_valid_trace(),
+                config_path=config,
+                prompt_path=prompt,
+                event_log_path=events,
+                trace_path=trace_path,
+                metadata_path=metadata,
+                support_summary_path=support,
+            )
+
+    def discovery_factory(_settings):
+        return Discovery()
+
+    def trace_validator(trace, request, policy):
+        calls.append("trace_validation")
+        return validate_execution_trace(trace, request, policy)
+
+    def tts_synthesizer(plan, settings, tts_dir):
+        calls.append("supertonic")
+        if fail_stage == "tts":
+            raise SupertonicTtsError("supertonic_synthesis_failed", "failed", step_id="step-intro")
+        tts_dir.mkdir(parents=True, exist_ok=True)
+        audio = tts_dir / "01_step-intro.wav"
+        audio.write_bytes(b"RIFF" + b"\x00" * 128)
+        metadata = tts_dir / "tts_metadata.json"
+        entries = [
+            {
+                "step_id": "step-intro",
+                "provider": "supertonic",
+                "speaker": "M1",
+                "language": "ko",
+                "duration_seconds": 1.0,
+            }
+        ]
+        metadata.write_text(json.dumps({"status": "completed", "entries": entries}), encoding="utf-8")
+        return SimpleNamespace(audio_paths=[audio], metadata_path=metadata, entries=entries)
+
+    def trace_replayer(**kwargs):
+        calls.append("trace_replay")
+        job_dir = kwargs["job_dir"]
+        capture_dir = job_dir / "captures" / "replay"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        capture = capture_dir / "01_after.png"
+        capture.write_bytes(b"png")
+        final_frame = job_dir / "final_frame.png"
+        final_frame.write_bytes(b"png")
+        action_log_path = job_dir / "trace_replay_log.json"
+        action_log = [{"action_id": "navigate", "status": "ok"}]
+        action_log_path.write_text(json.dumps(action_log), encoding="utf-8")
+        selector_trace_path = job_dir / "selector_trace.json"
+        selector_trace_path.write_text("[]", encoding="utf-8")
+        return SimpleNamespace(
+            status="ok",
+            captures=[capture],
+            final_frame=final_frame,
+            action_log=action_log,
+            action_log_path=action_log_path,
+            selector_trace_path=selector_trace_path,
+            media_plan={
+                "source": "opencode-trace-replay",
+                "steps": [
+                    {
+                        "id": "step-intro",
+                        "title": "QSike 소개",
+                        "caption": "QSike를 소개합니다.",
+                        "narration": "QSike를 소개합니다.",
+                        "duration_seconds": 1.0,
+                    }
+                ],
+            },
+        )
+
+    def masker(captures, masked_dir, input_values):
+        calls.append("masking")
+        masked_dir.mkdir(parents=True, exist_ok=True)
+        for capture in captures:
+            shutil.copy2(capture, masked_dir / capture.name)
+        path = masked_dir.parent / "masking_log.json"
+        path.write_text('{"status":"completed","entries":[]}', encoding="utf-8")
+        return path
+
+    def source_video_builder(package_dir, captures):
+        calls.append("source_video")
+        path = package_dir / "manual_video_agent_usage.webm"
+        path.write_bytes(b"webm")
+        return path
+
+    def subtitle_renderer(plan, package_dir, redaction=None):
+        calls.append("subtitles")
+        path = package_dir / "subtitles.vtt"
+        path.write_text("WEBVTT\n", encoding="utf-8")
+        return path
+
+    def preview_renderer(request, plan, dirs, masked_names, tts_audio, **_kwargs):
+        calls.append("preview")
+        path = dirs.package / "preview.html"
+        path.write_text("<html>preview</html>", encoding="utf-8")
+        return path
+
+    def markdown_renderer(request, plan, dirs, masked_names, settings):
+        calls.append("manual")
+        path = dirs.package / "manual.md"
+        path.write_text("# manual", encoding="utf-8")
+        return path
+
+    def pdf_renderer(request, dirs):
+        calls.append("pdf")
+        path = dirs.package / "manual.pdf"
+        path.write_bytes(b"%PDF")
+        return path
+
+    def video_renderer(**kwargs):
+        calls.append("render")
+        package_dir = kwargs["package_dir"]
+        video = package_dir / "manual_video_agent_usage.mp4"
+        video.write_bytes(b"mp4")
+        composition = package_dir / "hyperframes"
+        composition.mkdir(parents=True, exist_ok=True)
+        (composition / "index.html").write_text("<html></html>", encoding="utf-8")
+        (composition / "hyperframes_manifest.json").write_text("{}", encoding="utf-8")
+        metadata = package_dir / "video_render.json"
+        metadata.write_text('{"status":"completed","quality":{"status":"passed"}}', encoding="utf-8")
+        skills = package_dir / "hyperframes_skills.json"
+        skills.write_text('{"status":"skipped"}', encoding="utf-8")
+        return SimpleNamespace(
+            video_path=video,
+            composition_dir=composition,
+            metadata_path=metadata,
+            skills_metadata_path=skills,
+            used_fallback=False,
+        )
+
+    return OrchestratorServices(
+        environment_fingerprint=lambda: calls.append("environment") or {"python_version": "3.13.14"},
+        browser_session_factory=browser_session_factory,
+        discovery_factory=discovery_factory,
+        trace_validator=trace_validator,
+        tts_synthesizer=tts_synthesizer,
+        trace_replayer=trace_replayer,
+        masker=masker,
+        source_video_builder=source_video_builder,
+        subtitle_renderer=subtitle_renderer,
+        preview_renderer=preview_renderer,
+        markdown_renderer=markdown_renderer,
+        pdf_renderer=pdf_renderer,
+        video_renderer=video_renderer,
+    )
+
+
+def test_opencode_orchestrator_runs_only_the_new_fail_fast_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.pipeline as pipeline_module
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy planner/agent path was called")
+
+    for name in (
+        "build_plan",
+        "extract_input_values",
+        "rehearse_plan",
+        "run_opencode_agent",
+        "decide_browser_agent_action",
+        "enrich_page_agent_observation",
+    ):
+        monkeypatch.setattr(pipeline_module, name, forbidden)
+
+    calls: list[str] = []
+    settings = load_settings(
+        environ={
+            "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+            "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+        }
+    )
+    result = OpenCodeVideoOrchestrator(
+        settings=settings,
+        services=_orchestrator_services(calls),
+    ).run(_orchestrator_request(), base_dir=tmp_path)
+
+    assert result.status == "completed"
+    assert calls == [
+        "environment",
+        "browser_session.enter",
+        "opencode_discovery",
+        "trace_validation",
+        "supertonic",
+        "trace_replay",
+        "browser_session.exit",
+        "masking",
+        "source_video",
+        "subtitles",
+        "preview",
+        "manual",
+        "pdf",
+        "render",
+    ]
+    manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
+    assert manifest["pipeline"] == "opencode-only"
+    assert manifest["degradations"] == []
+    assert Path(manifest["supporting_artifacts"]["opencode_execution_trace"]).exists()
+    assert result.artifacts.video.read_bytes() == b"mp4"
+    actors = {
+        json.loads(line)["actor"]
+        for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()
+    }
+    assert actors == {
+        "environment",
+        "browser_session",
+        "opencode",
+        "trace_validation",
+        "tts",
+        "replay",
+        "masking",
+        "render",
+        "manifest",
+    }
+
+
+@pytest.mark.parametrize(
+    ("fail_stage", "error_type"),
+    [
+        ("opencode", OpenCodeBrowserDiscoveryError),
+        ("tts", SupertonicTtsError),
+    ],
+)
+def test_opencode_orchestrator_marks_required_stage_failure_without_degradation(
+    tmp_path: Path,
+    fail_stage: str,
+    error_type: type[Exception],
+) -> None:
+    calls: list[str] = []
+    orchestrator = OpenCodeVideoOrchestrator(
+        settings=load_settings(environ={"MANUAL_AGENT_ENABLE_OPENCODE": "true"}),
+        services=_orchestrator_services(calls, fail_stage=fail_stage),
+    )
+
+    with pytest.raises(error_type):
+        orchestrator.run(_orchestrator_request(), base_dir=tmp_path)
+
+    [state_path] = list((tmp_path / "jobs").glob("*/workflow_state.json"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["current_step"] == "execution_failed"
+    assert state["can_continue"] is True
+    assert state["details"]["degraded"] is False
+    support = state_path.parent / "support_log.md"
+    assert support.exists()
+    assert fail_stage in support.read_text(encoding="utf-8").lower()
+
+
+def test_opencode_orchestrator_draft_and_continue_keep_public_workflow_contract(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    orchestrator = OpenCodeVideoOrchestrator(
+        settings=load_settings(environ={"MANUAL_AGENT_ENABLE_OPENCODE": "true"}),
+        services=_orchestrator_services(calls),
+    )
+
+    draft = orchestrator.create_draft(_orchestrator_request(), base_dir=tmp_path)
+
+    assert draft.status == "awaiting_plan_review"
+    assert draft.can_continue is True
+    assert draft.plan["planner"] == "opencode-pending"
+    assert draft.plan["actions"] == []
+    assert calls == ["environment"]
+    state = json.loads((draft.package_dir / "workflow_state.json").read_text(encoding="utf-8"))
+    assert state["current_step"] == "plan_review"
+
+    result = orchestrator.continue_draft(draft.job_id, base_dir=tmp_path)
+
+    assert result.job_id == draft.job_id
+    assert result.status == "completed"
+    assert result.package_dir == draft.package_dir
+    again = orchestrator.continue_draft(draft.job_id, base_dir=tmp_path)
+    assert again.artifacts.package_manifest == result.artifacts.package_manifest
+
+
+def test_pipeline_public_run_function_delegates_to_opencode_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.app.opencode_orchestrator as orchestrator_module
+    import backend.app.pipeline as pipeline_module
+
+    sentinel = object()
+    calls: list[tuple] = []
+
+    class FakeOrchestrator:
+        def run(self, request, *, base_dir, capture_browser):
+            calls.append((request, base_dir, capture_browser))
+            return sentinel
+
+    monkeypatch.setattr(orchestrator_module, "OpenCodeVideoOrchestrator", FakeOrchestrator)
+
+    result = pipeline_module.run_pipeline(
+        _orchestrator_request(),
+        base_dir=tmp_path,
+        capture_browser=False,
+    )
+
+    assert result is sentinel
+    assert calls == [(_orchestrator_request(), tmp_path, False)]
