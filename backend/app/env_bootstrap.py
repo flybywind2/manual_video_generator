@@ -5,7 +5,72 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
+
+
+WhichResolver = Callable[..., str | None]
+
+
+def discover_browser_executable(
+    channel: str,
+    *,
+    configured_path: str = "",
+    environ: Mapping[str, str] | None = None,
+    which: WhichResolver = shutil.which,
+) -> Path | None:
+    env = os.environ if environ is None else environ
+    configured = Path(configured_path).expanduser() if configured_path.strip() else None
+    if configured is not None and configured.is_file():
+        return configured.resolve()
+
+    normalized = channel.strip().lower() or "msedge"
+    executable_names = {
+        "msedge": ("msedge.exe", "msedge"),
+        "chrome": ("chrome.exe", "chrome"),
+        "chromium": ("chromium.exe", "chromium", "chrome.exe"),
+    }.get(normalized, (f"{normalized}.exe", normalized))
+    for name in executable_names:
+        resolved = which(name, path=env.get("PATH"))
+        if resolved and Path(resolved).is_file():
+            return Path(resolved).resolve()
+
+    candidates: list[Path] = []
+    if normalized == "msedge":
+        candidates.extend(_environment_file_candidates(env, ("EDGE_PATH", "MSEDGE_PATH")))
+        candidates.extend(
+            _browser_install_candidates(
+                env,
+                Path("Microsoft") / "Edge" / "Application" / "msedge.exe",
+            )
+        )
+    elif normalized == "chrome":
+        candidates.extend(_environment_file_candidates(env, ("CHROME_PATH",)))
+        candidates.extend(
+            _browser_install_candidates(
+                env,
+                Path("Google") / "Chrome" / "Application" / "chrome.exe",
+            )
+        )
+    elif normalized == "chromium":
+        candidates.extend(_environment_file_candidates(env, ("CHROMIUM_PATH", "CHROME_PATH")))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _environment_file_candidates(env: Mapping[str, str], keys: tuple[str, ...]) -> list[Path]:
+    return [Path(value).expanduser() for key in keys if (value := env.get(key, "").strip())]
+
+
+def _browser_install_candidates(env: Mapping[str, str], suffix: Path) -> list[Path]:
+    roots = [
+        env.get("PROGRAMFILES", "").strip(),
+        env.get("PROGRAMFILES(X86)", "").strip(),
+        env.get("LOCALAPPDATA", "").strip(),
+    ]
+    return [Path(root) / suffix for root in roots if root]
 
 
 def bundle_root(environ: Mapping[str, str] | None = None) -> Path:

@@ -19,6 +19,8 @@ from backend.app.adapters.opencode_browser import (
     OpenCodeBrowserDiscovery,
     OpenCodeBrowserDiscoveryError,
 )
+from backend.app.browser_session import BrowserSessionError, BrowserSessionManager
+from backend.app.env_bootstrap import discover_browser_executable
 
 
 def _request(**overrides: object) -> SimpleNamespace:
@@ -488,3 +490,192 @@ def test_opencode_browser_discovery_reports_invalid_required_commands(
 
     assert exc_info.value.code == expected_code
     assert expected_code in (tmp_path / "opencode_support_summary.txt").read_text(encoding="utf-8")
+
+
+def _session_settings(tmp_path: Path, **overrides: object) -> SimpleNamespace:
+    login_values = {
+        "sso_profile_dir": str(tmp_path / "edge-profile"),
+        "browser_channel": "msedge",
+        "auth_server_allowlist": "*.corp.local",
+        "auth_negotiate_delegate_allowlist": "*.corp.local",
+        "username": "employee-id",
+        "password": "plain-password",
+    }
+    login_overrides = overrides.pop("login", {})
+    if isinstance(login_overrides, dict):
+        login_values.update(login_overrides)
+    values = {
+        "browser_runner": "playwright",
+        "cdp_endpoint": "",
+        "playwright_executable_path": "",
+        "request_timeout_seconds": 10.0,
+        "login": SimpleNamespace(**login_values),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class _FakeBrowserProcess:
+    def __init__(self, *, pid: int = 4242, poll_result: int | None = None) -> None:
+        self.pid = pid
+        self.poll_result = poll_result
+
+    def poll(self):
+        return self.poll_result
+
+
+def test_browser_session_launches_edge_on_dynamic_loopback_cdp_and_cleans_process_tree(
+    tmp_path: Path,
+) -> None:
+    settings = _session_settings(tmp_path)
+    process = _FakeBrowserProcess()
+    launches: list[tuple[list[str], dict[str, object]]] = []
+    probes: list[str] = []
+    terminated: list[int] = []
+
+    def process_factory(command, **kwargs):
+        launches.append((command, kwargs))
+        return process
+
+    def readiness_probe(endpoint: str) -> bool:
+        probes.append(endpoint)
+        return len(probes) >= 2
+
+    manager = BrowserSessionManager(
+        settings,
+        process_factory=process_factory,
+        readiness_probe=readiness_probe,
+        port_allocator=lambda: 43129,
+        executable_resolver=lambda *_args, **_kwargs: Path("C:/Edge/msedge.exe"),
+        process_tree_terminator=lambda item: terminated.append(item.pid),
+        sleep=lambda _seconds: None,
+    )
+
+    with manager as session:
+        assert session.cdp_endpoint == "http://127.0.0.1:43129"
+        assert session.owned is True
+        assert session.pid == 4242
+        assert session.profile_path == (tmp_path / "edge-profile").resolve()
+        assert session.browser_channel == "msedge"
+        assert session.to_safe_dict()["owned"] is True
+        assert "password" not in json.dumps(session.to_safe_dict()).lower()
+
+    assert probes == ["http://127.0.0.1:43129", "http://127.0.0.1:43129"]
+    assert terminated == [4242]
+    command = launches[0][0]
+    assert command[0] == "C:\\Edge\\msedge.exe"
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert "--remote-debugging-port=43129" in command
+    assert "--edge-skip-compat-layer-relaunch" in command
+    assert f"--user-data-dir={(tmp_path / 'edge-profile').resolve()}" in command
+    assert "--auth-server-allowlist=*.corp.local" in command
+    assert "--auth-negotiate-delegate-allowlist=*.corp.local" in command
+    assert "employee-id" not in " ".join(command)
+    assert "plain-password" not in " ".join(command)
+    assert not (tmp_path / "edge-profile" / ".manual-agent-cdp.lock").exists()
+
+
+def test_browser_session_reuses_existing_loopback_cdp_without_owning_process(tmp_path: Path) -> None:
+    settings = _session_settings(
+        tmp_path,
+        browser_runner="cdp_attach",
+        cdp_endpoint="http://localhost:9333",
+    )
+    probes: list[str] = []
+
+    def fail_process_factory(*_args, **_kwargs):
+        raise AssertionError("existing CDP mode must not launch a browser")
+
+    with BrowserSessionManager(
+        settings,
+        process_factory=fail_process_factory,
+        readiness_probe=lambda endpoint: probes.append(endpoint) or True,
+    ) as session:
+        assert session.cdp_endpoint == "http://localhost:9333"
+        assert session.owned is False
+        assert session.pid is None
+        assert session.profile_path is None
+
+    assert probes == ["http://localhost:9333"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://10.0.0.5:9222", "https://example.com:9222", "http://127.0.0.1.evil:9222"],
+)
+def test_browser_session_rejects_non_loopback_cdp_endpoint(tmp_path: Path, endpoint: str) -> None:
+    settings = _session_settings(tmp_path, browser_runner="cdp_attach", cdp_endpoint=endpoint)
+
+    with pytest.raises(BrowserSessionError) as exc_info:
+        with BrowserSessionManager(settings, readiness_probe=lambda _endpoint: True):
+            pass
+
+    assert exc_info.value.code == "non_loopback_cdp_endpoint"
+
+
+def test_browser_session_reports_profile_lock_without_launching(tmp_path: Path) -> None:
+    settings = _session_settings(tmp_path)
+    profile = tmp_path / "edge-profile"
+    profile.mkdir(parents=True)
+    (profile / ".manual-agent-cdp.lock").write_text("existing-owner", encoding="utf-8")
+
+    def fail_process_factory(*_args, **_kwargs):
+        raise AssertionError("locked profile must not launch")
+
+    with pytest.raises(BrowserSessionError) as exc_info:
+        with BrowserSessionManager(
+            settings,
+            process_factory=fail_process_factory,
+            readiness_probe=lambda _endpoint: True,
+            executable_resolver=lambda *_args, **_kwargs: Path("C:/Edge/msedge.exe"),
+        ):
+            pass
+
+    assert exc_info.value.code == "profile_locked"
+    assert "existing-owner" not in str(exc_info.value)
+
+
+def test_browser_session_timeout_terminates_owned_process_and_releases_profile(tmp_path: Path) -> None:
+    settings = _session_settings(tmp_path)
+    process = _FakeBrowserProcess()
+    terminated: list[int] = []
+    clock_values = iter([0.0, 0.0, 1.0])
+
+    manager = BrowserSessionManager(
+        settings,
+        process_factory=lambda *_args, **_kwargs: process,
+        readiness_probe=lambda _endpoint: False,
+        port_allocator=lambda: 43129,
+        executable_resolver=lambda *_args, **_kwargs: Path("C:/Edge/msedge.exe"),
+        process_tree_terminator=lambda item: terminated.append(item.pid),
+        sleep=lambda _seconds: None,
+        clock=lambda: next(clock_values),
+        startup_timeout_seconds=0.5,
+    )
+
+    with pytest.raises(BrowserSessionError) as exc_info:
+        with manager:
+            pass
+
+    assert exc_info.value.code == "cdp_start_timeout"
+    assert terminated == [4242]
+    assert not (tmp_path / "edge-profile" / ".manual-agent-cdp.lock").exists()
+
+
+def test_discover_browser_executable_uses_configuration_or_path_without_fixed_driver_location(
+    tmp_path: Path,
+) -> None:
+    configured = tmp_path / "portable" / "msedge.exe"
+    configured.parent.mkdir(parents=True)
+    configured.write_bytes(b"edge")
+
+    assert discover_browser_executable("msedge", configured_path=str(configured)) == configured.resolve()
+
+    path_edge = tmp_path / "path" / "msedge.exe"
+    path_edge.parent.mkdir()
+    path_edge.write_bytes(b"edge")
+    assert discover_browser_executable(
+        "msedge",
+        environ={"PATH": str(path_edge.parent)},
+        which=lambda _name, **_kwargs: str(path_edge),
+    ) == path_edge.resolve()
