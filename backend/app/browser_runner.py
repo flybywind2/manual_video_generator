@@ -7,6 +7,30 @@ CaptureFunc = Callable[[Any, dict[str, Any], Any, Any], dict[str, Any]]
 ReplayFunc = Callable[..., dict[str, Any]]
 
 
+def run_trace_replay(
+    *,
+    trace: Any,
+    request: Any,
+    job_dir: Any,
+    cdp_endpoint: str,
+    settings: Any,
+    step_durations_seconds: dict[str, float] | None = None,
+    replay_func: Callable[..., Any] | None = None,
+) -> Any:
+    if replay_func is None:
+        from backend.app.trace_replay import replay_execution_trace
+
+        replay_func = replay_execution_trace
+    return replay_func(
+        trace=trace,
+        request=request,
+        job_dir=job_dir,
+        cdp_endpoint=cdp_endpoint,
+        settings=settings,
+        step_durations_seconds=step_durations_seconds,
+    )
+
+
 def run_capture(
     *,
     capture_browser: bool,
