@@ -8,7 +8,6 @@ from typing import Mapping
 
 
 APP_PREFIX = "MANUAL_AGENT_"
-SUPERTONIC_PRESET_VOICES = frozenset({f"M{index}" for index in range(1, 6)} | {f"F{index}" for index in range(1, 6)})
 
 
 @dataclass(frozen=True)
@@ -383,7 +382,7 @@ def load_settings(
         enable_page_agent=_get_bool(env, "ENABLE_PAGE_AGENT", False),
         browser_decision_policy=_normalize_browser_decision_policy(_get(env, "BROWSER_DECISION_POLICY", "balanced")),
         browser_agent_max_steps=_get_int(env, "BROWSER_AGENT_MAX_STEPS", 8),
-        tts_provider=_get(env, "TTS_PROVIDER", "fake-melotts-compatible"),
+        tts_provider="supertonic",
         tts_device=_get(env, "TTS_DEVICE", "cpu"),
         tts_language=_get(env, "TTS_LANGUAGE", "KR"),
         tts_speaker=_get(env, "TTS_SPEAKER", "KR"),
@@ -462,17 +461,11 @@ def _normalize_llm_provider(value: str) -> str:
 
 
 def _normalize_supertonic_voice(value: str) -> str:
-    voice = value.strip().upper()
-    if voice in SUPERTONIC_PRESET_VOICES:
-        return voice
     return "M1"
 
 
 def _normalize_supertonic_lang(value: str) -> str:
-    lang = value.strip().lower()
-    if lang == "kr":
-        return "ko"
-    return lang or "ko"
+    return "ko"
 
 
 def _get_float(env: Mapping[str, str], suffix: str, default: float) -> float:

@@ -740,7 +740,7 @@ def test_pipeline_rerender_api_rejects_invalid_job_id(tmp_path, monkeypatch):
     assert response.status_code == 404
 
 
-def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkeypatch):
+def test_package_manifest_records_audit_events_without_tts_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_TTS_PROVIDER", "melotts")
     result = run_pipeline(
         PipelineInput(
@@ -764,11 +764,13 @@ def test_package_manifest_records_audit_events_and_degradations(tmp_path, monkey
     assert all(event["run_id"] == result.job_id for event in events)
     assert all("status" in event for event in events)
     assert manifest["degradations"]
-    assert any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
-    assert manifest["fallback_events"]
-    tts_fallback = next(item for item in manifest["fallback_events"] if item["reason"] == "tts_silent_fallback")
-    assert tts_fallback["actor"] == "tts"
-    assert tts_fallback["artifacts"]
+    assert not any(item["reason"] == "tts_silent_fallback" for item in manifest["degradations"])
+    assert not any(item["reason"] == "tts_silent_fallback" for item in manifest["fallback_events"])
+    tts_metadata = json.loads(result.artifacts.tts_metadata.read_text(encoding="utf-8"))
+    assert tts_metadata["status"] == "completed"
+    assert {entry["provider"] for entry in tts_metadata["entries"]} == {"supertonic"}
+    assert {entry["speaker"] for entry in tts_metadata["entries"]} == {"M1"}
+    assert {entry["language"] for entry in tts_metadata["entries"]} == {"ko"}
     assert manifest["environment"]["python_version"]
     assert "playwright_browsers_path" in manifest["environment"]
 

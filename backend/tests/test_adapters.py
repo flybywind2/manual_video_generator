@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import wave
 import base64
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ from backend.app.adapters.planner import build_plan, deterministic_plan
 from backend.app.adapters.opencode import run_opencode_agent
 from backend.app.adapters.rehearsal import rehearse_plan
 from backend.app.adapters.skills import ensure_hyperframes_skills
-from backend.app.adapters.tts import _narration_text_for_step, synthesize_tts
+from backend.app.adapters.tts import SupertonicTtsError, _narration_text_for_step, synthesize_tts
 from backend.app.adapters.video import render_final_video
 from backend.app.config import load_settings
 from backend.app.pipeline import PipelineInput
@@ -1609,9 +1610,17 @@ def test_deterministic_planner_emits_semantic_actions_from_request_and_inputs():
     assert sum(1 for action in actions if action["type"] == "capture_step") >= 3
 
 
-def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_path: Path):
-    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "melotts"})
-    plan = {
+def _write_valid_test_wav(path: Path, *, duration_seconds: float = 0.1) -> None:
+    sample_rate = 16000
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(b"\x01\x00" * max(1, int(sample_rate * duration_seconds)))
+
+
+def _single_tts_step() -> dict[str, object]:
+    return {
         "steps": [
             {
                 "id": "step_intro",
@@ -1622,64 +1631,24 @@ def test_melotts_provider_falls_back_to_silent_wav_when_library_is_missing(tmp_p
         ]
     }
 
-    result = synthesize_tts(plan, settings, tmp_path)
 
-    assert result.audio_paths[0].exists()
-    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
-    assert metadata["status"] == "completed"
-    assert metadata["entries"][0]["provider"] in {"melotts", "silent-fallback"}
-    assert metadata["entries"][0]["text"] == "요청을 확인합니다."
+def test_non_supertonic_provider_is_rejected_without_silent_wav(tmp_path: Path) -> None:
+    settings = replace(load_settings(environ={}), tts_provider="melotts")
 
+    with pytest.raises(SupertonicTtsError) as exc_info:
+        synthesize_tts(_single_tts_step(), settings, tmp_path)
 
-def test_tts_keeps_short_narration_natural_even_when_step_has_planned_duration(tmp_path: Path):
-    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "fake-melotts-compatible"})
-    plan = {
-        "steps": [
-            {
-                "id": "step_long",
-                "title": "질문 입력",
-                "caption": "질문을 입력합니다.",
-                "narration": "질문을 입력합니다.",
-                "duration_seconds": 45.0,
-            }
-        ]
-    }
-
-    result = synthesize_tts(plan, settings, tmp_path)
-    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
-    text = metadata["entries"][0]["text"]
-
-    assert text == "질문을 입력합니다."
-    with wave.open(str(result.audio_paths[0]), "rb") as handle:
-        duration = handle.getnframes() / handle.getframerate()
-    assert 1.0 <= duration <= 3.0
+    assert exc_info.value.code == "unsupported_tts_provider"
+    assert not list(tmp_path.glob("*.wav"))
+    assert not (tmp_path / "tts_metadata.json").exists()
 
 
-def test_tts_cleans_stale_audio_files_before_synthesis(tmp_path: Path):
-    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "fake-melotts-compatible"})
-    stale_wav = tmp_path / "99_stale.wav"
-    stale_txt = tmp_path / "99_stale.txt"
-    stale_wav.write_bytes(b"old")
-    stale_txt.write_text("old", encoding="utf-8")
-
-    result = synthesize_tts(
-        {"steps": [{"id": "fresh", "title": "새 단계", "narration": "새 내레이션"}]},
-        settings,
-        tmp_path,
-    )
-
-    assert len(result.audio_paths) == 1
-    assert not stale_wav.exists()
-    assert not stale_txt.exists()
-    assert sorted(path.name for path in tmp_path.glob("*.wav")) == ["01_fresh.wav"]
-
-
-def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_path: Path, monkeypatch):
+def test_supertonic_uses_only_m1_ko_once_and_writes_completed_metadata(tmp_path: Path, monkeypatch):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_TTS_PROVIDER": "supertonic",
             "MANUAL_AGENT_SUPERTONIC_VOICE": "F1",
-            "MANUAL_AGENT_SUPERTONIC_LANG": "ko",
+            "MANUAL_AGENT_SUPERTONIC_LANG": "en",
             "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD": "false",
         }
     )
@@ -1690,7 +1659,12 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
                 "title": "요청 확인",
                 "caption": "요청을 확인합니다.",
                 "narration": "요청을 확인합니다.",
-            }
+            },
+            {
+                "id": "step_search",
+                "title": "검색",
+                "narration": "최근 글을 검색합니다.",
+            },
         ]
     }
     calls = []
@@ -1716,7 +1690,7 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
 
         def save_audio(self, wav, path):
             calls.append(("save", wav, path))
-            Path(path).write_bytes(b"RIFFsupertonic")
+            _write_valid_test_wav(Path(path))
 
     class FakeSupertonicModule:
         TTS = FakeSupertonicTts
@@ -1725,13 +1699,18 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
 
     result = synthesize_tts(plan, settings, tmp_path)
 
-    assert result.audio_paths[0].read_bytes() == b"RIFFsupertonic"
+    assert len(result.audio_paths) == 2
+    assert all(path.stat().st_size > 44 for path in result.audio_paths)
     assert calls[:3] == [
         ("init", {"auto_download": False, "model_dir": str(tmp_path / "supertonic3")}),
-        ("style", "F1"),
-        ("synthesize", "요청을 확인합니다.", {"preset": "F1"}, "ko"),
+        ("style", "M1"),
+        ("synthesize", "요청을 확인합니다.", {"preset": "M1"}, "ko"),
     ]
+    assert [call[0] for call in calls].count("init") == 1
+    assert [call[0] for call in calls].count("style") == 1
+    assert [call[0] for call in calls].count("synthesize") == 2
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "completed"
     assert metadata["requested_provider"] == "supertonic"
     assert metadata["license"]["model"] == "Supertone/supertonic-3"
     assert metadata["license"]["license"] == "BigScience Open RAIL-M License"
@@ -1739,11 +1718,114 @@ def test_supertonic_provider_uses_preset_voice_and_writes_license_metadata(tmp_p
     assert metadata["voice_policy"]["allowed_voice_source"] == "preset"
     assert "AI 음성 합성" in metadata["ai_voice_disclosure"]
     assert metadata["entries"][0]["provider"] == "supertonic"
-    assert metadata["entries"][0]["speaker"] == "F1"
+    assert metadata["entries"][0]["speaker"] == "M1"
     assert metadata["entries"][0]["language"] == "ko"
     assert metadata["entries"][0]["voice_source"] == "preset"
     assert metadata["runtime"]["supertonic_cache_dir"] == str(tmp_path / "supertonic3")
     assert metadata["runtime"]["hf_home"] == str(tmp_path / "hf-cache")
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_code"),
+    [
+        ("import", "supertonic_import_failed"),
+        ("model", "supertonic_model_load_failed"),
+        ("style", "supertonic_style_failed"),
+        ("synthesize", "supertonic_synthesis_failed"),
+        ("save", "supertonic_save_failed"),
+        ("empty", "supertonic_audio_invalid"),
+    ],
+)
+def test_supertonic_failures_are_typed_and_leave_no_partial_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    expected_code: str,
+) -> None:
+    settings = load_settings(environ={"MANUAL_AGENT_TTS_PROVIDER": "supertonic"})
+
+    class FailingTts:
+        def __init__(self, **_kwargs):
+            if failure_stage == "model":
+                raise RuntimeError("model failed")
+
+        def get_voice_style(self, *, voice_name):
+            if failure_stage == "style":
+                raise RuntimeError("style failed")
+            return {"preset": voice_name}
+
+        def synthesize(self, text, *, voice_style, lang):
+            if failure_stage == "synthesize":
+                raise RuntimeError("synthesis failed")
+            return [0.1], 0.1
+
+        def save_audio(self, wav, path):
+            if failure_stage == "save":
+                raise RuntimeError("save failed")
+            if failure_stage == "empty":
+                Path(path).write_bytes(b"")
+                return
+            _write_valid_test_wav(Path(path))
+
+    class FakeModule:
+        TTS = FailingTts
+
+    def import_module(_name: str):
+        if failure_stage == "import":
+            raise ImportError("missing")
+        return FakeModule
+
+    monkeypatch.setattr("backend.app.adapters.tts.importlib.import_module", import_module)
+    (tmp_path / "stale.wav").write_bytes(b"old")
+
+    with pytest.raises(SupertonicTtsError) as exc_info:
+        synthesize_tts(_single_tts_step(), settings, tmp_path)
+
+    assert exc_info.value.code == expected_code
+    assert not list(tmp_path.glob("*.wav"))
+    assert not list(tmp_path.glob("*.txt"))
+    assert not (tmp_path / "tts_metadata.json").exists()
+
+
+def test_supertonic_cleans_first_step_when_later_synthesis_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class FailingSecondTts:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_voice_style(self, *, voice_name):
+            return {"preset": voice_name}
+
+        def synthesize(self, text, *, voice_style, lang):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second step failed")
+            return [0.1], 0.1
+
+        def save_audio(self, wav, path):
+            _write_valid_test_wav(Path(path))
+
+    monkeypatch.setattr(
+        "backend.app.adapters.tts.importlib.import_module",
+        lambda _name: SimpleNamespace(TTS=FailingSecondTts),
+    )
+    plan = {
+        "steps": [
+            {"id": "one", "narration": "첫 단계"},
+            {"id": "two", "narration": "두 번째 단계"},
+        ]
+    }
+
+    with pytest.raises(SupertonicTtsError) as exc_info:
+        synthesize_tts(plan, load_settings(environ={}), tmp_path)
+
+    assert exc_info.value.code == "supertonic_synthesis_failed"
+    assert not list(tmp_path.iterdir())
 
 
 def test_hyperframes_render_creates_composition_and_keeps_fallback_video(tmp_path: Path):

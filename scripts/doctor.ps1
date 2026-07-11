@@ -132,12 +132,7 @@ $supertonicCache = if ($env:SUPERTONIC_CACHE_DIR) {
 } else {
     Join-Path $Root "runtime\supertonic3"
 }
-$supertonicVoice = if ($env:MANUAL_AGENT_SUPERTONIC_VOICE) {
-    $env:MANUAL_AGENT_SUPERTONIC_VOICE.Trim().ToUpperInvariant()
-} else {
-    "M1"
-}
-if ($supertonicVoice -notmatch "^[MF][1-5]$") { $supertonicVoice = "M1" }
+$supertonicVoice = "M1"
 $supertonicRequiredFiles = @(
     "onnx\duration_predictor.onnx",
     "onnx\text_encoder.onnx",

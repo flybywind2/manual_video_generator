@@ -37,6 +37,9 @@ def test_default_runtime_config_is_opencode_only_friendly():
 
     assert "--codex" not in settings.hyperframes_skills_command
     assert settings.opencode_command.startswith("opencode run")
+    assert settings.tts_provider == "supertonic"
+    assert settings.supertonic_voice == "M1"
+    assert settings.supertonic_lang == "ko"
     assert settings.strict_mode is False
 
 
@@ -150,10 +153,10 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert runtime_status["extension_bridge_endpoint_set"] is True
     assert runtime_status["extension_bridge_token_set"] is True
     assert settings.login.credentials_configured is True
-    assert settings.tts_provider == "melotts"
+    assert settings.tts_provider == "supertonic"
     assert settings.tts_device == "cpu"
     assert settings.tts_speed == 1.1
-    assert settings.supertonic_voice == "F2"
+    assert settings.supertonic_voice == "M1"
     assert settings.supertonic_lang == "ko"
     assert settings.supertonic_auto_download is False
     assert settings.video_renderer == "hyperframes"

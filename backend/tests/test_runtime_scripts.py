@@ -970,9 +970,9 @@ def test_doctor_collect_short_username_sanitizes_values_without_corrupting_json_
     assert any("<user-profile>" in str(value) for check in checks for value in check.values())
 
 
-def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_path: Path):
+def test_doctor_always_checks_m1_supertonic_voice_from_configured_directory(tmp_path: Path):
     cache = tmp_path / "supertonic3"
-    _complete_supertonic_cache(cache, voice="F2")
+    _complete_supertonic_cache(cache, voice="M1")
     env = os.environ.copy()
     env["SUPERTONIC_CACHE_DIR"] = str(cache)
     env["MANUAL_AGENT_SUPERTONIC_VOICE"] = "F2"
@@ -984,6 +984,7 @@ def test_doctor_reports_ready_supertonic_cache_from_configured_directory(tmp_pat
     check = next(item for item in checks if item["name"] == "supertonic_cache")
     assert check["status"] == "PASS"
     assert str(cache) in check["message"]
+    assert "M1 voice ready" in check["message"]
 
 
 @pytest.mark.parametrize(
