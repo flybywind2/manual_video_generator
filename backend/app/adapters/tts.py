@@ -75,7 +75,7 @@ def synthesize_tts(
             cause=exc,
         )
 
-    model_dir = _supertonic_model_dir()
+    model_dir = _supertonic_model_dir(settings)
     model_kwargs: dict[str, Any] = {"auto_download": settings.supertonic_auto_download}
     if model_dir is not None:
         model_kwargs["model_dir"] = str(model_dir)
@@ -179,7 +179,7 @@ def synthesize_tts(
         "ai_voice_disclosure": SUPERTONIC_AI_DISCLOSURE,
         "license": SUPERTONIC_LICENSE,
         "voice_policy": SUPERTONIC_VOICE_POLICY,
-        "runtime": _supertonic_runtime_metadata(),
+        "runtime": _supertonic_runtime_metadata(model_dir),
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return TtsResult(audio_paths=audio_paths, metadata_path=metadata_path, entries=entries)
@@ -207,9 +207,11 @@ def _clean_tts_dir(tts_dir: Path) -> None:
                 path.unlink()
 
 
-def _supertonic_model_dir() -> Path | None:
+def _supertonic_model_dir(settings: AppSettings | None = None) -> Path | None:
     candidates: list[Path] = []
-    configured = os.environ.get("SUPERTONIC_CACHE_DIR", "").strip()
+    configured = str(getattr(settings, "supertonic_cache_dir", "") or "").strip()
+    if not configured:
+        configured = os.environ.get("SUPERTONIC_CACHE_DIR", "").strip()
     if configured:
         candidates.append(Path(configured).expanduser())
     bundle_root = os.environ.get("MANUAL_AGENT_BUNDLE_ROOT", "").strip()
@@ -280,8 +282,7 @@ def _has_supertonic_onnx(path: Path) -> bool:
     return onnx_dir.exists() and all((onnx_dir / name).exists() for name in required)
 
 
-def _supertonic_runtime_metadata() -> dict[str, str | bool]:
-    model_dir = _supertonic_model_dir()
+def _supertonic_runtime_metadata(model_dir: Path | None) -> dict[str, str | bool]:
     hf_home = os.environ.get("HF_HOME", "").strip()
     return {
         "supertonic_cache_dir": str(model_dir) if model_dir else "",

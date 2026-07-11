@@ -198,6 +198,7 @@ class AppSettings:
     supertonic_voice: str
     supertonic_lang: str
     supertonic_auto_download: bool
+    supertonic_cache_dir: str
     video_renderer: str
     hyperframes_command: str
     enable_hyperframes_skills: bool
@@ -216,64 +217,39 @@ class AppSettings:
 
     def safe_status(self) -> dict[str, object]:
         login_status = dict(self.login.safe_status())
-        selector_auto_detection_supported = (
-            self.login.mode == "credentials"
-            and bool(self.login.username)
-            and bool(self.login.password)
-            and self.llm.is_configured
-            and not self.login.credentials_configured
-        )
-        login_status["selector_auto_detection_supported"] = selector_auto_detection_supported
-        login_status["credentials_usable"] = self.login.credentials_configured or selector_auto_detection_supported
+        login_status["selector_auto_detection_supported"] = False
+        login_status["credentials_usable"] = self.login.credentials_configured
         return {
-            "llm": self.llm.safe_status(),
-            "vlm": self.vlm.safe_status(),
-            "rag": self.rag.safe_status(),
-            "reranker": self.reranker.safe_status(),
+            "pipeline": "opencode-only",
             "login": login_status,
             "runtime": {
                 "output_dir": self.output_dir,
-                "enable_internal_planner": self.enable_internal_planner,
-                "enable_input_extractor": self.enable_input_extractor,
-                "llm_timeout_seconds": self.llm_timeout_seconds,
-                "enable_rag_context": self.enable_rag_context,
-                "enable_reranker": self.enable_reranker,
-                "playwright_mcp_mode": self.playwright_mcp_mode,
-                "playwright_mcp_command_set": bool(self.playwright_mcp_command),
-                "playwright_executable_path_set": bool(self.playwright_executable_path),
-                "browser_runner": self.browser_runner,
-                "cdp_endpoint_set": bool(self.cdp_endpoint),
-                "extension_bridge_endpoint_set": bool(self.extension_bridge_endpoint),
-                "extension_bridge_token_set": bool(self.extension_bridge_token),
-                "browser_channel": self.login.browser_channel,
-                "sso_profile_dir_set": bool(self.login.sso_profile_dir),
-                "enable_browser_agent": self.enable_browser_agent,
-                "enable_page_agent": self.enable_page_agent,
-                "browser_decision_policy": self.browser_decision_policy,
-                "browser_agent_max_steps": self.browser_agent_max_steps,
-                "tts_provider": self.tts_provider,
-                "tts_device": self.tts_device,
-                "tts_language": self.tts_language,
-                "tts_speaker": self.tts_speaker,
-                "tts_speed": self.tts_speed,
-                "supertonic_voice": self.supertonic_voice,
-                "supertonic_lang": self.supertonic_lang,
-                "supertonic_auto_download": self.supertonic_auto_download,
-                "supertonic_custom_voice_allowed": False,
-                "video_renderer": self.video_renderer,
-                "hyperframes_command_set": bool(self.hyperframes_command),
-                "enable_hyperframes_skills": self.enable_hyperframes_skills,
-                "hyperframes_skills_command_set": bool(self.hyperframes_skills_command),
+                "opencode_required": True,
                 "enable_opencode": self.enable_opencode,
                 "opencode_command_set": bool(self.opencode_command),
                 "opencode_agent": self.opencode_agent,
                 "opencode_model_source": "opencode-default",
                 "opencode_model_override_ignored": bool(self.opencode_model),
                 "opencode_timeout_seconds": self.opencode_timeout_seconds,
+                "playwright_mcp_required": True,
+                "playwright_mcp_command_set": bool(self.playwright_mcp_command),
+                "playwright_executable_path_set": bool(self.playwright_executable_path),
+                "browser_runner": self.browser_runner,
+                "cdp_endpoint_set": bool(self.cdp_endpoint),
+                "browser_channel": self.login.browser_channel,
+                "sso_profile_dir_set": bool(self.login.sso_profile_dir),
+                "tts_provider": self.tts_provider,
+                "supertonic_voice": self.supertonic_voice,
+                "supertonic_lang": self.supertonic_lang,
+                "supertonic_auto_download": self.supertonic_auto_download,
+                "supertonic_cache_dir_set": bool(self.supertonic_cache_dir),
+                "supertonic_custom_voice_allowed": False,
+                "video_renderer": self.video_renderer,
+                "hyperframes_command_set": bool(self.hyperframes_command),
+                "enable_hyperframes_skills": self.enable_hyperframes_skills,
+                "hyperframes_skills_command_set": bool(self.hyperframes_skills_command),
                 "request_timeout_seconds": self.request_timeout_seconds,
-                "demonstration_timeout_seconds": self.demonstration_timeout_seconds,
                 "target_video_duration_seconds": self.target_video_duration_seconds,
-                "auth_debug_keep_browser_open_seconds": self.auth_debug_keep_browser_open_seconds,
                 "enable_terminal_logs": self.enable_terminal_logs,
                 "strict_mode": self.strict_mode,
                 "doctor_check_names": [
@@ -282,9 +258,14 @@ class AppSettings:
                     "npm",
                     "npx",
                     "ffmpeg",
-                    "playwright_browsers",
+                    "ffprobe",
+                    "edge",
+                    "playwright_python",
+                    "playwright_mcp",
+                    "hyperframes",
+                    "opencode",
+                    "supertonic_cache",
                     "corp_ca",
-                    "hf_cache",
                     "onedrive_path",
                     "path_length",
                     "long_paths",
@@ -367,7 +348,7 @@ def load_settings(
         login=login,
         output_dir=_get(env, "OUTPUT_DIR", "output"),
         enable_internal_planner=_get_bool(env, "ENABLE_INTERNAL_PLANNER", False),
-        enable_input_extractor=_get_bool(env, "ENABLE_INPUT_EXTRACTOR", True),
+        enable_input_extractor=_get_bool(env, "ENABLE_INPUT_EXTRACTOR", False),
         llm_timeout_seconds=_get_float(env, "LLM_TIMEOUT_SECONDS", 180.0),
         enable_rag_context=_get_bool(env, "ENABLE_RAG_CONTEXT", False),
         enable_reranker=_get_bool(env, "ENABLE_RERANKER", False),
@@ -390,11 +371,13 @@ def load_settings(
         supertonic_voice=_normalize_supertonic_voice(_get(env, "SUPERTONIC_VOICE", "M1")),
         supertonic_lang=_normalize_supertonic_lang(_get(env, "SUPERTONIC_LANG", "ko")),
         supertonic_auto_download=_get_bool(env, "SUPERTONIC_AUTO_DOWNLOAD", False),
-        video_renderer=_get(env, "VIDEO_RENDERER", "playwright-webm"),
+        supertonic_cache_dir=str(env.get("SUPERTONIC_CACHE_DIR", "")).strip()
+        or _get(env, "SUPERTONIC_CACHE_DIR"),
+        video_renderer=_get(env, "VIDEO_RENDERER", "hyperframes"),
         hyperframes_command=_get(env, "HYPERFRAMES_COMMAND", "npx --yes hyperframes render"),
         enable_hyperframes_skills=_get_bool(env, "ENABLE_HYPERFRAMES_SKILLS", False),
         hyperframes_skills_command=_get(env, "HYPERFRAMES_SKILLS_COMMAND", "npx skills add heygen-com/hyperframes"),
-        enable_opencode=_get_bool(env, "ENABLE_OPENCODE", False),
+        enable_opencode=_get_bool(env, "ENABLE_OPENCODE", True),
         opencode_command=_get(env, "OPENCODE_COMMAND", "opencode run --format json"),
         opencode_agent=_get(env, "OPENCODE_AGENT"),
         opencode_model=_get(env, "OPENCODE_MODEL"),
@@ -404,7 +387,7 @@ def load_settings(
         target_video_duration_seconds=_get_float(env, "TARGET_VIDEO_DURATION_SECONDS", 0.0),
         auth_debug_keep_browser_open_seconds=_get_float(env, "AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS", 0.0),
         enable_terminal_logs=_get_bool(env, "ENABLE_TERMINAL_LOGS", False),
-        strict_mode=_get_bool(env, "STRICT_MODE", False),
+        strict_mode=_get_bool(env, "STRICT_MODE", True),
     )
 
 

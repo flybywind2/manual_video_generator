@@ -13,4 +13,5 @@ output/smoke/
 dist/
 output/
 runtime/
+node_modules/
 .env

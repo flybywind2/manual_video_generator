@@ -1,0 +1,13 @@
+{
+  "name": "manual-video-agent-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pinned Node runtime dependencies for Playwright MCP and HyperFrames",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.78",
+    "hyperframes": "0.7.52"
+  }
+}

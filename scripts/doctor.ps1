@@ -77,17 +77,21 @@ Test-Command "node" @("node", "--version")
 Test-Command "npm" @("npm", "--version")
 Test-Command "npx" @("npx", "--version")
 Test-Command "ffmpeg" @("ffmpeg", "-version")
+Test-Command "ffprobe" @("ffprobe", "-version")
+Test-Command "opencode" @("opencode", "--version")
 
-$pwPath = $env:PLAYWRIGHT_BROWSERS_PATH
-if (Test-Path $pwPath) {
-    $chromium = Get-ChildItem -Path $pwPath -Recurse -Filter "chrome.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($chromium) {
-        Add-Check "playwright_browsers" "PASS" $chromium.FullName
-    } else {
-        Add-Check "playwright_browsers" "WARN" "No chrome.exe under $pwPath" "Run the resolved Python runtime with -m playwright install chromium on a connected build PC."
-    }
+$playwrightMcp = Join-Path $Root "node_modules\.bin\playwright-mcp.cmd"
+if (Test-Path $playwrightMcp -PathType Leaf) {
+    Add-Check "playwright_mcp" "PASS" $playwrightMcp
 } else {
-    Add-Check "playwright_browsers" "FAIL" "$pwPath missing" "Set PLAYWRIGHT_BROWSERS_PATH to a bundled browsers directory."
+    Add-Check "playwright_mcp" "FAIL" "Local Playwright MCP is missing" "Run npm ci on a connected build PC and include node_modules in the bundle."
+}
+
+$hyperframes = Join-Path $Root "node_modules\.bin\hyperframes.cmd"
+if (Test-Path $hyperframes -PathType Leaf) {
+    Add-Check "hyperframes" "PASS" $hyperframes
+} else {
+    Add-Check "hyperframes" "FAIL" "Local HyperFrames CLI is missing" "Run npm ci on a connected build PC and include node_modules in the bundle."
 }
 
 if ($Root -match "OneDrive") {
@@ -120,13 +124,6 @@ if (Test-Path $corpCa) {
     Add-Check "corp_ca" "WARN" "No corp-root-ca.pem found" "Required when TLS inspection or private CA is used."
 }
 
-$hfHome = $env:HF_HOME
-if (Test-Path $hfHome) {
-    Add-Check "hf_cache" "PASS" $hfHome
-} else {
-    Add-Check "hf_cache" "WARN" "$hfHome missing" "Preload this cache only for adapters that use Hugging Face assets in restricted networks."
-}
-
 $supertonicCache = if ($env:SUPERTONIC_CACHE_DIR) {
     $env:SUPERTONIC_CACHE_DIR
 } else {
@@ -156,8 +153,41 @@ if ($missingSupertonicFiles.Count -eq 0) {
 }
 
 if (-not $pythonRuntime.valid) {
+    Add-Check "playwright_python" "FAIL" "Skipped because the Python runtime contract failed." "Fix Python runtime before checking Playwright."
+    Add-Check "edge" "FAIL" "Skipped because the Python runtime contract failed." "Fix Python runtime before checking Edge discovery."
     Add-Check "app_config" "FAIL" "Skipped because the Python runtime contract failed." "Fix Python runtime before starting the app."
 } else {
+    try {
+        $playwrightArguments = [object[]]@($pythonRuntime.arguments) + @(
+            "-c",
+            "import playwright; print(playwright.__file__)"
+        )
+        $playwrightStatus = & ([string]$pythonRuntime.executable) @playwrightArguments 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Add-Check "playwright_python" "PASS" (($playwrightStatus | Select-Object -First 1) -join "")
+        } else {
+            Add-Check "playwright_python" "FAIL" ($playwrightStatus -join " ") "Install the project Python dependencies."
+        }
+    } catch {
+        Add-Check "playwright_python" "FAIL" $_.Exception.Message "Install the project Python dependencies."
+    }
+
+    try {
+        $edgeArguments = [object[]]@($pythonRuntime.arguments) + @(
+            "-c",
+            "from backend.app.config import load_settings; from backend.app.env_bootstrap import discover_browser_executable; s=load_settings(); p=discover_browser_executable(s.login.browser_channel or 'msedge', configured_path=s.playwright_executable_path); print(p or '')"
+        )
+        $edgeStatus = & ([string]$pythonRuntime.executable) @edgeArguments 2>&1
+        $edgePath = ($edgeStatus | Select-Object -First 1) -join ""
+        if ($LASTEXITCODE -eq 0 -and $edgePath) {
+            Add-Check "edge" "PASS" $edgePath
+        } else {
+            Add-Check "edge" "FAIL" "Microsoft Edge executable was not found" "Install Edge or set MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH."
+        }
+    } catch {
+        Add-Check "edge" "FAIL" $_.Exception.Message "Install Edge or set MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH."
+    }
+
     try {
         $configArguments = [object[]]@($pythonRuntime.arguments) + @(
             "-c",
@@ -192,17 +222,18 @@ if ($Collect) {
     $safeManualAgentVariables = @(
         "MANUAL_AGENT_BROWSER_CHANNEL",
         "MANUAL_AGENT_BUNDLE_ROOT",
-        "MANUAL_AGENT_ENABLE_BROWSER_AGENT",
-        "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER",
+        "MANUAL_AGENT_BROWSER_RUNNER",
+        "MANUAL_AGENT_ENABLE_OPENCODE",
+        "MANUAL_AGENT_ENABLE_TERMINAL_LOGS",
         "MANUAL_AGENT_ENV_FILE",
         "MANUAL_AGENT_OUTPUT_DIR",
         "MANUAL_AGENT_PYTHON",
-        "MANUAL_AGENT_RENDER_POLICY",
-        "MANUAL_AGENT_TTS_PROVIDER"
+        "MANUAL_AGENT_STRICT_MODE",
+        "MANUAL_AGENT_TTS_PROVIDER",
+        "MANUAL_AGENT_VIDEO_RENDERER"
     )
     $safeRuntimeVariables = @(
         "PLAYWRIGHT_BROWSERS_PATH",
-        "HF_HOME",
         "SUPERTONIC_CACHE_DIR",
         "NPM_CONFIG_CACHE",
         "REQUESTS_CA_BUNDLE",

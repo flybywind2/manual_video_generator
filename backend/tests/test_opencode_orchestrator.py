@@ -696,7 +696,12 @@ def _orchestrator_request() -> PipelineInput:
     )
 
 
-def _orchestrator_services(calls: list[str], *, fail_stage: str = "") -> OrchestratorServices:
+def _orchestrator_services(
+    calls: list[str],
+    *,
+    fail_stage: str = "",
+    render_fallback: bool = False,
+) -> OrchestratorServices:
     @contextmanager
     def browser_session_factory(_settings):
         calls.append("browser_session.enter")
@@ -860,7 +865,7 @@ def _orchestrator_services(calls: list[str], *, fail_stage: str = "") -> Orchest
             composition_dir=composition,
             metadata_path=metadata,
             skills_metadata_path=skills,
-            used_fallback=False,
+            used_fallback=render_fallback,
         )
 
     return OrchestratorServices(
@@ -980,6 +985,30 @@ def test_opencode_orchestrator_marks_required_stage_failure_without_degradation(
     support = state_path.parent / "support_log.md"
     assert support.exists()
     assert fail_stage in support.read_text(encoding="utf-8").lower()
+
+
+def test_opencode_orchestrator_rejects_hyperframes_fallback_as_failed_render(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    orchestrator = OpenCodeVideoOrchestrator(
+        settings=load_settings(
+            environ={
+                "MANUAL_AGENT_ENABLE_OPENCODE": "true",
+                "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+            }
+        ),
+        services=_orchestrator_services(calls, render_fallback=True),
+    )
+
+    with pytest.raises(RuntimeError, match="HyperFrames.*fallback"):
+        orchestrator.run(_orchestrator_request(), base_dir=tmp_path)
+
+    [state_path] = list((tmp_path / "jobs").glob("*/workflow_state.json"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["details"]["actor"] == "render"
+    assert state["details"]["degraded"] is False
 
 
 def test_opencode_orchestrator_draft_and_continue_keep_public_workflow_contract(

@@ -419,11 +419,11 @@ class OpenCodeVideoOrchestrator:
                 settings=self.settings,
                 tts_audio=tts_result.audio_paths,
             )
-            render_degraded = bool(render.used_fallback and self.settings.video_renderer.lower() == "hyperframes")
+            if render.used_fallback and self.settings.video_renderer.lower() == "hyperframes":
+                raise RuntimeError("HyperFrames returned a fallback video for a required render")
             audit.record(
                 actor="render",
-                status="degraded" if render_degraded else "ok",
-                degrade_reason="hyperframes_fallback_video" if render_degraded else "",
+                status="ok",
                 output_data={"video": str(render.video_path)},
                 artifacts=[render.video_path, render.metadata_path, render.composition_dir / "index.html"],
             )

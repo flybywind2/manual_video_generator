@@ -115,7 +115,7 @@ function Clear-OwnedBundleDirectory {
 
 function Test-ExcludedSource {
     param([System.IO.FileSystemInfo]$Item)
-    $excludedNames = @(".git", ".pytest_cache", "output", "dist", "runtime", "__pycache__")
+    $excludedNames = @(".git", ".pytest_cache", "output", "dist", "runtime", "node_modules", "__pycache__")
     $excludedPatterns = @(".pytest_tmp*")
     if (-not $Item.PSIsContainer -and (Test-IsSecretEnvironmentFile $Item.Name)) {
         return $true
@@ -156,9 +156,7 @@ $zipPath = "$Dist.zip"
 
 $Runtime = Join-Path $Dist "runtime"
 $Wheels = Join-Path $Runtime "wheels"
-$Browsers = Join-Path $Runtime "browsers"
 $NpmCache = Join-Path $Runtime "npm-cache"
-$HfCache = Join-Path $Runtime "hf-cache"
 $buildSucceeded = $false
 $ownershipProven = $false
 $createdByThisRun = $false
@@ -186,7 +184,7 @@ try {
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
-    New-Item -ItemType Directory -Force -Path $Dist, $Runtime, $Wheels, $Browsers, $NpmCache, $HfCache | Out-Null
+    New-Item -ItemType Directory -Force -Path $Dist, $Runtime, $Wheels, $NpmCache | Out-Null
 
     Write-Host "Copying source files"
     Get-ChildItem -Force $Root | Where-Object { -not (Test-ExcludedSource $_) } | ForEach-Object {
@@ -206,20 +204,23 @@ try {
         Write-Host "Downloading Python wheels"
         $wheelArguments = [object[]]@($pythonRuntime.arguments) + @(
             "-m", "pip", "download", "-d", $Wheels,
-            "fastapi", "uvicorn[standard]", "pydantic", "pillow", "playwright", "httpx", "pytest"
+            "fastapi", "uvicorn[standard]", "pydantic", "pillow", "playwright", "supertonic==1.3.1", "httpx", "pytest"
         )
         Invoke-CheckedNativeCommand -Executable ([string]$pythonRuntime.executable) -Arguments $wheelArguments -Operation "pip download"
 
-        Write-Host "Installing Playwright Chromium into bundle browsers"
-        $env:PLAYWRIGHT_BROWSERS_PATH = $Browsers
-        $playwrightArguments = [object[]]@($pythonRuntime.arguments) + @("-m", "playwright", "install", "chromium")
-        Invoke-CheckedNativeCommand -Executable ([string]$pythonRuntime.executable) -Arguments $playwrightArguments -Operation "Playwright install"
-
-        Write-Host "Priming npm cache for Playwright MCP"
+        Write-Host "Installing pinned Playwright MCP and HyperFrames dependencies"
         $env:NPM_CONFIG_CACHE = $NpmCache
-        $npxCommand = Get-Command npx -ErrorAction Stop | Select-Object -First 1
-        $npxExecutable = if ($npxCommand.Source) { $npxCommand.Source } else { $npxCommand.Path }
-        Invoke-CheckedNativeCommand -Executable $npxExecutable -Arguments @("--yes", "@playwright/mcp@latest", "--help") -Operation "npx Playwright MCP"
+        $npmCommand = Get-Command npm -ErrorAction Stop | Select-Object -First 1
+        $npmExecutable = if ($npmCommand.Source) { $npmCommand.Source } else { $npmCommand.Path }
+        Push-Location $Dist
+        try {
+            Invoke-CheckedNativeCommand `
+                -Executable $npmExecutable `
+                -Arguments @("ci", "--ignore-scripts", "--cache", $NpmCache) `
+                -Operation "npm ci"
+        } finally {
+            Pop-Location
+        }
     } else {
         Write-Host "SkipDownloads enabled; bundle skeleton only."
     }
@@ -232,7 +233,8 @@ try {
         python_executable = $pythonRuntime.executable
         node = if (Get-Command node -ErrorAction SilentlyContinue) { (node --version 2>&1 | Select-Object -First 1) } else { "missing" }
         npm = if (Get-Command npm -ErrorAction SilentlyContinue) { (npm --version 2>&1 | Select-Object -First 1) } else { "missing" }
-        playwright_browsers_path = $Browsers
+        node_modules = Join-Path $Dist "node_modules"
+        npm_cache = $NpmCache
         files = @()
     }
 

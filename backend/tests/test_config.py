@@ -5,30 +5,37 @@ from backend.app.main import app
 from fastapi.testclient import TestClient
 
 
-def test_env_example_includes_llm_browser_agent_toggles():
+def test_env_example_contains_only_active_agent_runtime_choices():
     env_example = Path(".env.example").read_text(encoding="utf-8")
 
-    assert "MANUAL_AGENT_LLM_PROVIDER=" in env_example
-    assert "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=" in env_example
-    assert "MANUAL_AGENT_ENABLE_BROWSER_AGENT=" in env_example
-    assert "MANUAL_AGENT_BROWSER_DECISION_POLICY=" in env_example
-    assert "MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=" in env_example
-    assert "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=" in env_example
-    assert "MANUAL_AGENT_TARGET_VIDEO_DURATION_SECONDS=" in env_example
-    assert "MANUAL_AGENT_AUTH_DEBUG_KEEP_BROWSER_OPEN_SECONDS=" in env_example
+    assert "MANUAL_AGENT_ENABLE_OPENCODE=true" in env_example
+    assert "MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json" in env_example
+    assert "MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=" in env_example
+    assert "MANUAL_AGENT_VIDEO_RENDERER=hyperframes" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_VOICE=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_LANG=" in env_example
     assert "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=" in env_example
     assert "MANUAL_AGENT_BROWSER_CHANNEL=" in env_example
     assert "MANUAL_AGENT_USER_DATA_DIR=" in env_example
-    assert "MANUAL_AGENT_BROWSER_USER_DATA_DIR=" in env_example
     assert "MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=" in env_example
     assert "MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=" in env_example
     assert "MANUAL_AGENT_BROWSER_RUNNER=" in env_example
     assert "MANUAL_AGENT_CDP_ENDPOINT=" in env_example
-    assert "MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT=" in env_example
-    assert "MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN=" in env_example
     assert "MANUAL_AGENT_STRICT_MODE=" in env_example
+    for legacy_name in (
+        "MANUAL_AGENT_LLM_",
+        "MANUAL_AGENT_VLM_",
+        "MANUAL_AGENT_RAG_",
+        "MANUAL_AGENT_RERANKER_",
+        "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER",
+        "MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR",
+        "MANUAL_AGENT_ENABLE_BROWSER_AGENT",
+        "MANUAL_AGENT_ENABLE_PAGE_AGENT",
+        "MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS",
+        "MANUAL_AGENT_EXTENSION_BRIDGE_",
+        "MeloTTS",
+    ):
+        assert legacy_name not in env_example
     assert "--codex" not in env_example
 
 
@@ -40,7 +47,41 @@ def test_default_runtime_config_is_opencode_only_friendly():
     assert settings.tts_provider == "supertonic"
     assert settings.supertonic_voice == "M1"
     assert settings.supertonic_lang == "ko"
-    assert settings.strict_mode is False
+    assert settings.enable_opencode is True
+    assert settings.video_renderer == "hyperframes"
+    assert settings.strict_mode is True
+    assert settings.enable_internal_planner is False
+    assert settings.enable_input_extractor is False
+    assert settings.enable_rag_context is False
+    assert settings.enable_reranker is False
+    assert settings.enable_browser_agent is False
+    assert settings.enable_page_agent is False
+
+
+def test_status_contract_exposes_only_opencode_pipeline_requirements():
+    status = load_settings(environ={}).safe_status()
+
+    assert status["pipeline"] == "opencode-only"
+    assert set(status) == {"pipeline", "login", "runtime"}
+    runtime = status["runtime"]
+    assert runtime["opencode_required"] is True
+    assert runtime["opencode_command_set"] is True
+    assert runtime["playwright_mcp_required"] is True
+    assert runtime["playwright_mcp_command_set"] is True
+    assert runtime["tts_provider"] == "supertonic"
+    assert runtime["supertonic_voice"] == "M1"
+    assert runtime["supertonic_lang"] == "ko"
+    assert runtime["video_renderer"] == "hyperframes"
+    for legacy_key in (
+        "enable_internal_planner",
+        "enable_input_extractor",
+        "enable_rag_context",
+        "enable_reranker",
+        "enable_browser_agent",
+        "enable_page_agent",
+        "browser_decision_policy",
+    ):
+        assert legacy_key not in runtime
 
 
 def test_load_settings_reads_appendix_env_file(tmp_path: Path):
@@ -150,8 +191,6 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     runtime_status = settings.safe_status()["runtime"]
     assert runtime_status["browser_runner"] == "cdp_attach"
     assert runtime_status["cdp_endpoint_set"] is True
-    assert runtime_status["extension_bridge_endpoint_set"] is True
-    assert runtime_status["extension_bridge_token_set"] is True
     assert settings.login.credentials_configured is True
     assert settings.tts_provider == "supertonic"
     assert settings.tts_device == "cpu"
@@ -172,7 +211,6 @@ def test_load_settings_reads_appendix_env_file(tmp_path: Path):
     assert settings.target_video_duration_seconds == 300
     assert settings.auth_debug_keep_browser_open_seconds == 300
     assert runtime_status["target_video_duration_seconds"] == 300
-    assert runtime_status["auth_debug_keep_browser_open_seconds"] == 300
     assert settings.enable_terminal_logs is True
     assert settings.strict_mode is True
     assert settings.llm.is_configured is True
@@ -200,6 +238,18 @@ def test_supertonic_voice_setting_rejects_custom_voice_paths():
     assert status["runtime"]["supertonic_custom_voice_allowed"] is False
 
 
+def test_supertonic_cache_dir_from_dotenv_is_available_to_tts_without_process_export(tmp_path: Path):
+    model_dir = tmp_path / "models" / "supertonic3"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"SUPERTONIC_CACHE_DIR={model_dir}\n", encoding="utf-8")
+
+    settings = load_settings(env_file=env_file, environ={})
+
+    assert settings.supertonic_cache_dir == str(model_dir)
+    assert settings.safe_status()["runtime"]["supertonic_cache_dir_set"] is True
+    assert str(model_dir) not in repr(settings.safe_status())
+
+
 def test_ollama_llm_provider_uses_openai_compatible_endpoint_without_internal_headers():
     settings = load_settings(
         environ={
@@ -215,11 +265,8 @@ def test_ollama_llm_provider_uses_openai_compatible_endpoint_without_internal_he
     assert settings.llm.model == "gemma4:31b-cloud"
     headers = settings.llm.chat_headers()
     assert headers == {"Content-Type": "application/json", "Accept": "application/json"}
-    status = settings.safe_status()
-    assert status["llm"]["configured"] is True
-    assert status["llm"]["provider"] == "ollama"
-    assert status["llm"]["api_key_set"] is False
-    assert status["llm"]["dep_ticket_set"] is False
+    assert settings.llm.safe_status()["configured"] is True
+    assert "llm" not in settings.safe_status()
 
 
 def test_vlm_chat_headers_include_authorization_from_vlm_api_key():
@@ -312,14 +359,11 @@ def test_settings_status_does_not_expose_secret_values(tmp_path: Path):
     assert "credential:SECRET" not in rendered
     assert "plain-password" not in rendered
     assert "user01" not in rendered
-    assert status["llm"]["configured"] is True
-    assert status["llm"]["base_url_set"] is True
     assert status["login"]["username_set"] is True
     assert status["login"]["password_set"] is True
-    assert "enable_internal_planner" in status["runtime"]
-    assert "enable_input_extractor" in status["runtime"]
-    assert "enable_browser_agent" in status["runtime"]
-    assert "demonstration_timeout_seconds" in status["runtime"]
+    assert "llm" not in status
+    assert "vlm" not in status
+    assert status["pipeline"] == "opencode-only"
     assert status["runtime"]["enable_terminal_logs"] is False
 
 
@@ -347,7 +391,7 @@ def test_process_environment_overrides_env_file_values(tmp_path: Path):
     assert settings.enable_opencode is True
 
 
-def test_safe_status_reports_login_selector_auto_detection_when_llm_configured():
+def test_safe_status_does_not_advertise_removed_llm_login_selector_detection():
     settings = load_settings(
         environ={
             "MANUAL_AGENT_LLM_PROVIDER": "ollama",
@@ -362,8 +406,8 @@ def test_safe_status_reports_login_selector_auto_detection_when_llm_configured()
     status = settings.safe_status()
 
     assert status["login"]["credentials_configured"] is False
-    assert status["login"]["selector_auto_detection_supported"] is True
-    assert status["login"]["credentials_usable"] is True
+    assert status["login"]["selector_auto_detection_supported"] is False
+    assert status["login"]["credentials_usable"] is False
     assert "plain-password" not in repr(status)
     assert "user01" not in repr(status)
 
@@ -447,7 +491,8 @@ def test_config_status_api_does_not_expose_secret_values(monkeypatch):
     body = response.text
     assert "super-secret" not in body
     assert "credential:SECRET" not in body
-    assert response.json()["llm"]["configured"] is True
+    assert response.json()["pipeline"] == "opencode-only"
+    assert "llm" not in response.json()
 
 
 def test_config_status_api_reads_manual_agent_env_file_pointer(tmp_path: Path, monkeypatch):
@@ -467,7 +512,7 @@ def test_config_status_api_reads_manual_agent_env_file_pointer(tmp_path: Path, m
 
     assert response.status_code == 200
     body = response.json()
-    assert body["llm"]["model"] == "api-pointer-model"
+    assert body["pipeline"] == "opencode-only"
     assert body["runtime"]["enable_opencode"] is True
 
 
@@ -475,4 +520,16 @@ def test_config_status_exposes_doctor_check_names_for_runtime_alignment():
     status = load_settings().safe_status()
 
     names = set(status["runtime"]["doctor_check_names"])
-    assert {"python", "node", "ffmpeg", "playwright_browsers", "hf_cache", "app_config"}.issubset(names)
+    assert {
+        "python",
+        "node",
+        "ffmpeg",
+        "ffprobe",
+        "edge",
+        "playwright_python",
+        "playwright_mcp",
+        "hyperframes",
+        "opencode",
+        "supertonic_cache",
+        "app_config",
+    }.issubset(names)

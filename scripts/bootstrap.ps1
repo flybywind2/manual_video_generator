@@ -20,14 +20,11 @@ $env:MANUAL_AGENT_BUNDLE_ROOT = $Root
 if (-not $env:MANUAL_AGENT_OUTPUT_DIR) {
     $env:MANUAL_AGENT_OUTPUT_DIR = Join-Path $Root "output"
 }
-if (-not $env:PLAYWRIGHT_BROWSERS_PATH) {
-    $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $Runtime "browsers"
-}
-if (-not $env:HF_HOME) {
-    $env:HF_HOME = Join-Path $Runtime "hf-cache"
-}
 if (-not $env:NPM_CONFIG_CACHE) {
     $env:NPM_CONFIG_CACHE = Join-Path $Runtime "npm-cache"
+}
+if (-not $env:SUPERTONIC_CACHE_DIR) {
+    $env:SUPERTONIC_CACHE_DIR = Join-Path $Runtime "supertonic3"
 }
 
 $CorpCa = Join-Path $Root "config\corp-root-ca.pem"
@@ -61,8 +58,7 @@ if (-not $Quiet) {
     Write-Host "Manual Video Agent runtime prepared"
     Write-Host "Root: $Root"
     Write-Host "Output: $env:MANUAL_AGENT_OUTPUT_DIR"
-    Write-Host "Playwright browsers: $env:PLAYWRIGHT_BROWSERS_PATH"
-    Write-Host "HF_HOME: $env:HF_HOME"
     Write-Host "NPM cache: $env:NPM_CONFIG_CACHE"
+    Write-Host "Supertonic cache: $env:SUPERTONIC_CACHE_DIR"
     Write-Host "Python: $($script:ManualAgentPythonRuntime.actual_version) ($script:ManualAgentPythonExecutable)"
 }

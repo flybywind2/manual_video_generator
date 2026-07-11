@@ -126,19 +126,14 @@ if ($LiveBrowser) {
             $server.WaitForExit(5000) | Out-Null
         }
     }
-} else {
-    $stdinArguments = [object[]]@($pythonRuntime.arguments) + @("-")
-    $manifest = Invoke-CheckedNativeCommand `
+    $verifyArguments = [object[]]@($pythonRuntime.arguments) + @("tools\verify_package.py", [string]$manifest)
+    Invoke-CheckedNativeCommand `
         -Executable ([string]$pythonRuntime.executable) `
-        -Arguments $stdinArguments `
-        -Operation "Pipeline smoke" `
-        -InputObject $smoke
+        -Arguments $verifyArguments `
+        -Operation "Package verification"
+} else {
+    Write-Host "Live pipeline skipped. Use -LiveBrowser to run OpenCode, Edge/CDP, Supertonic, and render."
 }
-$verifyArguments = [object[]]@($pythonRuntime.arguments) + @("tools\verify_package.py", [string]$manifest)
-Invoke-CheckedNativeCommand `
-    -Executable ([string]$pythonRuntime.executable) `
-    -Arguments $verifyArguments `
-    -Operation "Package verification"
 
 if (-not $SkipTests) {
     Write-Host "== Pytest =="

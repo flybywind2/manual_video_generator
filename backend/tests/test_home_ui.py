@@ -15,8 +15,15 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert "새 영상 작업" in body
     assert "파이프라인 실행" in body
     assert "AI Center Pipeline" in body
-    assert "TTS Provider" in body
+    assert "OpenCode Agent" in body
+    assert "Playwright MCP / CDP" in body
+    assert "Supertonic M1" in body
+    assert "HyperFrames + FFmpeg" in body
     assert "MeloTTS" not in body
+    assert "LLM Planner" not in body
+    assert "직접 시연" not in body
+    assert "AI 자동 실행" not in body
+    assert "browser-use 초안 탐색" not in body
     assert ".env 설정 상태" in body
     assert 'id="work"' in body
     assert 'id="artifacts"' in body
@@ -27,20 +34,9 @@ def test_home_screen_renders_ai_center_manual_video_agent():
     assert 'href="#security"' in body
     assert 'href="#settings"' in body
     assert 'id="input-values"' in body
-    assert 'name="login_mode"' in body
-    assert '<option value="" selected>설정값 사용</option>' in body
-    assert 'name="login_success_selector"' in body
-    assert 'name="execution_mode"' in body
-    assert 'value="demonstration"' in body
-    assert 'value="ai"' in body
-    assert "직접 시연" in body
-    assert "AI 자동 실행" in body
-    assert "로그인 완료 신호" in body
-    assert "로그인 완료 버튼" in body
-    assert "직접 로그인" in body
-    assert ".env ID/password" in body
-    assert "AD SSO 프로필" in body
-    assert 'value="sso_profile"' in body
+    assert 'name="login_mode"' not in body
+    assert 'name="login_success_selector"' not in body
+    assert 'name="execution_mode"' not in body
     assert 'name="login_password"' not in body
     assert 'data-action="add-input-value"' in body
     assert 'data-action="remove-input-value"' in body
@@ -53,29 +49,24 @@ def test_static_app_exposes_review_artifact_links():
 
     assert response.status_code == 200
     body = response.text
-    assert "Planner Trace" in body
-    assert "리허설 로그" in body
-    assert "MCP Calls" in body
+    assert "OpenCode Trace" in body
+    assert "OpenCode Events" in body
+    assert "Replay Log" in body
     assert "HyperFrames Composition" in body
     assert "OpenCode Prompt" in body
-    assert "login_mode" in body
-    assert "execution_mode" in body
-    assert 'execution_mode.value = "demonstration";' in body
-    assert "Browser Agent" in body
-    assert "Page Agent" in body
-    assert "Decision Policy" in body
-    assert "Quality first" in body
-    assert "VLM every meaningful step" in body
-    assert "browser_agent_max_steps" in body
-    assert 'login_mode.value = "";' in body
-    assert 'login_mode.value = "none";' not in body
-    assert "login_success_selector" in body
+    assert "login_mode" not in body
+    assert "execution_mode" not in body
+    assert "Browser Agent" not in body
+    assert "Page Agent" not in body
+    assert "Decision Policy" not in body
+    assert "VLM every meaningful step" not in body
+    assert "browser_agent_max_steps" not in body
     assert "/api/pipeline/draft" in body
-    assert "/api/generation/scenario-drafts/discover" in body
+    assert "/api/generation/scenario-drafts/discover" not in body
     assert "/api/pipeline/continue/" in body
     assert "renderPlanReview" in body
     assert "continue-workflow" in body
-    assert "계획 승인 후 실행" in body
+    assert "요청 확인 후 실행" in body
     assert 'document.querySelectorAll(".step-list .step")' in body
     assert "setWorkflowStep(1)" in body
     assert "setWorkflowStep(5)" in body
@@ -87,7 +78,9 @@ def test_static_app_exposes_review_artifact_links():
     assert "clearWorkflowPoll" in body
     assert "WorkflowStep" in body
     assert "workflowUiState" in body
-    assert "mcp_rehearsal_after_login" in body
+    assert "opencode_discovery" in body
+    assert "trace_validation" in body
+    assert "mcp_rehearsal_after_login" not in body
     assert "renderDegradationPanel" in body
     assert "degradationReasonInfo" in body
     assert "render_quality_failed" in body
@@ -123,8 +116,10 @@ def test_static_app_exposes_review_artifact_links():
     assert "loading-spinner" in body
     assert "aria-busy" in body
     assert "작업이 진행 중입니다" in body
-    assert "selector_auto_detection_supported" in body
-    assert "LLM selector" in body
+    assert "OpenCode Agent" in body
+    assert "Playwright MCP / CDP" in body
+    assert "Supertonic M1" in body
+    assert "HyperFrames / FFmpeg" in body
     assert "navLinks" in body
     assert "setActiveNav" in body
     assert "scrollIntoView" in body
@@ -155,12 +150,15 @@ def test_static_app_marks_local_disabled_and_none_config_as_neutral_not_missing(
     assert response.status_code == 200
     body = response.text
     assert "configStatusRows" in body
-    assert "Login Default" in body
-    assert 'state: "neutral"' in body
-    assert 'state: "disabled"' in body
-    assert '["Planner", status.runtime.enable_internal_planner' not in body
-    assert '["Browser Agent", status.runtime.enable_browser_agent' not in body
-    assert '["Login", status.login.mode !== "none"' not in body
+    assert "OpenCode Agent" in body
+    assert "Playwright MCP / CDP" in body
+    assert "Supertonic M1" in body
+    assert "HyperFrames / FFmpeg" in body
+    assert "Login Default" not in body
+    assert "status.llm" not in body
+    assert "status.vlm" not in body
+    assert "status.rag" not in body
+    assert "status.reranker" not in body
 
 
 def test_static_app_supports_editable_input_value_rows():

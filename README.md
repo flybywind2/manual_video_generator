@@ -1,892 +1,347 @@
 # Manual Video Agent
 
-사내 시스템 사용 시나리오를 입력하면 로컬 PC에서 사용 매뉴얼 영상과 문서 패키지를 생성하는 MVP입니다.
+사용자가 대상 URL, 설명 시나리오, 완료 조건을 입력하면 실제 웹 화면을 탐색하고 한국어 음성·자막·강조 효과가 포함된 사용 매뉴얼 영상을 만드는 Windows 로컬 FastAPI 앱입니다.
 
-현재 목표는 운영계 시스템을 바로 자동 조작하는 것이 아니라, 샘플 사내 시스템 화면을 대상으로 전체 제작 흐름을 검증하는 것입니다. 내부 LLM/RAG/VLM/Reranker, `playwright-mcp`, Supertonic/MeloTTS, HyperFrames는 `.env`로 켜고 끌 수 있는 어댑터 경계까지 포함합니다.
+현재 런타임은 **OpenCode-only**입니다. 내부 LLM/VLM API, RAG, reranker, 별도 browser-agent, 직접 시연 플래너는 새 작업 경로에서 사용하지 않습니다. OpenCode가 Playwright MCP로 실제 화면을 탐색하고, 백엔드는 검증된 실행 trace만 결정적으로 재생합니다. TTS는 Supertonic 3의 preset `M1`, 언어 `ko`만 허용합니다.
 
-## 무엇을 만드는 시스템인가
-
-관리자가 "MES에서 LOT 조회 방법 영상 만들기" 같은 시나리오를 입력하면 다음 산출물을 만듭니다.
-
-- 브라우저 화면 녹화 영상
-- HTML preview
-- Markdown 매뉴얼
-- PDF 매뉴얼 placeholder
-- 실행 action plan JSON
-- 승인/리허설/마스킹 로그
-- TTS 오디오
-- 산출물 manifest
-
-완성된 영상은 이 시스템 안에서 장기 보관하지 않습니다. 생성된 패키지를 관리자가 확인한 뒤 별도 저장소나 게시 시스템에서 관리하는 구조입니다.
-
-## 현재 구현 상태
-
-| 영역 | 상태 | 설명 |
-|---|---|---|
-| 로컬 웹앱 | 구현 | FastAPI, Jinja template, vanilla JS 기반 |
-| 홈 화면 UI | 구현 | `D:\Python\appendix\AI Center DESIGN.md`의 AI Center inspired 디자인 적용 |
-| 샘플 사내 시스템 | 구현 | `/sample`에서 테스트용 MES LOT 조회 화면 제공 |
-| 파이프라인 API | 구현 | `/api/pipeline/run`으로 산출물 생성 |
-| Action plan | 구현 | 기본은 입력값 라벨/버튼 텍스트 기반 semantic action planner, 옵션으로 내부 LLM planner 호출 |
-| 브라우저 캡처 | 구현 | Playwright action plan 기반 범용 캡처 및 WebM 녹화 |
-| 실행 방식 선택 | 구현 | UI에서 직접 시연 또는 AI 자동 실행 선택 |
-| 로그인 처리 | 구현 | 로그인 없음, 사용자가 직접 로그인, `.env` ID/password 자동 입력 지원 |
-| 마스킹 | 구현 | 기본 이미지 마스킹과 로그 생성 |
-| `.env` 설정 | 구현 | `D:\Python\appendix\appendix.md` 기반 내부 API 설정 로드 |
-| 설정 상태 UI/API | 구현 | key 원문 없이 구성 여부만 표시 |
-| `playwright-mcp` | 어댑터 구현 | manifest 생성 또는 live stdio JSON-RPC 실행 |
-| 내부 LLM/RAG/Reranker | 어댑터 구현 | `.env`로 켜면 RAG/Reranker context와 LLM JSON planner 호출 |
-| VLM | 어댑터 구현 | MCP 단계별 사전 캡처 이미지를 VLM에 전달해 action 결정을 보강, 실패 시 DOM LLM/로컬 판단 fallback |
-| Supertonic 3 TTS | 어댑터 구현 | preset voice만 사용, OpenRAIL-M/AI 음성 고지를 metadata와 manual에 기록 |
-| MeloTTS | 어댑터 구현 | 설치되어 있으면 한국어 wav 생성, 없으면 silent wav fallback |
-| HyperFrames | 운영 경로 구현 | 1920x1080 composition, landscape/high/PNG frame 렌더, FFmpeg 오디오/자막 합성, 품질 gate |
-| OpenCode | 어댑터 구현 | 생성 패키지 디렉터리에서 `opencode run` 비대화형 agent pass 실행 |
-| 감사/게이트 | 구현 | `AuditLog`, `RiskPolicy`, `ApprovalGate`, degraded reason을 package manifest에 기록 |
-| PDF | placeholder | 정식 렌더러가 아닌 최소 PDF 생성 |
-| MP4 | 권장 산출물 | HyperFrames + FFmpeg 성공 시 H.264/AAC MP4, 실패 시 사유가 포함된 fallback |
-
-## 파이프라인
+## 핵심 구조
 
 ```mermaid
-flowchart TB
-    A["사용자 요청 입력<br/>시나리오, 대상 URL, 역할, 완료 조건, 입력값"] --> B["/api/pipeline/draft"]
-    B --> C["요청 증강 + 입력값 추출<br/>scenario_brief, request.json, input_extraction.json"]
-    C --> D{"Planner 선택"}
-    D -->|기본| E["Deterministic planner<br/>semantic action plan 생성"]
-    D -->|MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true| F["Internal LLM planner<br/>RAG/Reranker context 선택 사용"]
-    E --> G["ActionPlan 확정<br/>action_plan.json"]
-    F --> G
-    G --> H{"로그인 필요 여부"}
-    H -->|로그인 전 접근 가능| I["playwright-mcp 리허설<br/>manifest 또는 live stdio JSON-RPC"]
-    H -->|로그인 필요| J["MCP live 리허설 지연<br/>deferred_until_login=true"]
-    I --> K["ApprovalGate<br/>approval_log.json"]
-    J --> K
-    K --> L["계획 검수 대기<br/>workflow_state: plan_review"]
-    L --> M["사용자 승인<br/>/api/pipeline/continue/{job_id}"]
-    M --> N{"실행 방식"}
-    N -->|직접 시연| O["사용자가 브라우저에서 조작<br/>시연 완료 버튼"]
-    N -->|AI 자동 실행| P["Browser Agent + Playwright<br/>화면 분석, 클릭, 입력, 캡처"]
-    O --> Q["시연 이벤트 분석<br/>음성 타이밍 기준 replay 녹화"]
-    P --> R["capture_action_log.json<br/>WebM, screenshots, final frame"]
-    Q --> R
-    R --> S["Masking<br/>입력값/민감정보 블러, masking_log.json"]
-    R --> T["Media plan + subtitles<br/>media_plan.json, subtitles.vtt"]
-    T --> U["TTS<br/>Supertonic 또는 MeloTTS, fallback silent wav"]
-    S --> V["Preview + Manual<br/>preview.html, manual.md, manual.pdf"]
-    U --> W["HyperFrames render<br/>MP4 또는 WebM fallback"]
-    V --> W
-    W --> X["OpenCode optional pass<br/>opencode_prompt.md, opencode_agent.json"]
-    X --> Y["Package manifest + audit log<br/>package_manifest.json, audit_log.jsonl"]
-    Y --> Z["산출물 링크 표시<br/>영상은 관리자가 별도 저장소에서 관리"]
+flowchart LR
+    A["사용자 요청"] --> B["FastAPI 요청 검수"]
+    B --> C["Edge + AD SSO profile"]
+    C --> D["Loopback CDP"]
+    D --> E["Playwright MCP"]
+    E --> F["OpenCode discovery"]
+    F --> G["Execution trace JSON"]
+    G --> H["정책 및 selector 검증"]
+    H --> I["Supertonic M1 한국어 TTS"]
+    I --> J["음성 시간 기준 trace replay"]
+    J --> K["마스킹 + 자막 + 강조"]
+    K --> L["HyperFrames + FFmpeg"]
+    L --> M["영상·문서 패키지"]
 ```
 
-실행 중에는 백엔드가 `workflow_state.json`을 단계별로 갱신하고, UI는 이 파일을 폴링해 좌측 Workflow와 Pipeline 진행 상태를 갱신합니다.
-내부적으로는 `backend/app/workflow_graph.py`의 `WORKFLOW_GRAPH`가 각 단계의 actor, label, next_steps를 정의합니다. `workflow_state.json`에는 현재 `workflow_node`와 전체 `workflow_graph` metadata가 포함되어 UI, 진단 로그, 향후 LangGraph 전환의 기준 계약으로 쓰입니다.
+역할 경계는 다음과 같습니다.
 
-```mermaid
-stateDiagram-v2
-    [*] --> input: 요청 입력
-    input --> planning: draft 생성
-    planning --> plan_review: 계획 검수 대기
-    plan_review --> capture: 사용자 승인
-    capture --> replay: 직접 시연 replay 필요
-    capture --> masking: 일반 캡처 완료
-    replay --> masking
-    masking --> tts
-    tts --> preview
-    preview --> render
-    render --> opencode
-    opencode --> manifest
-    manifest --> completed
-    capture --> execution_failed: 브라우저/로그인/캡처 실패
-    replay --> execution_failed: replay 실패
-    tts --> render: TTS degraded fallback
-    render --> completed: HyperFrames fallback
-    execution_failed --> plan_review: 재시도 가능
-    completed --> rerender: 텍스트 산출물 편집 후 재렌더링
-    rerender --> completed
-```
+| 구성요소 | 책임 |
+|---|---|
+| OpenCode | 사용자 요청 해석, Playwright MCP 도구 호출, 화면 근거가 포함된 trace 반환 |
+| Playwright MCP | 백엔드가 연 Edge CDP 세션에서 관찰·클릭·입력·검증 |
+| FastAPI 백엔드 | 세션 수명, trace 검증, 재생, 마스킹, 감사 로그, 패키지 계약 |
+| Supertonic | `M1`/`ko` 내레이션 생성. 실패 시 전체 작업 실패 |
+| HyperFrames/FFmpeg | 화면·음성·자막 합성 및 최종 MP4 렌더 |
 
-현재 기본값은 안전한 로컬/fallback 모드입니다. `.env`에서 `MANUAL_AGENT_ENABLE_INTERNAL_PLANNER`, `MANUAL_AGENT_ENABLE_BROWSER_AGENT`, `MANUAL_AGENT_BROWSER_DECISION_POLICY`, `MANUAL_AGENT_ENABLE_PAGE_AGENT`, `MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live`, `MANUAL_AGENT_TTS_PROVIDER`, `MANUAL_AGENT_VIDEO_RENDERER`, `MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS`, `MANUAL_AGENT_ENABLE_OPENCODE`, `MANUAL_AGENT_ENABLE_TERMINAL_LOGS` 등을 켜면 내부 LLM/RAG/Reranker, Playwright 기반 브라우저 판단 루프, page-agent 스타일 DOM selector 정책, Playwright MCP, MeloTTS, HyperFrames skills/render, OpenCode 어댑터, 터미널 실행 로그를 실제 실행합니다.
+OpenCode에는 `--model`을 전달하지 않습니다. 회사 OpenCode 설정의 기본 모델을 그대로 사용합니다. 작업별 `opencode.json`은 Playwright MCP만 허용하고 shell, 파일 편집, web search, subagent 도구를 거부합니다.
 
-요청문이 짧거나 모호해도 `input_extraction.json`에는 `scenario_brief`가 함께 생성됩니다. 이 브리프는 `task_type`, `success_criteria`, `required_inputs`, `safe_click_intents`, `forbidden_click_intents`, `autonomy_guidance`를 포함하며 planner와 browser agent 프롬프트에 전달됩니다. 예를 들어 챗봇 요청은 질문 입력, 전송/Enter, 답변 대기 중심으로 증강하고 `Web Search`, 모델 선택, 도구 토글 같은 선택형 UI는 금지 의도로 유지합니다.
+## 처리 순서
 
-fallback 원인 분석이 필요하면 `.env`에서 `MANUAL_AGENT_STRICT_MODE=true`를 켭니다. strict mode는 입력값 추출, planner, 브라우저 캡처처럼 fallback을 자주 타는 단계에서 첫 예외를 그대로 발생시켜 문제 지점을 숨기지 않습니다. 일반 모드에서도 `package_manifest.json`의 `fallback_events`에는 강등된 actor, reason, 관련 artifact, 요약 details가 남습니다.
+1. 필수 요청 필드와 대상 HTTP(S) URL을 검증합니다.
+2. 설치된 Edge를 찾아 전용 AD SSO profile로 열거나, 설정된 loopback CDP에 연결합니다.
+3. 작업 전용 Playwright MCP를 CDP에 연결하고 OpenCode discovery를 한 번 실행합니다.
+4. OpenCode의 `opencode_execution_trace.json`을 Pydantic 계약과 안전 정책으로 검증합니다.
+5. 각 단계의 한국어 내레이션을 Supertonic `M1`으로 생성합니다.
+6. 같은 CDP 세션에서 trace를 음성 길이에 맞춰 재실행하고 before/after 화면과 selector를 기록합니다.
+7. 입력값과 민감 영역을 마스킹하고 자막, 포인터, 클릭/입력 강조를 합성합니다.
+8. HyperFrames/FFmpeg로 영상과 검수 패키지를 생성합니다.
 
-`MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`인 경우 LLM이 설정되지 않았거나 일시적으로 실패해도 즉시 기존 action plan으로 내려가지 않고, 관찰된 필드/버튼/`scenario_brief`를 기준으로 로컬 자율 정책을 먼저 사용합니다. 이 로컬 정책은 입력값 매핑, 안전 클릭 의도, 금지 클릭 의도, 최근 실패 이력을 보고 `fill_by_label`, `click_by_text`, `press_key`, `capture_step`, `finish` 중 하나를 선택합니다. `MANUAL_AGENT_ENABLE_PAGE_AGENT=true`를 추가로 켜면 [Alibaba Page-Agent](https://github.com/alibaba/page-agent)에서 쓰는 DOM 중심 접근처럼 텍스트 없는 아이콘, class/id/data-action 기반 버튼, selector가 있는 입력칸을 먼저 후보화하고 `click_by_selector`/`fill_by_label`로 실행합니다.
-
-`MANUAL_AGENT_BROWSER_DECISION_POLICY=quality_first`에서는 Page Agent가 직접 클릭을 확정하지 않고 DOM selector 후보를 VLM에 제공합니다. 실제 Playwright 실행 루프는 매 단계 직전 PNG를 저장하고, Gemma VLM은 이 화면과 DOM을 함께 판단합니다. 실행 전 검증에 실패하면 오류를 반영해 한 번 수정 요청하고, 수정도 실패하면 DOM LLM과 local policy로 fallback합니다. Ollama 호출은 JSON mode, `reasoning_effort=none`, 단계별 token 상한을 사용해 형식 이탈과 불필요한 생성 시간을 줄입니다. 결정, repair, fallback, 지연시간은 `llm_responses.jsonl`, `browser_agent_trace.json`, `package_manifest.json`에 남습니다.
-
-개발 작업 기준 문서는 [Workflow-Based Codebase Structure](docs/workflow-codebase-structure.md)를 사용합니다. 다음 개선 작업은 [tasks.md](tasks.md)에 워크플로우 단계별로 정리합니다.
-
-사내 PC에서 Codex를 사용할 수 없고 OpenCode만 허용되는 배포 기준은 [OpenCode Only 사내 배포 메모](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 따릅니다.
-
-`browser-use`는 최종 실행 엔진이 아니라 시나리오 초안 생성을 돕는 탐색 어댑터로만 둡니다. 데스크톱/모바일 viewport에서 후보 메뉴, 입력 필드, selector, 마스킹 대상을 수집한 뒤 `DiscoveryManifest`로 넘기고, 관리자 검토 후 기존 Playwright 기반 실행 경로로 승격합니다. 자세한 경계는 [Browser-Use Discovery Adapter](docs/BROWSER_USE_DISCOVERY.md)를 따릅니다.
+OpenCode, Playwright MCP/CDP, trace 검증, Supertonic, replay 중 하나라도 실패하면 작업을 실패 처리합니다. 필수 단계를 silent audio, placeholder 화면, 임의 planner로 대체하지 않습니다.
 
 ## 환경 준비
 
-사내 배포와 운영에서 지원하는 Python은 정확히 `3.13.14`뿐입니다. `pyproject.toml`, `.python-version`, 시작/진단/스모크/번들 스크립트가 모두 이 버전을 강제합니다. 다른 Python에서 소스 단위 테스트를 실행할 수는 있지만 이는 개발 편의를 위한 비지원 실행이며, 사내 배포 합격 판정으로 사용할 수 없습니다.
+### 1. Python 3.13.14
 
-### 1. Python 3.13.14 가상환경
-
-Windows에서 Python Launcher가 설치되어 있으면 다음처럼 만듭니다.
+이 저장소는 Python을 정확히 `3.13.14`로 고정합니다. 다른 patch/minor 버전은 배포 계약에 포함되지 않습니다.
 
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 python --version
 ```
 
-`python --version`은 다음처럼 보여야 합니다.
+마지막 출력은 `Python 3.13.14`여야 합니다. PowerShell 실행 정책 때문에 활성화가 막히면 활성화 대신 `.\.venv\Scripts\python.exe`를 직접 사용합니다.
 
-```text
-Python 3.13.14
-```
+### 2. Node.js 22 이상
 
-필요 패키지를 설치합니다.
+HyperFrames의 현재 요구사항에 맞춰 Node.js 22 이상을 사용합니다. 저장소의 `package-lock.json`으로 Playwright MCP와 HyperFrames 버전을 고정합니다.
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install fastapi "uvicorn[standard]" pydantic pillow playwright httpx pytest
-python -m playwright install chromium
+node --version
+npm ci
+npx --offline @playwright/mcp --help
+npx --offline hyperframes --help
 ```
 
-Playwright 공식 문서는 `pip install playwright` 후 `playwright install`로 브라우저 바이너리를 설치하는 흐름을 안내합니다. 이 프로젝트는 Chromium만 사용하므로 `python -m playwright install chromium`을 기본으로 둡니다.
+### 3. OpenCode
 
-사내망에서 Playwright 브라우저 다운로드가 막히면 사내 프록시 또는 사내 캐시 경로를 먼저 설정해야 합니다.
-
-```powershell
-$env:HTTPS_PROXY="http://proxy.example:8080"
-python -m playwright install chromium
-```
-
-### 2. FFmpeg
-
-MP4 변환, HyperFrames 렌더링, 오디오 mux 단계에는 `ffmpeg`가 필요합니다. 현재 MVP는 WebM을 직접 생성하므로 필수는 아니지만, HyperFrames 실연동 단계부터는 설치해야 합니다.
-
-```powershell
-winget install --id Gyan.FFmpeg -e
-ffmpeg -version
-```
-
-### 3. Playwright MCP
-
-백엔드 파이프라인은 기본 캡처에는 Python Playwright를 직접 사용합니다. `playwright-mcp`는 `live` 모드에서 action plan을 실제 브라우저 tool call로 검증하는 MCP 서버입니다. 기본 `manifest` 모드는 실제 리허설이 아니라 후보 MCP call manifest만 생성합니다.
-
-Node.js와 `npx`가 필요합니다. 사내 운영 환경에서는 Codex CLI나 Codex MCP 설정을 사용하지 않습니다. 백엔드가 `.env`의 `MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND`를 직접 실행하므로 OpenCode만 설치된 PC에서도 이 단계는 동작할 수 있습니다.
-
-```powershell
-node -v
-npx -v
-```
-
-Windows에서 `npx`가 인식되지 않으면 Node.js 설치 경로가 `PATH`에 들어갔는지 먼저 확인합니다.
-
-앱에서 실제 MCP live session을 켜려면 `.env`를 다음처럼 설정합니다.
-
-```env
-MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
-MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx @playwright/mcp@latest --headless
-```
-
-`live` 모드에서는 백엔드가 MCP 서버를 stdio JSON-RPC로 실행하고 `initialize`, `tools/list`, `tools/call`을 호출합니다. `navigate`, selector 기반 `fill/click`, semantic `fill_by_label/click_by_text`, `capture_step`을 MCP tool call로 실행하며, 실행 로그는 `playwright_mcp_execution.json`에 남습니다. 실패해도 파이프라인은 Python Playwright 캡처 또는 placeholder 캡처로 계속 진행합니다.
-
-### 4. HyperFrames
-
-HyperFrames는 HTML 기반 video composition을 preview/render하는 Node.js 계열 도구입니다. 현재 어댑터는 Playwright WebM을 composition 내부 자산으로 복사하고 HyperFrames CLI로 MP4를 생성한 뒤, FFmpeg로 Supertonic 음성과 WebVTT 자막을 합성합니다. `quality_first`에서는 `1920x1080`, `landscape`, `high`, PNG source frame을 강제하며 composition 내부의 중복 캡션과 정적 포인터를 제거합니다. 최종 품질 gate는 최소 1280x720, 16:9 가로 화면, 오디오 mux, 자막 burn-in, 목표 길이 오차를 검사합니다.
-
-필요 조건:
-
-- Node.js `22` 이상
-- FFmpeg
-- 사내망에서 npm registry 접근 또는 사내 npm mirror
-
-설치/검증:
-
-```powershell
-node -v
-ffmpeg -version
-npx hyperframes init manual-video-renderer
-cd manual-video-renderer
-npx hyperframes preview
-npx --yes hyperframes render
-```
-
-에이전트가 HyperFrames composition을 더 정확히 작성하게 하려면 HyperFrames skills를 설치합니다.
-
-```powershell
-npx skills add heygen-com/hyperframes
-```
-
-앱에서 skills 설치/확인 커맨드를 실행하게 하려면 다음 값을 켭니다.
-
-```env
-MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
-MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND=npx skills add heygen-com/hyperframes
-MANUAL_AGENT_HYPERFRAMES_COMMAND=npx --yes hyperframes render
-```
-
-이 명령은 렌더링 전에 실행되고 결과는 `hyperframes_skills.json`에 저장됩니다. 사내망에서 npm 접근이 막혀 실패해도 composition 생성과 fallback 영상 생성은 계속됩니다.
-
-사내 PC에서 Codex를 사용할 수 없는 경우에도 위 명령은 Codex 설정에 의존하지 않습니다. OpenCode 후처리는 별도 `MANUAL_AGENT_ENABLE_OPENCODE=true` 설정으로 실행합니다.
-
-HyperFrames 저장소 자체를 clone해서 개발할 경우 Git LFS가 필요할 수 있습니다.
-
-```powershell
-winget install GitHub.GitLFS
-git lfs install
-```
-
-### 5. Supertonic 3 / MeloTTS 한국어 TTS
-
-권장 TTS는 `Supertone/supertonic-3`입니다. ONNX Runtime 기반 로컬 추론을 사용하고 한국어(`ko`)를 지원합니다. 이 시스템에서는 라이선스/음성권 리스크를 줄이기 위해 **preset voice만 사용**하며, custom voice cloning 또는 임직원 음성 복제는 지원하지 않습니다.
-
-Supertonic 3 설정:
-
-```env
-MANUAL_AGENT_TTS_PROVIDER=supertonic
-MANUAL_AGENT_SUPERTONIC_VOICE=M1
-MANUAL_AGENT_SUPERTONIC_LANG=ko
-MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
-SUPERTONIC_CACHE_DIR=runtime\supertonic3
-```
-
-인터넷 연결이 가능한 빌드 PC에서 Python 3.13용 패키지를 설치하고 모델을 지정 경로에 preload합니다. Supertonic은 `SUPERTONIC_CACHE_DIR`를 생성 시점에 읽으므로, 환경변수를 먼저 설정하면 기본 `TTS(auto_download=True)` 호출도 실제 어댑터가 찾는 경로를 사용합니다.
-
-```powershell
-$env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
-New-Item -ItemType Directory -Force $env:SUPERTONIC_CACHE_DIR | Out-Null
-python -m pip install supertonic onnxruntime
-python -c "import platform, onnxruntime; assert platform.python_version() == '3.13.14'; print(onnxruntime.__version__)"
-python -c "from supertonic import TTS; TTS(auto_download=True); print('Supertonic preload complete')"
-```
-
-네트워크를 끊거나 다운로드가 차단된 사내 환경을 모사한 뒤 같은 경로에서 `auto_download=False`로 실제 합성을 검증합니다.
-
-```powershell
-$env:SUPERTONIC_CACHE_DIR=(Join-Path $PWD "runtime\supertonic3")
-python -c "from supertonic import TTS; tts=TTS(auto_download=False); style=tts.get_voice_style(voice_name='M1'); wav,duration=tts.synthesize('안녕하세요. 사내 시스템 사용 방법을 안내합니다.', voice_style=style, lang='ko'); tts.save_audio(wav, 'supertonic_offline_smoke.wav'); print(duration)"
-```
-
-Supertonic 모델 루트는 `HF_HOME`이 아니라 `SUPERTONIC_CACHE_DIR`입니다. 값을 생략하면 앱 bootstrap이 `<MANUAL_AGENT_BUNDLE_ROOT>\runtime\supertonic3`로 설정합니다. doctor의 PASS는 네 ONNX 모델뿐 아니라 모델 설정, Unicode indexer, 현재 `MANUAL_AGENT_SUPERTONIC_VOICE` preset 파일까지 모두 있을 때만 반환됩니다. voice를 지정하지 않거나 잘못 지정하면 앱과 doctor 모두 `M1`을 사용합니다.
-
-```text
-runtime\supertonic3\
-  onnx\
-    duration_predictor.onnx
-    text_encoder.onnx
-    vector_estimator.onnx
-    vocoder.onnx
-    tts.json
-    unicode_indexer.json
-  voice_styles\
-    M1.json                  # 설정한 preset voice와 동일한 파일
-  img\                       # 패키지가 내려받는 부가 asset
-```
-
-사내망/폐쇄망에서는 `MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false`를 유지하고, preload한 `runtime\supertonic3` 전체와 Python 3.13용 `supertonic`/`onnxruntime` wheels를 별도로 staging합니다.
-
-사내 Python 3.13.14 배포의 기본 TTS는 Supertonic입니다. MeloTTS 어댑터는 레거시 선택지로 남아 있지만 별도 Python 환경은 현재 회사 인수 테스트와 오프라인 배포 기준에 포함되지 않습니다.
-
-라이선스/고지 정책:
-
-- Model: `Supertone/supertonic-3`
-- Model license: `BigScience Open RAIL-M License`
-- Voice source: `preset voice` only
-- Generated manuals include an AI voice disclosure when `MANUAL_AGENT_TTS_PROVIDER=supertonic`
-- Generated `tts_metadata.json` includes the model license and preset-only voice policy
-
-### 6. 설치 확인
-
-```powershell
-python -c "import fastapi, pydantic, PIL, playwright; print('python runtime ok')"
-python -m playwright install --help
-node -v
-npx -v
-ffmpeg -version
-```
-
-### 7. OpenCode
-
-OpenCode는 생성된 산출물 패키지 디렉터리에서 비대화형 agent pass를 실행하는 선택 기능입니다. OpenCode CLI 문서의 `opencode run [message..]` 형태를 사용합니다.
-
-설치/확인:
+회사 표준 방식으로 OpenCode를 설치하고 기본 provider/model 인증을 먼저 완료합니다.
 
 ```powershell
 npm install -g opencode-ai
-opencode --help
-opencode run --help
+opencode --version
+opencode run --format json "JSON으로 ok만 응답"
 ```
 
-앱에서 OpenCode를 켜려면 `.env`를 다음처럼 설정합니다.
+애플리케이션 명령은 다음 형태입니다.
+
+```text
+opencode run --format json [--agent <configured-agent>] <prompt>
+```
+
+`--model`은 사용하지 않습니다. 모델 선택은 OpenCode 자체 설정에서만 관리합니다.
+
+### 4. Edge와 Playwright
+
+기본 브라우저는 설치된 Microsoft Edge입니다. driver 경로를 하드코딩하지 않으며, 설정값, `PATH`, Windows 설치 경로 순서로 실행 파일을 찾습니다. Python Playwright는 CDP 재생 클라이언트로 사용하고 Playwright MCP는 OpenCode 도구 서버로 사용합니다.
+
+```powershell
+python -c "from playwright.sync_api import sync_playwright; print('playwright import ok')"
+where.exe msedge
+```
+
+`where.exe`가 Edge를 찾지 못해도 일반 설치 경로 자동 탐색이 동작합니다. portable Edge를 사용할 때만 `MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH`를 지정합니다.
+
+### 5. Supertonic 3
+
+Python 패키지는 프로젝트 의존성의 `supertonic==1.3.1`로 설치됩니다. 연결 가능한 PC에서 모델을 먼저 내려받고, 사내 PC에서는 자동 다운로드를 끕니다.
+
+```powershell
+$env:SUPERTONIC_CACHE_DIR = "runtime\supertonic3"
+@'
+from pathlib import Path
+from supertonic import TTS
+
+root = Path("runtime/supertonic3").resolve()
+tts = TTS(model_dir=root, auto_download=True)
+style = tts.get_voice_style(voice_name="M1")
+wav, _ = tts.synthesize("한국어 음성 사전 점검입니다.", voice_style=style, lang="ko")
+tts.save_audio(wav, "runtime/supertonic-smoke.wav")
+print(root)
+'@ | python -
+```
+
+오프라인 PC에서는 다음으로 모델과 `M1` preset을 검증합니다.
+
+```powershell
+@'
+from pathlib import Path
+from supertonic import TTS
+
+root = Path("runtime/supertonic3").resolve()
+tts = TTS(model_dir=root, auto_download=False)
+tts.get_voice_style(voice_name="M1")
+print("Supertonic M1 ready")
+'@ | python -
+```
+
+`SUPERTONIC_CACHE_DIR=runtime\supertonic3` 아래에 최소한 다음 파일이 있어야 합니다.
+
+```text
+runtime\supertonic3\
+  onnx\duration_predictor.onnx
+  onnx\text_encoder.onnx
+  onnx\vector_estimator.onnx
+  onnx\vocoder.onnx
+  onnx\tts.json
+  onnx\unicode_indexer.json
+  voice_styles\M1.json
+```
+
+Supertonic 모델은 OpenRAIL-M 조건, Python SDK는 MIT 조건을 각각 검토해야 합니다. 이 프로젝트는 custom voice cloning을 허용하지 않고 preset `M1`만 사용하며, 생성 영상에 AI 합성 음성 고지를 남깁니다.
+
+### 6. FFmpeg와 HyperFrames
+
+FFmpeg의 `ffmpeg.exe`와 `ffprobe.exe`가 모두 `PATH`에 있어야 합니다. HyperFrames는 Node.js 22 이상과 FFmpeg를 요구합니다.
+
+```powershell
+ffmpeg -version
+ffprobe -version
+npx --offline hyperframes --help
+```
+
+실제 렌더 명령은 `.env`의 `MANUAL_AGENT_HYPERFRAMES_COMMAND`를 사용합니다. 사내망에서는 온라인 `npx --yes` 대신 `npm ci`로 설치한 고정 버전과 `--offline`을 사용합니다.
+
+### 7. 설정
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+필수값은 다음 네 묶음입니다.
 
 ```env
 MANUAL_AGENT_ENABLE_OPENCODE=true
 MANUAL_AGENT_OPENCODE_COMMAND=opencode run --format json
-MANUAL_AGENT_OPENCODE_AGENT=build
-MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS=600
-```
+MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND=npx --offline @playwright/mcp
 
-OpenCode 어댑터는 각 job 패키지에 `opencode_prompt.md`를 만들고, 그 prompt를 `opencode run` 마지막 인자로 넘깁니다. `--model`은 전달하지 않으며 OpenCode 자체 설정의 기본 모델을 사용합니다. 기존 `.env`에 `MANUAL_AGENT_OPENCODE_MODEL`이 남아 있어도 무시됩니다. 기본 prompt는 `hyperframes/index.html`, `hyperframes/hyperframes_manifest.json`, `opencode_notes.md`만 편집 대상으로 제한합니다. 실행 결과는 `opencode_agent.json`에 저장됩니다.
+MANUAL_AGENT_BROWSER_CHANNEL=msedge
+MANUAL_AGENT_USER_DATA_DIR=C:\ManualVideoAgent\runtime\browser-profile
+MANUAL_AGENT_BROWSER_RUNNER=launch
 
-## 실행 방법
-
-```powershell
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
-```
-
-브라우저에서 다음 주소를 엽니다.
-
-```text
-http://127.0.0.1:8000
-```
-
-샘플 사내 시스템 화면은 다음 주소입니다.
-
-```text
-http://127.0.0.1:8000/sample
-```
-
-## 사용 방법
-
-1. 홈 화면에서 요청문, 대상 URL, 계정 역할, 완료 조건, 실행 방식, 입력값을 확인합니다. 입력값을 비워도 요청문에서 업무 입력값을 자동 추출합니다.
-2. 로그인 창이 나오는 시스템이면 `로그인 방식`을 고릅니다.
-3. 기본 대상 URL은 `/sample`입니다.
-4. `파이프라인 실행`을 누릅니다.
-5. 실행이 끝나면 홈 화면에 산출물 링크가 표시됩니다.
-6. `preview.html`, WebM 영상, Markdown, PDF, JSON 로그를 확인합니다.
-7. 최종 영상 파일은 관리자가 별도 보관합니다.
-
-### 실행 방식
-
-작업마다 홈 화면의 `실행 방식`에서 다음 둘 중 하나를 고릅니다.
-
-- `직접 시연`: 승인 후 headed Playwright 브라우저가 열립니다. 사용자가 로그인, 입력, 클릭, 조회를 직접 수행한 뒤 화면 오른쪽 아래의 `시연 완료` 버튼을 누르면 녹화를 끝내고 마스킹, TTS, HyperFrames/영상 패키징을 진행합니다. 이 모드에서는 브라우저 에이전트가 action plan을 대신 클릭하지 않습니다.
-- `AI 자동 실행`: 승인 후 내부 planner/browser agent 설정에 따라 AI가 화면을 관찰하고 안전한 입력, 클릭, 대기, 캡처 동작을 선택합니다. `MANUAL_AGENT_ENABLE_BROWSER_AGENT=true`와 LLM 설정이 있어야 LLM 기반 화면 판단 루프가 동작하며, 꺼져 있으면 확정된 action plan 기반 캡처로 fallback합니다. `MANUAL_AGENT_ENABLE_PAGE_AGENT=true`를 함께 켜면 LLM/VLM 호출 전에 DOM selector 후보를 먼저 사용해 텍스트 없는 아이콘이나 class 기반 버튼을 더 안정적으로 클릭합니다.
-
-사내 시스템 화면 구성이 자주 바뀌거나 요청문만으로 selector/버튼 의미를 안정적으로 맞추기 어려운 경우에는 `직접 시연`을 기본으로 사용합니다. 반복 가능한 샘플 화면이나 검수된 target에서는 `AI 자동 실행`을 사용할 수 있습니다.
-
-Input Extractor는 먼저 요청문에서 `LOT-001`, `라인 A3`, `사용자ID U100` 같은 업무 입력값을 뽑아 `input_values`를 보강합니다. LLM이 설정되어 있으면 LLM JSON extractor를 사용하고, 없으면 로컬 규칙으로 fallback합니다. 사용자가 직접 입력한 `input_values`는 추출값보다 우선합니다. 비밀번호, OTP, token, API key, ticket류는 추출하지 않습니다.
-
-기본 planner는 selector를 모르는 상태에서도 입력값 이름을 화면 label/placeholder/name과 맞춰 채우고, 요청문에 `조회`, `검색`, `상세` 같은 안전한 읽기 동작이 있으면 같은 텍스트의 버튼을 찾아 클릭합니다. 예를 들어 요청문 `LOT-001 조회 후 상세 화면 확인`은 Input Extractor가 `LOT=LOT-001`을 만들고, planner가 `LOT` 입력칸 채우기, `조회` 버튼 클릭, `상세 보기` 버튼 클릭으로 실행합니다. 저장, 제출, 삭제 같은 쓰기 동작은 기본 semantic planner의 자동 클릭 대상이 아니며, 운영 전에는 LLM action plan 검수나 Action JSON 편집 UI로 확정해야 합니다.
-
-### 로그인 방식
-
-로그인 방식은 작업마다 선택할 수 있습니다.
-
-- `로그인 없음`: 기본값입니다. 로그인 페이지가 없는 샘플 또는 이미 접근 가능한 URL에 사용합니다.
-- `직접 로그인`: Playwright가 headed 브라우저를 띄우고 사용자가 직접 로그인합니다. 로그인 브라우저 오른쪽 아래에 `로그인 완료` 버튼이 표시되며, 사용자가 이 버튼을 누르면 다음 단계로 넘어갑니다. `로그인 완료 selector`를 지정하면 selector가 보이거나 버튼을 누르는 것 중 먼저 만족된 신호를 사용합니다.
-- `.env ID/password`: `.env`에 저장한 ID/password와 selector를 사용해 로그인 폼을 자동 입력합니다. 비밀번호 원문은 UI, `/api/config/status`, request artifact, audit log, capture action log에 기록하지 않습니다.
-
-직접 로그인은 OTP, SSO, 사내 인증 앱처럼 자동 입력하면 안 되는 흐름에 사용합니다. ID/password 자동 입력은 테스트 계정이나 승인된 자동화 계정에서만 사용합니다.
-
-수동 로그인 브라우저는 녹화하지 않습니다. 로그인 완료 신호를 받은 뒤 저장된 세션 상태만 녹화 브라우저로 넘겨 실제 매뉴얼 영상 캡처를 시작합니다.
-
-## 산출물 구조
-
-산출물은 기본적으로 `output/jobs/<job_id>/` 아래에 생성됩니다.
-
-```text
-output/jobs/<job_id>/
-  preview.html
-  manual_video_agent_usage.webm
-  manual.md
-  manual.pdf
-  action_plan.json
-  input_extraction.json
-  llm_responses.jsonl
-  approval_log.json
-  audit_log.jsonl
-  capture_action_log.json
-  selector_trace.json
-  support_log.md
-  planner_trace.json
-  rehearsal_log.json
-  playwright_mcp_calls.json
-  playwright_mcp_execution.json
-  masking_log.json
-  hyperframes_skills.json
-  opencode_prompt.md
-  opencode_agent.json
-  video_render.json
-  package_manifest.json
-  captures/
-  masked/
-  tts/
-    tts_metadata.json
-  hyperframes/
-    index.html
-    hyperframes_manifest.json
-```
-
-`MANUAL_AGENT_OUTPUT_DIR`을 설정하면 기본 출력 경로를 바꿀 수 있습니다.
-
-`package_manifest.json`은 기존 주요 산출물 목록인 `artifacts`와 함께 운영 검수용 `supporting_artifacts`를 제공합니다. `supporting_artifacts`에는 요청 원문, LLM 응답 preview 로그, audit log, planner trace, selector trace, rehearsal log, Playwright MCP call manifest, TTS metadata, HyperFrames composition, OpenCode prompt/result처럼 문제 재현과 관리자 검수에 필요한 파일 경로가 들어갑니다.
-
-사내 테스트 중 실패하거나 기대와 다르게 동작하면 `support_log.md`를 우선 전달합니다. 이 파일은 사용자가 메모할 수 있는 항목, job id, 현재 workflow step, last_error, 요청 요약, degraded/fallback, 최근 audit, 첨부 권장 파일 목록을 한 파일로 정리합니다. 실패한 `continue` 실행에서도 `workflow_state.json`과 함께 자동 생성됩니다. 파일을 첨부하거나 복사할 수 없는 환경에서는 `support_log.md` 상단의 `타이핑용 요약` 섹션만 먼저 전달합니다. 이 섹션은 `short_code`, 짧은 job id, 상태, 단계, 원인/오류만 5~6줄로 정리합니다.
-
-`degradations`에는 fallback이 일어난 사유를 1급 필드로 남깁니다. 예를 들어 MeloTTS 미설치로 silent wav를 만든 경우 `tts_silent_fallback`, HyperFrames 렌더 실패로 WebM fallback을 사용한 경우 `hyperframes_fallback_video`가 기록됩니다.
-
-`quality_first`의 `video_render.json.quality` gate는 파일 존재 여부뿐 아니라 해상도/화면비, 오디오, 자막, 영상 길이를 검사합니다. 하나라도 실패하면 `render_quality_failed`로 강등되고 `tools/verify_package.py`도 패키지를 실패 처리합니다.
-
-## `.env` 설정
-
-내부 API 접속값은 `.env`로 관리합니다. 예시 파일은 [.env.example](.env.example)에 있습니다.
-
-```powershell
-Copy-Item .env.example .env
-```
-
-그 다음 `.env`에서 `MANUAL_AGENT_*` 값을 사내 발급값으로 채웁니다.
-
-동일한 key가 `.env`와 프로세스 환경변수에 모두 있으면 프로세스 환경변수를 우선합니다. 배포/테스트에서 임시 출력 경로나 모델명을 바꿀 때 `.env`를 수정하지 않아도 됩니다.
-
-주요 설정은 다음과 같습니다.
-
-```text
-MANUAL_AGENT_OPENAI_API_KEY
-MANUAL_AGENT_DEP_TICKET
-MANUAL_AGENT_SEND_SYSTEM_NAME
-MANUAL_AGENT_USER_ID
-MANUAL_AGENT_USER_TYPE
-MANUAL_AGENT_LLM_PROVIDER
-MANUAL_AGENT_LLM_BASE_URL
-MANUAL_AGENT_LLM_MODEL
-MANUAL_AGENT_ENABLE_INTERNAL_PLANNER
-MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR
-MANUAL_AGENT_LLM_TIMEOUT_SECONDS
-MANUAL_AGENT_REQUEST_TIMEOUT_SECONDS
-MANUAL_AGENT_VLM_BASE_URL
-MANUAL_AGENT_VLM_MODEL
-MANUAL_AGENT_RAG_INSERT_URL
-MANUAL_AGENT_RAG_RETRIEVE_URL
-MANUAL_AGENT_RAG_DELETE_URL
-MANUAL_AGENT_RAG_API_KEY
-MANUAL_AGENT_RAG_INDEX_NAME
-MANUAL_AGENT_RAG_PERMISSION_GROUPS
-MANUAL_AGENT_ENABLE_RAG_CONTEXT
-MANUAL_AGENT_RERANKER_URL
-MANUAL_AGENT_RERANKER_MODEL
-MANUAL_AGENT_ENABLE_RERANKER
-MANUAL_AGENT_PLAYWRIGHT_MCP_MODE
-MANUAL_AGENT_PLAYWRIGHT_MCP_COMMAND
-MANUAL_AGENT_PLAYWRIGHT_EXECUTABLE_PATH
-MANUAL_AGENT_BROWSER_RUNNER
-MANUAL_AGENT_CDP_ENDPOINT
-MANUAL_AGENT_EXTENSION_BRIDGE_ENDPOINT
-MANUAL_AGENT_EXTENSION_BRIDGE_TOKEN
-MANUAL_AGENT_ENABLE_BROWSER_AGENT
-MANUAL_AGENT_BROWSER_DECISION_POLICY
-MANUAL_AGENT_ENABLE_PAGE_AGENT
-MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS
-MANUAL_AGENT_LOGIN_MODE
-MANUAL_AGENT_LOGIN_USERNAME_SELECTOR
-MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR
-MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR
-MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR
-MANUAL_AGENT_LOGIN_USERNAME
-MANUAL_AGENT_LOGIN_PASSWORD
-MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS
-MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS
-MANUAL_AGENT_BROWSER_CHANNEL
-MANUAL_AGENT_USER_DATA_DIR
-MANUAL_AGENT_BROWSER_USER_DATA_DIR
-MANUAL_AGENT_AUTH_SERVER_ALLOWLIST
-MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST
-MANUAL_AGENT_OUTPUT_DIR
-MANUAL_AGENT_ENABLE_TERMINAL_LOGS
-MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS
-MANUAL_AGENT_TTS_PROVIDER
-MANUAL_AGENT_TTS_DEVICE
-MANUAL_AGENT_TTS_LANGUAGE
-MANUAL_AGENT_TTS_SPEAKER
-MANUAL_AGENT_TTS_SPEED
-MANUAL_AGENT_SUPERTONIC_VOICE
-MANUAL_AGENT_SUPERTONIC_LANG
-MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD
-MANUAL_AGENT_VIDEO_RENDERER
-MANUAL_AGENT_HYPERFRAMES_COMMAND
-MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS
-MANUAL_AGENT_HYPERFRAMES_SKILLS_COMMAND
-MANUAL_AGENT_ENABLE_OPENCODE
-MANUAL_AGENT_OPENCODE_COMMAND
-MANUAL_AGENT_OPENCODE_AGENT
-MANUAL_AGENT_OPENCODE_TIMEOUT_SECONDS
-```
-
-운영 어댑터를 켜는 예시:
-
-```env
-MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
-MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR=true
-MANUAL_AGENT_LLM_TIMEOUT_SECONDS=180
-MANUAL_AGENT_ENABLE_RAG_CONTEXT=true
-MANUAL_AGENT_ENABLE_RERANKER=true
-MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
-MANUAL_AGENT_BROWSER_DECISION_POLICY=quality_first
-MANUAL_AGENT_ENABLE_PAGE_AGENT=true
-MANUAL_AGENT_BROWSER_AGENT_MAX_STEPS=8
-MANUAL_AGENT_DEMONSTRATION_TIMEOUT_SECONDS=600
-MANUAL_AGENT_PLAYWRIGHT_MCP_MODE=live
-MANUAL_AGENT_TTS_PROVIDER=supertonic
 MANUAL_AGENT_SUPERTONIC_VOICE=M1
 MANUAL_AGENT_SUPERTONIC_LANG=ko
-MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD=false
+SUPERTONIC_CACHE_DIR=C:\ManualVideoAgent\models\supertonic-3
+
 MANUAL_AGENT_VIDEO_RENDERER=hyperframes
-MANUAL_AGENT_ENABLE_HYPERFRAMES_SKILLS=true
-MANUAL_AGENT_ENABLE_OPENCODE=true
+MANUAL_AGENT_HYPERFRAMES_COMMAND=npx --offline hyperframes render
 ```
 
-MeloTTS를 사용할 때 VRAM 6GB에서 OOM이 나면 `MANUAL_AGENT_TTS_DEVICE=cpu`로 바꿉니다.
-
-설정 변경 후 앱을 재시작합니다.
-
-Ollama OpenAI-compatible endpoint를 내부 planner/browser agent LLM으로 사용할 때는 다음처럼 설정합니다. Ollama provider는 `base_url`과 `model`만으로 configured 상태가 되며, 사내 `x-dep-ticket`, `User-Id` 헤더를 보내지 않습니다.
-
-```env
-MANUAL_AGENT_LLM_PROVIDER=ollama
-MANUAL_AGENT_LLM_BASE_URL=http://127.0.0.1:11434/v1
-MANUAL_AGENT_LLM_MODEL=gemma4:31b-cloud
-MANUAL_AGENT_ENABLE_INTERNAL_PLANNER=true
-MANUAL_AGENT_ENABLE_BROWSER_AGENT=true
-MANUAL_AGENT_LLM_TIMEOUT_SECONDS=300
-MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
-```
-
-내부 LLM 추론이 오래 걸려 planner가 timeout fallback으로 빠지면 `MANUAL_AGENT_LLM_TIMEOUT_SECONDS=300`처럼 LLM 전용 timeout만 늘립니다. `MANUAL_AGENT_REQUEST_TIMEOUT_SECONDS`는 RAG, Reranker, MCP 같은 비-LLM 어댑터의 공통 timeout이므로 무작정 크게 올리지 않는 편이 좋습니다.
-
-로그인 자동 입력 예시:
-
-```env
-MANUAL_AGENT_LOGIN_MODE=credentials
-MANUAL_AGENT_LOGIN_USERNAME_SELECTOR=#username
-MANUAL_AGENT_LOGIN_PASSWORD_SELECTOR=#password
-MANUAL_AGENT_LOGIN_SUBMIT_SELECTOR=button[type="submit"]
-MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.main-dashboard
-MANUAL_AGENT_LOGIN_USERNAME=test-user
-MANUAL_AGENT_LOGIN_PASSWORD=replace-with-password
-MANUAL_AGENT_LOGIN_CREDENTIALS_TIMEOUT_SECONDS=30
-```
-
-사용자 직접 로그인 예시:
-
-```env
-MANUAL_AGENT_LOGIN_MODE=manual
-MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR=.main-dashboard
-MANUAL_AGENT_LOGIN_MANUAL_TIMEOUT_SECONDS=120
-```
-
-`MANUAL_AGENT_LOGIN_SUCCESS_SELECTOR`를 비워도 수동 로그인 브라우저의 `로그인 완료` 버튼으로 진행할 수 있습니다.
-
-AD 기반 SSO를 사용하는 사내 PC에서는 내가 평소 쓰는 브라우저와 Playwright 브라우저의 프로필이 달라서 새 로그인처럼 보일 수 있습니다. 이때는 Playwright가 매번 임시 프로필을 만들지 않도록 전용 persistent profile을 사용합니다.
-
-```env
-MANUAL_AGENT_LOGIN_MODE=sso_profile
-MANUAL_AGENT_BROWSER_CHANNEL=msedge
-MANUAL_AGENT_USER_DATA_DIR=C:\AppBundle\manualgen\browser-profile
-MANUAL_AGENT_AUTH_SERVER_ALLOWLIST=*.company.local
-MANUAL_AGENT_AUTH_NEGOTIATE_DELEGATE_ALLOWLIST=*.company.local
-```
-
-처음 한 번은 이 전용 프로필 창에서 SSO가 완료되도록 열어 두고, 이후부터 같은 `MANUAL_AGENT_USER_DATA_DIR`을 재사용합니다. 기존 설정명 `MANUAL_AGENT_BROWSER_USER_DATA_DIR`도 별칭으로 지원하지만, 둘 다 설정되어 있으면 `MANUAL_AGENT_USER_DATA_DIR`이 우선입니다. 평소 개인/업무용 Edge 프로필 경로를 직접 지정하지 말고, 이 시스템 전용 짧은 ASCII 경로를 별도로 쓰는 것을 권장합니다.
-
-직접 시연 모드에서도 `sso_profile`은 유지됩니다. 이 모드에서는 수동 로그인용 `로그인 완료` 버튼을 쓰지 않고, 사용자가 실제 업무 흐름을 끝낸 뒤 `시연 완료` 신호만 누르면 됩니다.
-
-Playwright가 새 브라우저를 띄우는 방식이 사내 SSO/보안정책과 맞지 않으면 CDP attach 모드를 사용할 수 있습니다. 자세한 절차는 [docs/CDP_USAGE.md](docs/CDP_USAGE.md)를 참고하세요.
-
-`MANUAL_AGENT_BROWSER_RUNNER=cdp_attach`로 실행하면 직접 시연과 시연 기반 replay가 모두 이미 열린 CDP 브라우저 컨텍스트를 사용합니다. 이 경우 로그인된 브라우저 상태를 잃지 않지만, 기존 CDP 컨텍스트에서는 Playwright 내장 WebM 녹화가 제한되어 영상 산출물이 degraded로 표시될 수 있습니다.
-
-사내 정책상 CDP 포트를 열기 어렵거나, 사용자가 이미 로그인한 실제 브라우저 탭 안에서 agent를 동작시켜야 하면 extension bridge 모드를 사용할 수 있습니다. 이 모드는 LiteWebAgent 계열처럼 브라우저 확장/로컬 네이티브 호스트가 `observe → act → verify` API를 제공하고, Manual Video Agent는 그 계약에 따라 다음 행동을 결정합니다. 자세한 계약은 [docs/EXTENSION_BRIDGE.md](docs/EXTENSION_BRIDGE.md)를 참고하세요.
-
-터미널에서 파이프라인 구성요소별 진행 상황을 보려면 다음을 켭니다.
-
-```env
-MANUAL_AGENT_ENABLE_TERMINAL_LOGS=true
-```
-
-켜면 `pipeline`, `environment`, `planner`, `rehearsal`, `approval`, `capture`, `masking`, `tts`, `render`, `opencode`, `manifest` 단계가 `[manual-agent] {...}` JSON 로그로 stderr에 출력됩니다. 또한 `actor="tool"` 로그로 `llm`, `rag`, `reranker`, `playwright-python`, `playwright-mcp`, `ffmpeg`, `node`, `npm`, `tts`, `hyperframes`, `opencode`의 사용/설정/가용 상태를 함께 남깁니다.
-
-내부 LLM 호출이 실제로 응답을 받으면 `actor="llm_response"` 로그가 추가로 출력됩니다. 이 로그에는 `component`(`input_extractor`, `planner`, `browser_agent`), `model`, `content_preview`, `content_length`, `choice_count`가 들어갑니다. Planner와 input extractor 응답 preview는 생성 패키지의 `llm_responses.jsonl`에도 저장됩니다. 로그는 비밀값, 로그인 값, OTP/API key류를 원문으로 남기지 않고 redacted/boolean 상태만 기록합니다. 기본값은 `false`입니다.
-
-설정 상태는 홈 화면의 `.env 설정 상태` 또는 다음 API에서 확인합니다.
-
-```http
-GET /api/config/status
-```
-
-비밀값 원문은 UI/API 응답에 표시하지 않습니다. `.env`는 `.gitignore`에 포함되어 커밋되지 않습니다.
-
-## Docker 없는 사내 PC 배포
-
-사내 PC마다 Python, Node, 프록시, 루트 CA, Defender/EDR 정책이 다르므로 운영 배포는 개발자 설치 절차와 분리합니다. 권장 방식은 온라인 빌드 PC에서 오프라인 번들 zip을 만들고, 대상 PC에서는 짧은 ASCII 경로에 압축을 푼 뒤 `bootstrap`과 `doctor`를 통과시키는 흐름입니다.
-
-권장 설치 경로:
-
-```powershell
-C:\AppBundle\manualgen
-```
-
-OneDrive, 한글 사용자명 아래의 깊은 경로, 공백이 많은 경로는 피합니다. `output/`, `.env`, Playwright 브라우저 캐시, TTS 모델 캐시가 OneDrive로 동기화되면 파일 잠금과 비밀값 유출 위험이 생깁니다.
+`MANUAL_AGENT_USER_DATA_DIR`는 짧은 ASCII 절대경로를 권장합니다. 회사 AD SSO를 처음 사용할 때 앱이 연 Edge에서 로그인하면 이후 작업이 같은 profile을 재사용합니다. 비밀번호, OTP, cookie, SSO token은 요청 입력값이나 trace에 넣지 않습니다.
 
 ### 런타임 디렉터리 규칙
 
-번들형 배포에서는 다음 경로를 repo/bundle 내부로 고정합니다.
+Docker 없는 사내 배포에서는 저장소를 `C:\ManualVideoAgent`처럼 짧은 경로에 둡니다. portable exact Python 3.13.14를 동봉하는 경우 실행 파일은 `runtime/python/python.exe`에 둡니다.
 
 ```text
-runtime/
-  python/python.exe # exact Python 3.13.14; python_runtime.ps1 bundled runtime
-  browsers/       # PLAYWRIGHT_BROWSERS_PATH
-  hf-cache/       # HF_HOME
-  supertonic3/    # SUPERTONIC_CACHE_DIR; onnx/, voice_styles/, img/
-  npm-cache/      # NPM_CONFIG_CACHE
-  ffmpeg/bin/     # ffmpeg.exe, ffprobe.exe
-  node/           # portable Node.js
-config/
-  corp-root-ca.pem
-output/
+C:\ManualVideoAgent\
+  runtime\python\python.exe
+  runtime\node\
+  runtime\ffmpeg\bin\ffmpeg.exe
+  runtime\supertonic3\
+  runtime\npm-cache\
+  config\corp-root-ca.pem
+  .env
 ```
 
-`python_runtime.ps1`은 명시적으로 설정한 Python 다음으로 `runtime/python/python.exe`를 번들 Python 후보로 탐색하며, 이 파일도 정확히 Python 3.13.14여야 합니다.
+## 실행
 
-앱은 실행 시 `MANUAL_AGENT_BUNDLE_ROOT` 기준으로 `PLAYWRIGHT_BROWSERS_PATH`, `HF_HOME`, `SUPERTONIC_CACHE_DIR`, `NPM_CONFIG_CACHE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` 같은 환경값을 기본 보정합니다. Supertonic 모델은 `HF_HOME`이 아닌 `SUPERTONIC_CACHE_DIR`에서 찾습니다. 기존 프로세스 환경변수가 있으면 그 값을 우선합니다.
-
-### 운영자 실행 절차
+사전 점검:
 
 ```powershell
-Set-Location C:\AppBundle\manualgen
-.\scripts\bootstrap.ps1
 .\scripts\doctor.ps1
-.\scripts\smoke.ps1 -SkipTests
-.\scripts\start.ps1
 ```
 
-`doctor.ps1`는 Python이 정확히 3.13.14인지 확인하고, Node/npm/npx, FFmpeg, Playwright browser cache, Supertonic 필수 ONNX 모델, 한글/긴 경로 위험, OneDrive 경로, 사내 CA, HF cache, 앱 설정 로딩을 PASS/WARN/FAIL로 점검합니다. 다른 Python이면 경고가 아니라 `FAIL`이며 사내 배포를 진행하지 않습니다. 장애 분석용 자료가 필요하면 다음처럼 실행합니다.
+서버 시작:
+
+```powershell
+.\scripts\start.ps1 -Port 8000
+```
+
+브라우저에서 `http://127.0.0.1:8000/`을 열고 다음을 입력합니다.
+
+1. 원하는 동작을 자연어 요청문으로 작성합니다.
+2. 대상 URL, 사용자 역할, 화면에서 확인할 완료 조건을 입력합니다.
+3. 검색어·질문처럼 화면에 입력할 비민감 값만 `입력값`에 추가합니다.
+4. `파이프라인 실행` 후 요청 내용을 확인하고 `요청 확인 후 실행`을 누릅니다.
+5. 완료 후 영상, OpenCode trace/events, replay log, selector trace, 자막, TTS metadata를 검수합니다.
+
+API 직접 실행:
+
+```powershell
+$body = @{
+  request_text = "QSike Tech Notes 서비스를 소개하고 최근 기술 글을 찾아 읽는 방법을 설명해줘"
+  target_url = "https://qsike.com/"
+  role = "방문자"
+  completion_condition = "최근 기술 글의 제목과 본문이 보이면 완료"
+  input_values = @{ 검색어 = "Playwright" }
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/pipeline/run `
+  -ContentType application/json `
+  -Body $body
+```
+
+## 산출물
+
+각 작업은 `output/jobs/<job_id>/`에 생성됩니다.
+
+```text
+preview.html
+manual_video_agent_usage.mp4
+manual.md
+manual.pdf
+opencode.json
+opencode_browser_prompt.md
+opencode_events.jsonl
+opencode_execution_trace.json
+opencode_browser_metadata.json
+action_plan.json
+trace_replay_log.json
+capture_action_log.json
+selector_trace.json
+captures\replay\*.png
+final_frame.png
+tts\*.wav
+tts\tts_metadata.json
+subtitles.vtt
+masking_log.json
+video_render.json
+audit_log.jsonl
+workflow_state.json
+support_log.md
+package_manifest.json
+hyperframes\index.html
+```
+
+텍스트 산출물은 홈 화면에서 클릭해 쉬운 보기로 확인하고 직접 추가·삭제·편집할 수 있습니다. 편집 후 `패키지 기반 재렌더링`으로 자막, 음성, 미리보기, 영상을 다시 생성합니다.
+
+## 실패 진단
+
+필수 단계 실패는 `degraded`로 숨기지 않습니다. UI 오류와 함께 다음 파일을 확인합니다.
+
+- `support_log.md`: 사람이 타이핑해서 전달할 수 있는 짧은 단계/오류 요약
+- `workflow_state.json`: 실패 단계와 마지막 오류
+- `audit_log.jsonl`: 단계별 상태와 산출물 hash 근거
+- `opencode_events.jsonl`: OpenCode 원시 JSON event
+- `opencode_browser_metadata.json`: 명령, 종료코드, timeout 분류
+- `trace_replay_log.json`: selector 실행과 검증 결과
+
+진단 묶음:
 
 ```powershell
 .\scripts\doctor.ps1 -Collect
 ```
 
-진단 zip은 `output/diagnostics/` 아래에 생성됩니다. 운영 경로와 명시적으로 허용한 비민감 설정만 원문으로 보존하고, 사용자 ID, 로그인 이름, cookie, session, auth, credential을 포함한 나머지 `MANUAL_AGENT_*` 값은 모두 `<redacted>`로 기록합니다.
+비밀값은 수집 전에 redaction됩니다. 그래도 회사 외부로 반출하기 전에는 보안 정책에 따라 재검수합니다.
 
-실제 브라우저까지 확인하는 smoke는 사용 가능한 loopback 포트를 자동 할당하고, 새로 시작한 프로세스와 `Manual Video Agent` OpenAPI 식별값을 함께 검증합니다. 특정 포트가 필요한 경우 비어 있는 포트만 명시할 수 있습니다.
+## 테스트
 
 ```powershell
-.\scripts\smoke.ps1 -LiveBrowser -SkipTests
-.\scripts\smoke.ps1 -LiveBrowser -SkipTests -Port 18080
+$env:TEMP = "C:\tmp"
+$env:TMP = "C:\tmp"
+python -m pytest -q --basetemp C:\tmp\manual-video-agent -p no:cacheprovider
 ```
+
+QSike acceptance fixture는 `test_scenarios/qsike_service_manual.json`과 `test_secnario.md`를 사용합니다. 라이브 검증에서는 영상/음성 stream, duration, 비어 있지 않은 frame, 자막 중복, OpenCode trace, selector trace를 함께 확인해야 합니다.
 
 ### 오프라인 번들 생성
 
-온라인 접근이 가능한 빌드 PC에서 다음 명령으로 부분 번들 골격을 만들 수 있습니다.
-
 ```powershell
-py -3.13 -c "import platform; assert platform.python_version() == '3.13.14'"
 .\scripts\build_bundle.ps1
 ```
 
-인터넷 접근이 불가능한 환경에서 스크립트 구조만 검증하려면 다운로드를 생략합니다.
+현재 builder는 source, core Python wheels, npm cache, hash manifest를 staging합니다. **완전한 오프라인 배포 번들이 아닙니다.** 아래 항목은 회사의 허용된 온라인 build PC에서 별도 staging과 라이선스 검토가 필요합니다.
 
-```powershell
-.\scripts\build_bundle.ps1 -SkipDownloads
-```
-
-현재 `build_bundle.ps1` 산출물은 완전한 오프라인 배포 번들이 아닙니다. 스크립트가 자동으로 받는 범위는 core Python wheels(FastAPI/Uvicorn/Pydantic/Pillow/Playwright/httpx/pytest), Playwright Chromium, Playwright MCP npm cache뿐입니다. `-SkipDownloads`는 이 항목도 받지 않는 구조 검증용 skeleton입니다.
-
-다음 항목은 builder가 지원할 때까지 배포 담당자가 별도 staging하고 설치 PC에서 검증해야 합니다.
-
-- Python 3.13.14 runtime
-- Supertonic/ONNX Runtime wheels와 모델(`runtime\supertonic3`)
-- FFmpeg
+- exact Python 3.13.14 runtime
+- Supertonic/ONNX Runtime wheels와 모델
+- Node.js 22 runtime, `node_modules`, npm cache
+- Microsoft Edge 또는 승인된 portable Edge
+- FFmpeg와 ffprobe
 - HyperFrames
 - OpenCode
 - 사내 루트 CA
 
-번들 생성 스크립트 자체는 정확히 Python 3.13.14에서만 실행됩니다. 생성된 `versions.json`은 builder가 실제 포함한 파일과 요구/실제 Python 버전, 실행 파일의 SHA256 기준점이며, 위 별도 staging 항목의 존재나 실행 가능성을 보증하지 않습니다.
+상세 절차는 [docs/OPENCODE_ONLY_DEPLOYMENT.md](docs/OPENCODE_ONLY_DEPLOYMENT.md)를 참고합니다.
 
-### 패키지 검증
+## 보안 경계
 
-생성된 job package는 다음 도구로 검사합니다.
+- 앱과 CDP는 `127.0.0.1`에만 바인딩합니다.
+- OpenCode tool permission은 Playwright MCP 외 모두 deny입니다.
+- 대상 origin을 벗어난 navigate/redirect trace는 거부합니다.
+- 저장·등록·삭제·제출·승인·구매 등 write action은 현재 trace 정책에서 거부합니다.
+- 입력값 key/value에 password, token, OTP, secret 계열을 허용하지 않습니다.
+- OpenCode는 산출물 파일을 수정하지 못하며 최종 trace만 stdout JSON event로 반환합니다.
+- Edge profile은 동시 실행 lock으로 보호하고 앱이 시작한 browser process만 종료합니다.
 
-```powershell
-python tools\verify_package.py output\jobs\<job_id>\package_manifest.json
-```
+## 참고
 
-검사 항목은 manifest 상태, 주요 artifact 존재 여부, `manual.md` 공백 여부, `audit_log.jsonl` JSONL 무결성, `degradations` 형식입니다.
-
-## API
-
-Health check:
-
-```http
-GET /api/health
-```
-
-설정 상태:
-
-```http
-GET /api/config/status
-```
-
-샘플 화면:
-
-```http
-GET /sample
-```
-
-파이프라인 실행:
-
-```http
-POST /api/pipeline/run
-Content-Type: application/json
-```
-
-예시 요청:
-
-```json
-{
-  "request_text": "MES에서 LOT 조회 방법 영상 만들기",
-  "target_url": "http://127.0.0.1:8000/sample",
-  "role": "작업자",
-  "completion_condition": "상세 화면이 보이면 완료",
-  "execution_mode": "demonstration",
-  "input_values": {
-    "LOT": "LOT-001",
-    "라인": "A3"
-  }
-}
-```
-
-`execution_mode`는 `demonstration` 또는 `ai`입니다. 생략하면 백엔드 기본값은 `ai`지만, 홈 화면 기본 선택은 실제 사내 화면에서 사용자가 직접 절차를 보여줄 수 있도록 `직접 시연`입니다.
-
-빠른 테스트에서 브라우저 캡처를 생략하려면 query parameter를 사용합니다.
-
-```text
-POST /api/pipeline/run?capture_browser=false
-```
-
-응답의 `artifacts`에는 바로 열 수 있는 주요 결과 URL이 들어가고, `supporting_artifacts`에는 `llm_responses`, `audit_log`, `planner_trace`, `rehearsal_log`, `playwright_mcp_calls`, `hyperframes_composition`, `opencode_prompt` 같은 검수용 URL이 함께 들어갑니다.
-`input_extraction_url`에서는 요청문에서 추출된 입력값과 최종 적용된 입력값을 확인할 수 있습니다.
-
-## 프로젝트 구조
-
-```text
-backend/
-  app/
-    adapters/
-      mcp_client.py
-      opencode.py
-      planner.py
-      rehearsal.py
-      skills.py
-      tts.py
-      video.py
-    audit.py
-    config.py
-    env_bootstrap.py
-    main.py
-    policies.py
-    pipeline.py
-    static/
-      app.js
-      styles.css
-    templates/
-      index.html
-      sample.html
-  tests/
-    test_config.py
-    test_env_bootstrap.py
-    test_adapters.py
-    test_home_ui.py
-    test_pipeline.py
-    test_policy.py
-    test_verify_package.py
-docs/
-  plans/
-    2026-05-17-internal-system-manual-video-agent-design.md
-    2026-05-17-internal-system-manual-video-agent-implementation-plan.md
-  reviews/
-    2026-05-17-genspark-architecture-review.md
-scripts/
-  bootstrap.ps1
-  build_bundle.ps1
-  doctor.ps1
-  smoke.ps1
-  start.ps1
-tools/
-  verify_package.py
-```
-
-핵심 파일:
-
-- [backend/app/main.py](backend/app/main.py): FastAPI route, static artifact serving
-- [backend/app/pipeline.py](backend/app/pipeline.py): 산출물 생성 파이프라인
-- [backend/app/audit.py](backend/app/audit.py): append-only audit log
-- [backend/app/config.py](backend/app/config.py): `.env` 로딩과 safe config status
-- [backend/app/env_bootstrap.py](backend/app/env_bootstrap.py): Docker 없는 번들 런타임 환경 보정
-- [backend/app/policies.py](backend/app/policies.py): 위험 액션 분류와 승인 게이트
-- [backend/app/adapters/planner.py](backend/app/adapters/planner.py): deterministic/internal LLM planner
-- [backend/app/adapters/mcp_client.py](backend/app/adapters/mcp_client.py): MCP stdio JSON-RPC client
-- [backend/app/adapters/opencode.py](backend/app/adapters/opencode.py): OpenCode CLI agent pass
-- [backend/app/adapters/rehearsal.py](backend/app/adapters/rehearsal.py): Playwright MCP manifest/live rehearsal
-- [backend/app/adapters/skills.py](backend/app/adapters/skills.py): HyperFrames skills command execution
-- [backend/app/adapters/tts.py](backend/app/adapters/tts.py): Supertonic preset voice, MeloTTS, silent fallback
-- [backend/app/adapters/video.py](backend/app/adapters/video.py): HyperFrames composition/render fallback
-- [backend/app/templates/index.html](backend/app/templates/index.html): 홈 화면
-- [backend/app/static/styles.css](backend/app/static/styles.css): AI Center inspired 스타일
-- [scripts/doctor.ps1](scripts/doctor.ps1): 사내 PC preflight/진단 수집
-- [tools/verify_package.py](tools/verify_package.py): 생성 패키지 manifest 검증
-
-## 테스트
-
-Windows/OneDrive 환경에서 pytest cache 또는 temp 권한 경고가 나면 `TMP`, `TEMP`를 `C:\tmp`로 지정합니다.
-
-```powershell
-$env:TMP='C:\tmp'
-$env:TEMP='C:\tmp'
-python -m pytest -q
-```
-
-`C:\tmp`에도 쓰기 권한이 없으면 워크스페이스 내부 임시 디렉터리를 직접 지정합니다.
-
-```powershell
-python -m pytest -q --basetemp .pytest_tmp
-```
-
-현재 기준 기대 결과:
-
-```text
-89 passed
-```
-
-## 보안 및 운영 주의사항
-
-- OTP, SSO 토큰은 이 앱 입력값으로 받지 않습니다.
-- ID/password 자동 입력이 필요한 경우 `.env`에만 저장하고 UI 작업 요청에는 넣지 않습니다.
-- `.env` 원문은 커밋하지 않습니다.
-- API key, dep ticket, RAG key는 UI/API에 노출하지 않습니다.
-- 현재 MVP는 샘플 시스템 검증용입니다.
-- 운영계 연결 전에는 위험 액션 승인, selector 검수, 마스킹 검수, 로그 보관 정책이 필요합니다.
-- 자동 클릭/입력 대상은 반드시 테스트 환경에서 먼저 검증해야 합니다.
-
-## 다음 구현 순서
-
-1. Action JSON 검수 및 편집 UI
-2. 시스템별 selector 학습/고정
-3. HyperFrames 렌더 템플릿 고도화
-4. MP4 변환 및 `ffmpeg` 검증
-5. PDF 정식 렌더러
-6. 실제 사내 시스템별 SSO/세션 처리 정책
-7. 시스템별 마스킹 룰과 검수 UI
-8. 운영계 위험 액션 승인 게이트
-
-## 참고 자료
-
-- `D:\Python\appendix\appendix.md`: 내부 OpenAI-compatible LLM/VLM, RAG, Reranker API 예시
-- `D:\Python\appendix\AI Center DESIGN.md`: AI Center inspired 디자인 가이드
-- [Playwright Python Library 설치 문서](https://playwright.dev/python/docs/library)
-- [Microsoft Playwright MCP README](https://github.com/microsoft/playwright-mcp)
-- [HyperFrames README](https://github.com/heygen-com/hyperframes)
-- [MeloTTS 설치 문서](https://github.com/myshell-ai/MeloTTS/blob/main/docs/install.md)
-- [OpenCode CLI 문서](https://opencode.ai/docs/cli/)
-- [docs/plans/2026-05-17-internal-system-manual-video-agent-design.md](docs/plans/2026-05-17-internal-system-manual-video-agent-design.md)
-- [docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md](docs/plans/2026-05-17-internal-system-manual-video-agent-implementation-plan.md)
+- [OpenCode CLI](https://opencode.ai/docs/cli/)
+- [Microsoft Playwright MCP](https://github.com/microsoft/playwright-mcp)
+- [HyperFrames](https://github.com/heygen-com/hyperframes)
+- [Supertonic](https://github.com/supertone-inc/supertonic)
+- [Supertonic 3 model license](https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE)

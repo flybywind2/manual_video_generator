@@ -895,7 +895,7 @@ a {
 
 .config-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
   gap: 8px;
   align-items: stretch;
 }
@@ -912,9 +912,7 @@ a {
 .config-item span,
 .config-item small {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .config-item strong {

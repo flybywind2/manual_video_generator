@@ -1,6 +1,5 @@
 const form = document.querySelector("#job-form");
 const sampleButton = document.querySelector("#load-sample");
-const discoverButton = document.querySelector("#discover-scenario");
 const navLinks = Array.from(document.querySelectorAll(".nav-links a[href^='#']"));
 const panelState = document.querySelector(".panel-state");
 const workflowSteps = Array.from(document.querySelectorAll(".step-list .step"));
@@ -20,62 +19,74 @@ const artifactEditorStatus = document.querySelector("#artifact-editor-status");
 const artifactEditorOpenLink = document.querySelector("#artifact-editor-open-link");
 const artifactEditorSaveButton = artifactEditorModal?.querySelector("[data-action='save-artifact-editor']");
 const sampleInputValues = [
-  { key: "LOT", value: "LOT-001" },
-  { key: "라인", value: "A3" },
+  { key: "검색어", value: "Playwright" },
 ];
 const WorkflowStep = Object.freeze({
+  REQUEST_VALIDATION: "request_validation",
   PLAN_REVIEW: "plan_review",
-  CAPTURE: "capture",
-  MCP_REHEARSAL_AFTER_LOGIN: "mcp_rehearsal_after_login",
+  BROWSER_SESSION: "browser_session",
+  OPENCODE_DISCOVERY: "opencode_discovery",
+  TRACE_VALIDATION: "trace_validation",
+  TTS: "tts",
   REPLAY: "replay",
   MASKING: "masking",
-  TTS: "tts",
   PREVIEW: "preview",
   RENDER: "render",
-  OPENCODE: "opencode",
   MANIFEST: "manifest",
   COMPLETED: "completed",
   EXECUTION_FAILED: "execution_failed",
 });
 const workflowUiState = Object.freeze({
+  [WorkflowStep.REQUEST_VALIDATION]: {
+    workflowIndex: 0,
+    pipelineIndex: 0,
+    label: "Request validation",
+    message: "요청 필드와 대상 URL을 검증 중입니다.",
+  },
   [WorkflowStep.PLAN_REVIEW]: {
+    workflowIndex: 0,
+    pipelineIndex: 0,
+    label: "Request review",
+  },
+  [WorkflowStep.BROWSER_SESSION]: {
     workflowIndex: 1,
     pipelineIndex: 1,
-    label: "Plan review",
+    label: "Edge / CDP",
+    message: "AD SSO 프로필로 Edge CDP 세션을 준비 중입니다.",
   },
-  [WorkflowStep.CAPTURE]: {
-    workflowIndex: 2,
-    pipelineIndex: 2,
-    label: "Capture",
-    message: "브라우저 캡처를 실행 중입니다.",
-  },
-  [WorkflowStep.MCP_REHEARSAL_AFTER_LOGIN]: {
+  [WorkflowStep.OPENCODE_DISCOVERY]: {
     workflowIndex: 2,
     pipelineIndex: 1,
-    label: "MCP rehearsal",
-    message: "로그인 이후 지연된 Playwright MCP 리허설을 실행 중입니다.",
+    label: "OpenCode discovery",
+    message: "OpenCode가 Playwright MCP로 실제 화면을 관찰하고 동작을 검증 중입니다.",
+  },
+  [WorkflowStep.TRACE_VALIDATION]: {
+    workflowIndex: 3,
+    pipelineIndex: 2,
+    label: "Trace validation",
+    message: "OpenCode 실행 trace의 selector 근거와 안전 정책을 검증 중입니다.",
+  },
+  [WorkflowStep.TTS]: {
+    workflowIndex: 4,
+    pipelineIndex: 3,
+    label: "Supertonic M1",
+    message: "Supertonic M1으로 한국어 내레이션을 생성 중입니다.",
   },
   [WorkflowStep.REPLAY]: {
-    workflowIndex: 2,
-    pipelineIndex: 2,
+    workflowIndex: 4,
+    pipelineIndex: 4,
     label: "Replay",
-    message: "시연 기록을 내레이션 타이밍에 맞춰 재녹화 중입니다.",
+    message: "검증된 trace를 내레이션 타이밍에 맞춰 다시 실행 중입니다.",
   },
   [WorkflowStep.MASKING]: {
-    workflowIndex: 2,
-    pipelineIndex: 3,
+    workflowIndex: 4,
+    pipelineIndex: 4,
     label: "Masking",
     message: "캡처와 로그의 민감 정보를 마스킹 중입니다.",
   },
-  [WorkflowStep.TTS]: {
-    workflowIndex: 3,
-    pipelineIndex: 4,
-    label: "TTS",
-    message: "자막과 한국어 내레이션을 생성 중입니다.",
-  },
   [WorkflowStep.PREVIEW]: {
-    workflowIndex: 4,
-    pipelineIndex: 5,
+    workflowIndex: 5,
+    pipelineIndex: 4,
     label: "Preview",
     message: "미리보기와 텍스트 매뉴얼을 생성 중입니다.",
   },
@@ -84,12 +95,6 @@ const workflowUiState = Object.freeze({
     pipelineIndex: 5,
     label: "Rendering",
     message: "영상 렌더를 실행 중입니다.",
-  },
-  [WorkflowStep.OPENCODE]: {
-    workflowIndex: 5,
-    pipelineIndex: 5,
-    label: "OpenCode",
-    message: "선택적 OpenCode 후처리를 실행 중입니다.",
   },
   [WorkflowStep.MANIFEST]: {
     workflowIndex: 5,
@@ -129,13 +134,10 @@ navLinks.forEach((link) => {
 
 sampleButton?.addEventListener("click", () => {
   clearWorkflowPoll();
-  form.elements.request.value = "MES에서 LOT 조회 방법 영상 만들기";
-  form.elements.url.value = `${window.location.origin}/sample`;
-  form.elements.role.value = "작업자";
-  form.elements.login_mode.value = "";
-  form.elements.login_success_selector.value = "";
-  form.elements.execution_mode.value = "demonstration";
-  form.elements.done.value = "상세 화면이 보이면 완료";
+  form.elements.request.value = "QSike Tech Notes 서비스를 소개하고 최근 기술 글을 찾아 읽는 방법을 설명해줘";
+  form.elements.url.value = "https://qsike.com/";
+  form.elements.role.value = "방문자";
+  form.elements.done.value = "최근 기술 글의 제목과 본문이 보이면 완료";
   renderInputValues(sampleInputValues);
   panelState.textContent = "Sample loaded";
   currentDraft = null;
@@ -158,10 +160,10 @@ form?.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearWorkflowPoll();
   currentDraft = null;
-  setBusy(true, "계획 생성 중...");
+  setBusy(true, "요청 검수 중...");
   setWorkflowStep(0);
   setPipelineProgress(0);
-  setStatus("Planning");
+  setStatus("Request review");
   setArtifactLoading(planningMessage());
 
   try {
@@ -172,50 +174,18 @@ form?.addEventListener("submit", async (event) => {
     });
 
     if (!response.ok) {
-      throw new Error(`Draft failed: ${response.status}`);
+      throw new Error(`Request review failed: ${response.status}`);
     }
 
     currentDraft = await response.json();
-    setWorkflowStep(1);
-    setPipelineProgress(1);
-    setStatus("Plan review");
+    setWorkflowStep(0);
+    setPipelineProgress(0);
+    setStatus("Request review");
     renderPlanReview(currentDraft);
   } catch (error) {
     setStatus("Failed");
-    setArtifactMessage(error.message || "계획 생성 중 오류가 발생했습니다.");
+    setArtifactMessage(error.message || "요청 검수 중 오류가 발생했습니다.");
   } finally {
-    setBusy(false);
-  }
-});
-
-discoverButton?.addEventListener("click", async () => {
-  clearWorkflowPoll();
-  currentDraft = null;
-  setButtonLoading(discoverButton, true, "탐색 중...");
-  setWorkflowStep(0);
-  setPipelineProgress(0);
-  setStatus("Discovery");
-  setArtifactLoading("browser-use 탐색 초안을 생성 중입니다. 최종 실행은 하지 않습니다.");
-
-  try {
-    const response = await fetch("/api/generation/scenario-drafts/discover", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(createDiscoveryPayload()),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Discovery failed: ${response.status}`);
-    }
-
-    const result = await response.json();
-    setStatus("Discovery draft");
-    renderDiscoveryArtifacts(result);
-  } catch (error) {
-    setStatus("Failed");
-    setArtifactMessage(error.message || "browser-use 탐색 중 오류가 발생했습니다.");
-  } finally {
-    setButtonLoading(discoverButton, false);
     setBusy(false);
   }
 });
@@ -283,31 +253,15 @@ function createPipelinePayload() {
     target_url: form.elements.url.value.trim(),
     role: form.elements.role.value.trim(),
     completion_condition: form.elements.done.value.trim(),
-    login_mode: form.elements.login_mode.value,
-    login_success_selector: form.elements.login_success_selector.value.trim(),
-    execution_mode: form.elements.execution_mode.value,
     input_values: readInputValues(),
-  };
-}
-
-function createDiscoveryPayload() {
-  return {
-    request_text: form.elements.request.value.trim(),
-    target_url: form.elements.url.value.trim(),
-    role: form.elements.role.value.trim(),
-    completion_condition: form.elements.done.value.trim(),
-    input_values: readInputValues(),
-    viewport_mode: "desktop",
-    max_steps: 8,
-    auth_profile: form.elements.login_mode.value === "sso_profile" ? "sso_profile" : "",
   };
 }
 
 async function continueWorkflow(jobId, button) {
   setButtonLoading(button, true, "실행 중...");
   setBusy(true, "실행 중...");
-  setWorkflowStep(2);
-  setPipelineProgress(2);
+  setWorkflowStep(1);
+  setPipelineProgress(1);
   setStatus("Running");
   setArtifactLoading(continueMessage(currentDraft));
   startWorkflowPolling(workflowStateUrlForDraft(currentDraft));
@@ -437,18 +391,11 @@ async function rerenderPackage(jobId, button) {
 }
 
 function planningMessage() {
-  if (form.elements.execution_mode.value === "demonstration") {
-    return "요청을 분석하고 검수용 계획을 만듭니다. 승인 후 브라우저가 열리면 직접 시연하고 시연 완료 버튼을 누릅니다.";
-  }
-  return "요청을 분석하고 Action Plan, 승인 로그, MCP 리허설 결과를 생성합니다. 승인 후 AI가 화면을 보고 안전 동작을 선택합니다.";
+  return "입력한 요청과 대상 URL을 확인합니다. 실행 후 OpenCode가 실제 화면을 탐색해 trace를 만듭니다.";
 }
 
-function continueMessage(draft) {
-  const mode = draft?.execution_mode || form.elements.execution_mode.value;
-  if (mode === "demonstration") {
-    return "브라우저가 열리면 사용자가 직접 로그인/입력/클릭을 시연합니다. 완료 후 화면의 시연 완료 버튼을 누르면 마스킹, TTS, 렌더를 진행합니다.";
-  }
-  return "승인된 계획으로 AI 브라우저 판단, 캡처, 마스킹, TTS, HyperFrames 렌더를 실행합니다.";
+function continueMessage(_draft) {
+  return "Edge SSO 세션에서 OpenCode 탐색을 실행한 뒤, 검증된 trace로 음성 동기화 재생과 HyperFrames 렌더를 진행합니다.";
 }
 
 function readInputValues() {
@@ -560,20 +507,14 @@ function setArtifactLoading(message = "작업이 진행 중입니다") {
 }
 
 function renderPlanReview(draft, errorMessage = "") {
-  const actions = draft.plan?.actions || [];
-  const steps = draft.plan?.steps || [];
-  const dangerActions = draft.approval?.danger_actions || [];
-  artifactStatus.textContent = `작업 ${draft.job_id} 계획 검수 대기 중입니다. 승인해야 캡처와 영상 렌더가 시작됩니다.`;
+  artifactStatus.textContent = `작업 ${draft.job_id} 요청 검수 대기 중입니다. 실행하면 OpenCode가 실제 화면에서 계획을 확정합니다.`;
 
   const supporting = draft.supporting_artifacts || {};
   const artifacts = draft.artifacts || {};
   artifactLinks?.removeAttribute("aria-busy");
   const links = [
-    ["Action JSON", artifacts.action_plan_url],
-    ["승인 로그", artifacts.approval_log_url],
-    ["리허설 로그", artifacts.rehearsal_log_url],
-    ["Planner Trace", supporting.planner_trace || artifacts.planner_trace_url],
-    ["MCP Calls", supporting.playwright_mcp_calls || artifacts.mcp_calls_url],
+    ["요청", supporting.request],
+    ["요청 검수", artifacts.action_plan_url],
     ["Workflow State", supporting.workflow_state || artifacts.workflow_state_url],
   ].filter(([, url]) => Boolean(url));
 
@@ -581,15 +522,15 @@ function renderPlanReview(draft, errorMessage = "") {
     <div class="plan-review">
       ${errorMessage ? `<div class="review-error">${escapeHtml(errorMessage)}</div>` : ""}
       <div class="review-summary">
-        <span><strong>${steps.length}</strong> 단계</span>
-        <span><strong>${actions.length}</strong> 액션</span>
-        <span><strong>${dangerActions.length}</strong> 위험 액션</span>
+        <span><strong>1</strong> 대상 URL</span>
+        <span><strong>${Object.keys(draft.plan?.input_values || {}).length}</strong> 입력값</span>
+        <span><strong>OpenCode</strong> 실행 대기</span>
       </div>
       <div class="review-links">
         ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
       </div>
       <div class="review-actions">
-        <button class="button primary" type="button" data-action="continue-workflow">계획 승인 후 실행</button>
+        <button class="button primary" type="button" data-action="continue-workflow">요청 확인 후 실행</button>
       </div>
     </div>
   `;
@@ -607,10 +548,9 @@ function renderArtifacts(result, message = "") {
     ["PDF", result.artifacts.pdf_manual_url],
     ["Action JSON", result.artifacts.action_plan_url],
     ["Media Plan", supporting.media_plan || result.artifacts.media_plan_url],
-    ["Planner Trace", supporting.planner_trace || result.artifacts.planner_trace_url],
-    ["리허설 로그", supporting.rehearsal_log || result.artifacts.rehearsal_log_url],
-    ["MCP Calls", supporting.playwright_mcp_calls || result.artifacts.mcp_calls_url],
-    ["MCP 실행 로그", supporting.playwright_mcp_execution || result.artifacts.mcp_execution_url],
+    ["OpenCode Trace", supporting.opencode_execution_trace || result.artifacts.opencode_execution_trace_url],
+    ["OpenCode Events", supporting.opencode_events || result.artifacts.opencode_events_url],
+    ["Replay Log", supporting.capture_action_log || result.artifacts.capture_action_log_url],
     ["Selector Trace", supporting.selector_trace || result.artifacts.selector_trace_url],
     ["Support Log", supporting.support_log || result.artifacts.support_log_url],
     ["마스킹 로그", result.artifacts.masking_log_url],
@@ -619,6 +559,7 @@ function renderArtifacts(result, message = "") {
     ["Skills 메타데이터", result.artifacts.skills_metadata_url],
     ["HyperFrames Composition", supporting.hyperframes_composition || result.artifacts.hyperframes_composition_url],
     ["OpenCode Prompt", supporting.opencode_prompt || result.artifacts.opencode_prompt_url],
+    ["OpenCode Config", supporting.opencode_config || result.artifacts.opencode_config_url],
     ["OpenCode 메타데이터", result.artifacts.opencode_metadata_url],
     ["패키지 매니페스트", result.artifacts.package_manifest_url],
   ].filter(([, url]) => Boolean(url));
@@ -629,30 +570,6 @@ function renderArtifacts(result, message = "") {
     ${renderDegradationPanel(result.degradations || [])}
     <div class="artifact-link-grid">
       ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
-    </div>
-  `;
-}
-
-function renderDiscoveryArtifacts(result) {
-  artifactStatus.textContent = `browser-use 탐색 초안 ${result.job_id}이 생성되었습니다. 관리자 검토 후 Playwright 실행 계획으로 승격해야 합니다.`;
-  artifactLinks?.removeAttribute("aria-busy");
-  const links = [
-    ["Discovery Manifest", result.artifacts?.manifest],
-    ["Scenario Draft", result.artifacts?.scenario_draft],
-    ["Candidate Action Plan", result.artifacts?.candidate_action_plan],
-  ].filter(([, url]) => Boolean(url));
-  const actions = result.manifest?.candidate_actions || [];
-  const inputs = result.manifest?.candidate_inputs || [];
-  artifactLinks.innerHTML = `
-    <div class="plan-review">
-      <div class="review-summary">
-        <span><strong>${inputs.length}</strong> 후보 입력</span>
-        <span><strong>${actions.length}</strong> 후보 액션</span>
-        <span><strong>검토 필요</strong> draft-only</span>
-      </div>
-      <div class="review-links">
-        ${links.map(([label, url]) => artifactAnchor(label, url)).join("")}
-      </div>
     </div>
   `;
 }
@@ -680,12 +597,7 @@ function renderDegradationPanel(degradations) {
 
 function degradationReasonInfo(reason) {
   const labels = {
-    browser_capture_disabled: ["브라우저 캡처 비활성화", "실제 화면 녹화 없이 placeholder 기반으로 패키지를 만들었습니다."],
-    tts_silent_fallback: ["TTS fallback", "음성 엔진을 사용할 수 없어 무음 wav가 들어갔습니다. TTS 설정과 모델 캐시를 확인하세요."],
     hyperframes_fallback_video: ["HyperFrames fallback", "MP4 렌더 대신 WebM 또는 fallback 영상을 사용했습니다. FFmpeg/HyperFrames 설정을 확인하세요."],
-    opencode_failed: ["OpenCode 실패", "선택적 OpenCode 후처리가 실패했습니다. 패키지 자체는 계속 검수할 수 있습니다."],
-    login_required: ["로그인 필요", "로그인 화면이 감지되어 자동 실행이 중단되었습니다. 직접 로그인 또는 .env credentials를 설정하세요."],
-    demonstration_replay_failed: ["시연 replay 실패", "직접 시연 원본은 보존됐지만 음성 타이밍 기준 재녹화가 실패했습니다."],
     render_quality_failed: ["렌더 품질 검증 실패", "음성, 자막, 영상 길이 중 하나 이상이 기대치를 만족하지 못했습니다. Video Render Metadata의 quality.issues를 확인하세요."],
   };
   const [label, action] = labels[reason] || ["Degraded 상태", "패키지 매니페스트와 관련 로그에서 상세 원인을 확인하세요."];
@@ -884,7 +796,7 @@ function renderKnownArtifact(name, data) {
 }
 
 function renderSelectorTraceArtifact(data) {
-  const selectors = Array.isArray(data.selectors) ? data.selectors : [];
+  const selectors = Array.isArray(data) ? data : (Array.isArray(data.selectors) ? data.selectors : []);
   return `
     <section class="friendly-block">
       <h3>사용된 Selector</h3>
@@ -1293,22 +1205,28 @@ async function loadConfigStatus() {
 }
 
 function configStatusRows(status) {
+  const runtime = status.runtime || {};
   return [
-    requiredConfigRow("LLM", status.llm.configured, status.llm.model || "QWEN3"),
-    requiredConfigRow("VLM", status.vlm.configured, status.vlm.model || "QWEN3-VL"),
-    optionalServiceRow("RAG", status.rag.configured, status.rag.index_name || "index 미설정", status.runtime.enable_rag_context),
-    optionalServiceRow("Reranker", status.reranker.configured, status.reranker.model || "model 미설정", status.runtime.enable_reranker),
-    inputExtractorStatusRow(status),
-    plannerStatusRow(status),
-    browserAgentStatusRow(status),
-    decisionPolicyStatusRow(status),
-    pageAgentStatusRow(status),
-    { label: "TTS", state: "ready", text: "Ready", detail: status.runtime.tts_provider },
-    { label: "Renderer", state: "ready", text: "Ready", detail: status.runtime.video_renderer },
-    loginStatusRow(status),
-    featureToggleRow("Skills", status.runtime.enable_hyperframes_skills, "enabled", "disabled"),
-    mcpStatusRow(status),
-    featureToggleRow("OpenCode", status.runtime.enable_opencode, status.runtime.opencode_agent || "enabled", "disabled"),
+    requiredConfigRow(
+      "OpenCode Agent",
+      runtime.enable_opencode && runtime.opencode_command_set,
+      runtime.opencode_agent || runtime.opencode_model_source || "default model",
+    ),
+    requiredConfigRow(
+      "Playwright MCP / CDP",
+      runtime.playwright_mcp_required && runtime.playwright_mcp_command_set,
+      `${runtime.browser_channel || "msedge"} · ${runtime.browser_runner || "launch"}`,
+    ),
+    requiredConfigRow(
+      "Supertonic M1",
+      runtime.tts_provider === "supertonic" && runtime.supertonic_voice === "M1" && runtime.supertonic_lang === "ko",
+      `${runtime.supertonic_voice || "M1"} · ${runtime.supertonic_lang || "ko"}`,
+    ),
+    requiredConfigRow(
+      "HyperFrames / FFmpeg",
+      runtime.video_renderer === "hyperframes" && runtime.hyperframes_command_set,
+      runtime.video_renderer || "hyperframes",
+    ),
   ];
 }
 
@@ -1316,99 +1234,6 @@ function requiredConfigRow(label, configured, detail) {
   return configured
     ? { label, state: "ready", text: "Ready", detail }
     : { label, state: "missing", text: "Missing", detail };
-}
-
-function optionalServiceRow(label, configured, detail, enabled) {
-  if (!enabled) {
-    return { label, state: "disabled", text: "Disabled", detail: "disabled" };
-  }
-  return configured
-    ? { label, state: "ready", text: "Ready", detail }
-    : { label, state: "missing", text: "Missing", detail };
-}
-
-function inputExtractorStatusRow(status) {
-  if (!status.runtime.enable_input_extractor) {
-    return { label: "Input Extractor", state: "disabled", text: "Disabled", detail: "manual input only" };
-  }
-  return status.llm.configured
-    ? { label: "Input Extractor", state: "ready", text: "Ready", detail: "LLM + local fallback" }
-    : { label: "Input Extractor", state: "neutral", text: "Local", detail: "request text heuristic" };
-}
-
-function plannerStatusRow(status) {
-  if (!status.runtime.enable_internal_planner) {
-    return { label: "Planner", state: "neutral", text: "Local", detail: "deterministic planner" };
-  }
-  const provider = status.llm.provider || "LLM";
-  const model = status.llm.model ? ` · ${status.llm.model}` : "";
-  return status.llm.configured
-    ? { label: "Planner", state: "ready", text: "Ready", detail: `${provider}${model}` }
-    : { label: "Planner", state: "missing", text: "Missing", detail: "LLM config required" };
-}
-
-function browserAgentStatusRow(status) {
-  if (!status.runtime.enable_browser_agent) {
-    return { label: "Browser Agent", state: "disabled", text: "Disabled", detail: "deterministic capture" };
-  }
-  return status.llm.configured
-    ? { label: "Browser Agent", state: "ready", text: "Ready", detail: `${status.runtime.browser_agent_max_steps || 8} steps` }
-    : { label: "Browser Agent", state: "missing", text: "Missing", detail: "LLM config required" };
-}
-
-function decisionPolicyStatusRow(status) {
-  const policy = status.runtime.browser_decision_policy || "balanced";
-  if (policy === "quality_first") {
-    return { label: "Decision Policy", state: "ready", text: "Quality first", detail: "VLM every meaningful step" };
-  }
-  return { label: "Decision Policy", state: "neutral", text: "Balanced", detail: "DOM candidate first" };
-}
-
-function pageAgentStatusRow(status) {
-  if (!status.runtime.enable_page_agent) {
-    return { label: "Page Agent", state: "disabled", text: "Disabled", detail: "DOM selector policy off" };
-  }
-  if (!status.runtime.enable_browser_agent) {
-    return { label: "Page Agent", state: "neutral", text: "Standby", detail: "requires Browser Agent" };
-  }
-  const detail = status.runtime.browser_decision_policy === "quality_first" ? "VLM candidate enrichment" : "DOM selector first";
-  return { label: "Page Agent", state: "ready", text: "Ready", detail };
-}
-
-function loginStatusRow(status) {
-  if (status.login.mode === "none") {
-    return { label: "Login Default", state: "disabled", text: "None", detail: "per-run 선택 가능" };
-  }
-  if (status.login.mode === "manual") {
-    return { label: "Login Default", state: "ready", text: "Manual", detail: "브라우저에서 직접 로그인" };
-  }
-  if (status.login.mode === "credentials") {
-    if (status.login.credentials_configured) {
-      return { label: "Login Default", state: "ready", text: "Ready", detail: "credentials" };
-    }
-    return status.login.selector_auto_detection_supported
-      ? { label: "Login Default", state: "ready", text: "LLM selector", detail: "ID/PW selector auto" }
-      : { label: "Login Default", state: "missing", text: "Missing", detail: "credentials missing" };
-  }
-  return { label: "Login Default", state: "disabled", text: "None", detail: status.login.mode || "none" };
-}
-
-function featureToggleRow(label, enabled, enabledDetail, disabledDetail) {
-  return enabled
-    ? { label, state: "ready", text: "Ready", detail: enabledDetail }
-    : { label, state: "disabled", text: "Disabled", detail: disabledDetail };
-}
-
-function mcpStatusRow(status) {
-  if (status.runtime.playwright_mcp_mode === "off") {
-    return { label: "MCP", state: "disabled", text: "Disabled", detail: "off" };
-  }
-  if (status.runtime.playwright_mcp_mode === "manifest") {
-    return { label: "MCP", state: "neutral", text: "Manifest only", detail: "no rehearsal" };
-  }
-  return status.runtime.playwright_mcp_command_set
-    ? { label: "MCP", state: "ready", text: "Ready", detail: status.runtime.playwright_mcp_mode }
-    : { label: "MCP", state: "missing", text: "Missing", detail: "command required" };
 }
 
 function renderConfigItem(row) {

@@ -29,7 +29,7 @@ def test_input_extractor_derives_values_from_request_text_without_llm(tmp_path: 
         role="작업자",
         completion_condition="상세 화면",
     )
-    settings = load_settings(environ={})
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR": "true"})
 
     result = extract_input_values(request, settings, package_dir=tmp_path)
 
@@ -127,7 +127,8 @@ def test_input_extractor_strict_mode_raises_llm_errors(tmp_path: Path):
     )
     settings = load_settings(
         environ={
-            "MANUAL_AGENT_STRICT_MODE": "true",
+                "MANUAL_AGENT_STRICT_MODE": "true",
+                "MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR": "true",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -153,7 +154,7 @@ def test_input_extractor_preserves_explicit_input_values_over_extracted(tmp_path
         completion_condition="상세 화면",
         input_values={"LOT": "MANUAL-999"},
     )
-    settings = load_settings(environ={})
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_INPUT_EXTRACTOR": "true"})
 
     result = extract_input_values(request, settings, package_dir=tmp_path)
 
@@ -209,6 +210,7 @@ def test_browser_agent_decides_next_action_from_page_observation(tmp_path: Path,
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -285,6 +287,7 @@ def test_browser_agent_prompt_includes_augmented_brief_and_failure_history(tmp_p
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -405,6 +408,7 @@ def test_browser_agent_llm_error_falls_back_to_local_policy_when_not_strict():
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -951,6 +955,7 @@ def test_browser_agent_falls_back_to_dom_llm_when_vlm_fails(tmp_path: Path):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_BROWSER_AGENT": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_VLM_PROVIDER": "generic",
             "MANUAL_AGENT_VLM_BASE_URL": "http://vlm.net/v1",
             "MANUAL_AGENT_VLM_MODEL": "QWEN3-VL",
@@ -1045,6 +1050,7 @@ def test_internal_planner_uses_llm_json_when_enabled(tmp_path: Path, capsys):
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -1512,6 +1518,7 @@ def test_internal_planner_falls_back_and_records_trace_when_llm_response_is_inva
     settings = load_settings(
         environ={
             "MANUAL_AGENT_ENABLE_INTERNAL_PLANNER": "true",
+            "MANUAL_AGENT_STRICT_MODE": "false",
             "MANUAL_AGENT_OPENAI_API_KEY": "local-api-key",
             "MANUAL_AGENT_LLM_BASE_URL": "http://api.net:8000/v1",
             "MANUAL_AGENT_LLM_MODEL": "QWEN3",
@@ -1650,6 +1657,7 @@ def test_supertonic_uses_only_m1_ko_once_and_writes_completed_metadata(tmp_path:
             "MANUAL_AGENT_SUPERTONIC_VOICE": "F1",
             "MANUAL_AGENT_SUPERTONIC_LANG": "en",
             "MANUAL_AGENT_SUPERTONIC_AUTO_DOWNLOAD": "false",
+            "SUPERTONIC_CACHE_DIR": str(tmp_path / "supertonic3"),
         }
     )
     plan = {
@@ -1669,7 +1677,6 @@ def test_supertonic_uses_only_m1_ko_once_and_writes_completed_metadata(tmp_path:
     }
     calls = []
 
-    monkeypatch.setenv("SUPERTONIC_CACHE_DIR", str(tmp_path / "supertonic3"))
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-cache"))
     onnx_dir = tmp_path / "supertonic3" / "onnx"
     onnx_dir.mkdir(parents=True)
@@ -4080,7 +4087,7 @@ def test_opencode_agent_records_failed_command_without_raising(tmp_path: Path):
 
 
 def test_opencode_agent_skips_when_disabled(tmp_path: Path):
-    settings = load_settings(environ={})
+    settings = load_settings(environ={"MANUAL_AGENT_ENABLE_OPENCODE": "false"})
     result = run_opencode_agent(plan={"steps": [], "actions": []}, package_dir=tmp_path, settings=settings)
 
     assert result.status == "skipped"

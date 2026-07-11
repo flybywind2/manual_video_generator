@@ -57,8 +57,8 @@ def test_readme_documents_supertonic_preload_and_runtime_cache_layout():
     readme = Path("README.md").read_text(encoding="utf-8")
     tts_setup = _markdown_section(readme, "### 5. Supertonic", "### ")
 
-    preload = "TTS(auto_download=True)"
-    offline_verify = "TTS(auto_download=False)"
+    preload = "auto_download=True"
+    offline_verify = "auto_download=False"
     assert preload in tts_setup
     assert offline_verify in tts_setup
     assert tts_setup.index(preload) < tts_setup.index(offline_verify)
@@ -83,11 +83,11 @@ def test_readme_describes_current_bundle_builder_scope_without_overclaiming():
 
     assert "완전한 오프라인 배포 번들이 아닙니다" in bundle_setup
     assert "core Python wheels" in bundle_setup
-    assert "Playwright Chromium" in bundle_setup
-    assert "Playwright MCP npm cache" in bundle_setup
+    assert "npm cache" in bundle_setup
     for prerequisite in (
         "Python 3.13.14 runtime",
         "Supertonic/ONNX Runtime wheels와 모델",
+        "Microsoft Edge",
         "FFmpeg",
         "HyperFrames",
         "OpenCode",
@@ -165,6 +165,8 @@ def _controlled_python_3_13_14(tmp_path: Path) -> Path:
     executable.write_text(
         "@echo off\n"
         "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"platform.python_version\" >nul && (echo 3.13.14 & exit /b 0)\n"
+        "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"import playwright\" >nul && (echo C:\\fake\\playwright.py & exit /b 0)\n"
+        "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"discover_browser_executable\" >nul && (echo C:\\fake\\msedge.exe & exit /b 0)\n"
         "echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"backend.app.config\" >nul && exit /b 0\n"
         "if \"%~1\"==\"-c\" if \"%FAKE_FAIL_STAGE%\"==\"import\" exit /b 31\n"
         "if \"%~1\"==\"-c\" exit /b 0\n"
@@ -386,8 +388,12 @@ def test_doctor_script_emits_machine_readable_json_contract():
         "npm",
         "npx",
         "ffmpeg",
-        "playwright_browsers",
-        "hf_cache",
+        "ffprobe",
+        "edge",
+        "playwright_python",
+        "playwright_mcp",
+        "hyperframes",
+        "opencode",
         "supertonic_cache",
         "corp_ca",
         "onedrive_path",
@@ -543,7 +549,7 @@ def test_build_bundle_excludes_secret_env_files_but_keeps_example(tmp_path: Path
         )
 
 
-@pytest.mark.parametrize("failure_stage", ["pip", "playwright", "npx"])
+@pytest.mark.parametrize("failure_stage", ["pip", "npm"])
 def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, failure_stage: str):
     root = _minimal_bundle_root(tmp_path)
     dist = tmp_path / f"{failure_stage}-bundle"
@@ -560,8 +566,8 @@ def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, fai
     env["FAKE_FAIL_STAGE"] = failure_stage
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
-    (fake_bin / "npx.cmd").write_text(
-        '@if "%FAKE_FAIL_STAGE%"=="npx" @exit /b 37\n@exit /b 0\n', encoding="utf-8"
+    (fake_bin / "npm.cmd").write_text(
+        '@if "%FAKE_FAIL_STAGE%"=="npm" @exit /b 37\n@exit /b 0\n', encoding="utf-8"
     )
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
@@ -570,7 +576,7 @@ def test_build_bundle_native_failure_removes_partial_outputs(tmp_path: Path, fai
     )
 
     assert completed.returncode != 0
-    expected_exit = {"pip": 35, "playwright": 36, "npx": 37}[failure_stage]
+    expected_exit = {"pip": 35, "npm": 37}[failure_stage]
     assert f"exit code {expected_exit}" in completed.stderr
     assert dist.is_dir()
     assert {item.name for item in dist.iterdir()} == {BUNDLE_OWNERSHIP_MARKER}
@@ -709,21 +715,19 @@ def test_start_propagates_uvicorn_native_failure(tmp_path: Path):
 
 
 def _smoke_env(tmp_path: Path, failure_stage: str) -> dict[str, str]:
-    browser_dir = tmp_path / "browsers" / "chromium"
-    browser_dir.mkdir(parents=True)
-    (browser_dir / "chrome.exe").write_bytes(b"")
     env = os.environ.copy()
     env["MANUAL_AGENT_PYTHON"] = str(_controlled_python_3_13_14(tmp_path))
     env["FAKE_FAIL_STAGE"] = failure_stage
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path / "browsers")
-    env["HF_HOME"] = str(tmp_path / "hf-cache")
-    Path(env["HF_HOME"]).mkdir()
     return env
 
 
 def test_smoke_stops_when_doctor_fails(tmp_path: Path):
     env = _smoke_env(tmp_path, "")
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(tmp_path / "missing-browsers")
+    fake_bin = tmp_path / "doctor-path"
+    fake_bin.mkdir()
+    for name in ("node", "npm", "npx", "ffmpeg", "ffprobe"):
+        (fake_bin / f"{name}.cmd").write_text("@echo fake-version\n", encoding="utf-8")
+    env["PATH"] = str(fake_bin)
 
     completed = _powershell_script("smoke.ps1", "-SkipTests", env=env)
 
@@ -736,7 +740,6 @@ def test_smoke_stops_when_doctor_fails(tmp_path: Path):
     ("failure_stage", "later_marker", "expected_error"),
     [
         ("import", "== Pipeline smoke ==", "Python import check failed with exit code 31"),
-        ("verify", "== Pytest ==", "Package verification failed with exit code 32"),
         ("pytest", None, "Pytest failed with exit code 33"),
     ],
 )

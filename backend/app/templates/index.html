@@ -33,12 +33,12 @@
         <aside class="step-rail" aria-label="Workflow steps">
           <div class="rail-title">Workflow</div>
           <ol class="step-list">
-            <li class="step is-active"><span>1</span><strong>요청 입력</strong></li>
-            <li class="step"><span>2</span><strong>계획 검수</strong></li>
-            <li class="step"><span>3</span><strong>MCP 검증</strong></li>
-            <li class="step"><span>4</span><strong>자막·내레이션</strong></li>
-            <li class="step"><span>5</span><strong>미리보기</strong></li>
-            <li class="step"><span>6</span><strong>렌더링</strong></li>
+            <li class="step is-active"><span>1</span><strong>요청 검수</strong></li>
+            <li class="step"><span>2</span><strong>Edge/CDP</strong></li>
+            <li class="step"><span>3</span><strong>OpenCode 탐색</strong></li>
+            <li class="step"><span>4</span><strong>Trace 검증</strong></li>
+            <li class="step"><span>5</span><strong>음성·재생</strong></li>
+            <li class="step"><span>6</span><strong>렌더·패키지</strong></li>
           </ol>
         </aside>
 
@@ -62,7 +62,7 @@
                 Local AI workflow
               </div>
               <h1 id="page-title">사내 시스템 매뉴얼 영상 생성</h1>
-              <p>한 번의 요청에서 리허설, 캡처, 마스킹, 내레이션, 영상 렌더까지 연결합니다.</p>
+              <p>OpenCode가 실제 화면을 탐색하고, 검증된 trace를 음성 타이밍에 맞춰 다시 실행합니다.</p>
             </div>
             <div class="identity-symbol" aria-hidden="true">
               <span class="identity-bar"></span>
@@ -83,61 +83,27 @@
               <form class="job-form" id="job-form">
                 <label class="field field-wide">
                   <span>요청문</span>
-                  <textarea name="request" rows="3">MES에서 LOT 조회 방법 영상 만들기</textarea>
+                  <textarea name="request" rows="3" placeholder="예: QSike 서비스를 소개하고 최근 기술 글을 찾는 방법을 설명해줘"></textarea>
                 </label>
                 <label class="field">
                   <span>대상 URL</span>
-                  <input name="url" value="http://127.0.0.1:8000/sample" />
+                  <input name="url" type="url" placeholder="https://service.example.com/" />
                 </label>
                 <label class="field">
                   <span>계정 역할</span>
-                  <input name="role" value="작업자" />
-                </label>
-                <label class="field">
-                  <span>로그인 방식</span>
-                  <select name="login_mode">
-                    <option value="" selected>설정값 사용</option>
-                    <option value="none">로그인 없음</option>
-                    <option value="manual">직접 로그인</option>
-                    <option value="credentials">.env ID/password</option>
-                    <option value="sso_profile">AD SSO 프로필</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>로그인 완료 신호</span>
-                  <input name="login_success_selector" placeholder=".dashboard 선택 사항, 또는 브라우저의 로그인 완료 버튼" />
+                  <input name="role" value="사용자" />
                 </label>
                 <label class="field field-wide">
                   <span>완료 조건</span>
-                  <input name="done" value="상세 화면이 보이면 완료" />
+                  <input name="done" placeholder="예: 글 제목과 본문이 보이면 완료" />
                 </label>
-                <div class="field field-wide">
-                  <span>실행 방식</span>
-                  <div class="mode-toggle" role="radiogroup" aria-label="실행 방식">
-                    <label class="mode-option">
-                      <input type="radio" name="execution_mode" value="demonstration" checked />
-                      <strong>직접 시연</strong>
-                      <small>브라우저에서 직접 조작 후 시연 완료</small>
-                    </label>
-                    <label class="mode-option">
-                      <input type="radio" name="execution_mode" value="ai" />
-                      <strong>AI 자동 실행</strong>
-                      <small>AI가 화면을 보고 안전 동작 선택</small>
-                    </label>
-                  </div>
-                </div>
                 <div class="field field-wide">
                   <span>입력값</span>
                   <div class="input-values" id="input-values" aria-label="Scenario input values">
                     <div class="input-value-list" data-input-value-list>
                       <div class="input-value-row">
-                        <input class="input-value-key" type="text" aria-label="입력값 이름" value="LOT" />
-                        <input class="input-value-value" type="text" aria-label="입력값 값" value="LOT-001" />
-                        <button class="icon-button danger" type="button" data-action="remove-input-value" aria-label="입력값 삭제">×</button>
-                      </div>
-                      <div class="input-value-row">
-                        <input class="input-value-key" type="text" aria-label="입력값 이름" value="라인" />
-                        <input class="input-value-value" type="text" aria-label="입력값 값" value="A3" />
+                        <input class="input-value-key" type="text" aria-label="입력값 이름" placeholder="입력값 이름" />
+                        <input class="input-value-value" type="text" aria-label="입력값 값" placeholder="화면에 입력할 값" />
                         <button class="icon-button danger" type="button" data-action="remove-input-value" aria-label="입력값 삭제">×</button>
                       </div>
                     </div>
@@ -149,8 +115,7 @@
                     <span class="play-icon" aria-hidden="true"></span>
                     파이프라인 실행
                   </button>
-                  <button class="button secondary" id="discover-scenario" type="button">browser-use 초안 탐색</button>
-                  <button class="button secondary" id="load-sample" type="button">샘플 불러오기</button>
+                  <button class="button secondary" id="load-sample" type="button">QSike 예시</button>
                 </div>
               </form>
             </article>
@@ -159,50 +124,50 @@
               <div class="panel-header compact">
                 <div>
                   <h2 id="pipeline-title">AI Center Pipeline</h2>
-                  <p>리허설과 본 실행을 분리해 운영계 위험을 낮춥니다.</p>
+                  <p>탐색은 OpenCode가, 검증·재생·렌더는 백엔드가 담당합니다.</p>
                 </div>
               </div>
               <ol class="pipeline-list">
                 <li class="pipeline-node is-active">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>LLM Planner</strong>
-                    <small>시나리오와 액션 JSON 생성</small>
+                    <strong>OpenCode Agent</strong>
+                    <small>요청 해석과 실제 화면 탐색</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>playwright-mcp 리허설</strong>
-                    <small>화면 탐색과 경로 검증</small>
+                    <strong>Playwright MCP / CDP</strong>
+                    <small>Edge SSO 세션에서 관찰·동작</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>Playwright Capture</strong>
-                    <small>확정 JSON으로 본 실행</small>
+                    <strong>Execution Trace</strong>
+                    <small>selector 근거와 완료 조건 검증</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>Masking</strong>
-                    <small>PII와 입력값 자동 블러</small>
+                    <strong>Supertonic M1</strong>
+                    <small>한국어 내레이션 생성</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>TTS Provider</strong>
-                    <small>설정된 음성 엔진으로 내레이션 생성</small>
+                    <strong>Replay &amp; Masking</strong>
+                    <small>음성 동기화 재실행과 민감정보 제거</small>
                   </div>
                 </li>
                 <li class="pipeline-node">
                   <span class="node-dot"></span>
                   <div>
-                    <strong>HyperFrames</strong>
-                    <small>HTML, MP4, Markdown, PDF 렌더</small>
+                    <strong>HyperFrames + FFmpeg</strong>
+                    <small>자막·음성·화면 최종 합성</small>
                   </div>
                 </li>
               </ol>
@@ -211,12 +176,12 @@
 
           <section class="timeline-band" aria-label="Pipeline timeline">
             <span class="timeline-origin" aria-hidden="true"></span>
-            <span>Plan</span>
-            <span>Rehearse</span>
-            <span>Capture</span>
-            <span>Mask</span>
-            <span>Voice</span>
-            <span>Render</span>
+            <span>Request</span>
+            <span>CDP</span>
+            <span>Discover</span>
+            <span>Validate</span>
+            <span>Replay</span>
+            <span>Package</span>
           </section>
 
           <section class="artifact-panel" id="artifacts" aria-live="polite">
@@ -255,7 +220,7 @@
           <section class="config-panel" id="settings" aria-live="polite">
             <div>
               <h2>.env 설정 상태</h2>
-              <p>appendix.md 기반 내부 LLM/VLM/RAG/Reranker 연결값을 확인합니다. 비밀값은 표시하지 않습니다.</p>
+              <p>OpenCode, Playwright MCP/CDP, Supertonic M1, 영상 렌더러의 필수 설정만 확인합니다.</p>
             </div>
             <div class="config-grid" id="config-grid">
               <span>설정 상태를 불러오는 중입니다.</span>
@@ -290,6 +255,6 @@
       </section>
     </div>
 
-    <script src="/static/app.js?v=20260520-planner-provider"></script>
+    <script src="/static/app.js?v=20260712-opencode-only"></script>
   </body>
 </html>
