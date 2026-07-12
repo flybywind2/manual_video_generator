@@ -248,11 +248,13 @@ document.addEventListener("keydown", (event) => {
 });
 
 function createPipelinePayload() {
+  const completionCondition = form.elements.done.value.trim() || "요청한 최종 화면이 보이면 완료";
+
   return {
     request_text: form.elements.request.value.trim(),
     target_url: form.elements.url.value.trim(),
     role: form.elements.role.value.trim(),
-    completion_condition: form.elements.done.value.trim(),
+    completion_condition: completionCondition,
     input_values: readInputValues(),
   };
 }

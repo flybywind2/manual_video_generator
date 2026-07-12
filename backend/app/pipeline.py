@@ -45,7 +45,7 @@ class PipelineInput(BaseModel):
     request_text: str
     target_url: str
     role: str
-    completion_condition: str
+    completion_condition: str = "요청한 최종 화면이 보이면 완료"
     input_values: dict[str, str] = Field(default_factory=dict)
     agent_brief: dict[str, Any] = Field(default_factory=dict)
     execution_mode: str = "ai"

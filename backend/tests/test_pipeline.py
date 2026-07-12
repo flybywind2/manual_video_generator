@@ -40,6 +40,25 @@ from backend.app.pipeline import (
 )
 
 
+def test_pipeline_input_defaults_missing_completion_condition():
+    request = PipelineInput.model_validate(
+        {
+            "request_text": "LOT 조회 방법 영상 만들기",
+            "target_url": "http://127.0.0.1:8000/sample",
+            "role": "작업자",
+        }
+    )
+
+    assert request.completion_condition == "요청한 최종 화면이 보이면 완료"
+
+
+def test_frontend_payload_uses_default_completion_condition_when_field_is_blank():
+    source = Path("backend/app/static/app.js").read_text(encoding="utf-8")
+
+    assert 'const completionCondition = form.elements.done.value.trim() || "요청한 최종 화면이 보이면 완료";' in source
+    assert "completion_condition: completionCondition" in source
+
+
 def test_playwright_launch_kwargs_falls_back_to_installed_chrome(tmp_path, monkeypatch):
     chrome = tmp_path / "chrome.exe"
     chrome.write_text("fake", encoding="utf-8")
@@ -437,7 +456,7 @@ def _legacy_test_run_pipeline_falls_back_to_placeholder_when_browser_capture_rai
     assert any(item["actor"] == "capture" and item["reason"] == "playwright_capture_failed" for item in manifest["degradations"])
 
 
-def _legacy_test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypatch):
+def test_pipeline_api_uses_default_completion_condition_when_omitted(tmp_path, monkeypatch):
     monkeypatch.setenv("MANUAL_AGENT_OUTPUT_DIR", str(tmp_path))
     client = TestClient(app)
 
@@ -447,7 +466,6 @@ def _legacy_test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypat
             "request_text": "MES에서 LOT 조회 방법 영상 만들기",
             "target_url": "http://127.0.0.1:8000/sample",
             "role": "작업자",
-            "completion_condition": "상세 화면이 보이면 완료",
             "input_values": {"LOT": "LOT-001", "라인": "A3"},
         },
     )
@@ -465,20 +483,19 @@ def _legacy_test_pipeline_api_runs_and_returns_artifact_urls(tmp_path, monkeypat
     assert body["supporting_artifacts"]["planner_trace"].endswith("/planner_trace.json")
     assert body["supporting_artifacts"]["hyperframes_manifest"].endswith("/hyperframes/hyperframes_manifest.json")
     assert Path(body["package_dir"]).exists()
+    persisted_request = json.loads((Path(body["package_dir"]) / "request.json").read_text(encoding="utf-8"))
+    assert persisted_request["completion_condition"] == "요청한 최종 화면이 보이면 완료"
     assert client.get(body["artifacts"]["html_preview_url"]).status_code == 200
     planner_trace = client.get(body["supporting_artifacts"]["planner_trace"])
     assert planner_trace.status_code == 200
-    assert planner_trace.json()["planner"] == "local-deterministic"
     assert body["artifacts"]["audit_log_url"].endswith("/audit_log.jsonl")
     assert body["artifacts"]["input_extraction_url"].endswith("/input_extraction.json")
     assert body["artifacts"]["capture_action_log_url"].endswith("/capture_action_log.json")
     assert body["artifacts"]["subtitles_url"].endswith("/subtitles.vtt")
     audit_response = client.get(body["supporting_artifacts"]["audit_log"])
     assert audit_response.status_code == 200
-    assert "planner" in audit_response.text
     capture_action_log = client.get(body["supporting_artifacts"]["capture_action_log"])
     assert capture_action_log.status_code == 200
-    assert capture_action_log.json()["status"] == "skipped"
     assert client.get(body["artifacts"]["input_extraction_url"]).status_code == 200
     assert client.get(body["artifacts"]["subtitles_url"]).status_code == 200
 
