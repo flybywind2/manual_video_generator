@@ -14,6 +14,7 @@ from backend.app.adapters.tts import synthesize_tts
 from backend.app.audit import AuditLog
 from backend.app.browser_session import BrowserSessionManager
 from backend.app.config import AppSettings, load_settings
+from backend.app.discovery_evidence import validate_discovery_evidence
 from backend.app.execution_trace import ExecutionTrace, ExecutionTracePolicy, validate_execution_trace
 from backend.app.redaction import RedactionPipeline, redact_sensitive
 from backend.app.terminal_logging import TerminalRunLogger
@@ -28,6 +29,7 @@ class OrchestratorServices:
     browser_session_factory: Callable[[AppSettings], Any]
     discovery_factory: Callable[[AppSettings], Any]
     trace_validator: Callable[[Any, Any, ExecutionTracePolicy], ExecutionTrace]
+    discovery_evidence_validator: Callable[..., Any]
     tts_synthesizer: Callable[..., Any]
     trace_replayer: Callable[..., Any]
     masker: Callable[..., Path]
@@ -56,6 +58,7 @@ def production_services() -> OrchestratorServices:
         browser_session_factory=BrowserSessionManager,
         discovery_factory=OpenCodeBrowserDiscovery,
         trace_validator=validate_execution_trace,
+        discovery_evidence_validator=validate_discovery_evidence,
         tts_synthesizer=synthesize_tts,
         trace_replayer=replay_execution_trace,
         masker=_mask_captures,
@@ -285,6 +288,26 @@ class OpenCodeVideoOrchestrator:
                     request,
                     ExecutionTracePolicy(),
                 )
+                current_stage = "discovery_evidence"
+                evidence_summary = self.services.discovery_evidence_validator(
+                    trace,
+                    event_log_path=discovery.event_log_path,
+                    job_dir=dirs.package,
+                )
+                evidence_payload = (
+                    evidence_summary.to_safe_dict()
+                    if callable(getattr(evidence_summary, "to_safe_dict", None))
+                    else dict(evidence_summary)
+                )
+                discovery_evidence_path = dirs.package / "discovery_evidence.json"
+                _write_json(discovery_evidence_path, evidence_payload)
+                audit.record(
+                    actor="discovery_evidence",
+                    status="ok",
+                    output_data=evidence_payload,
+                    artifacts=[discovery_evidence_path],
+                )
+                current_stage = "trace_validation"
                 artifact_plan = _trace_action_plan(trace)
                 action_plan_path = dirs.package / "action_plan.json"
                 approval_log_path = dirs.package / "approval_log.json"
@@ -302,8 +325,13 @@ class OpenCodeVideoOrchestrator:
                 audit.record(
                     actor="trace_validation",
                     status="ok",
-                    output_data={"steps": len(trace.steps)},
-                    artifacts=[action_plan_path, approval_log_path, discovery.trace_path],
+                    output_data={"steps": len(trace.steps), "evidence": evidence_payload},
+                    artifacts=[
+                        action_plan_path,
+                        approval_log_path,
+                        discovery.trace_path,
+                        discovery_evidence_path,
+                    ],
                 )
 
                 current_stage = "tts"
@@ -380,7 +408,12 @@ class OpenCodeVideoOrchestrator:
                 artifacts=[masking_log_path, *masked_paths],
             )
 
-            source_video = self.services.source_video_builder(dirs.package, masked_paths)
+            frame_durations = _frame_durations_for_media_plan(masked_paths, media_plan)
+            source_video = self.services.source_video_builder(
+                dirs.package,
+                masked_paths,
+                frame_durations_seconds=frame_durations,
+            )
             redaction = RedactionPipeline(sensitive_values=request.input_values)
             subtitles_path = self.services.subtitle_renderer(media_plan, dirs.package, redaction=redaction)
             preview_path = self.services.preview_renderer(
@@ -600,6 +633,36 @@ def _trace_action_plan(trace: ExecutionTrace) -> dict[str, Any]:
             for action in step.actions
         ],
     }
+
+
+def _frame_durations_for_media_plan(
+    captures: list[Path],
+    media_plan: Mapping[str, Any],
+) -> dict[str, float]:
+    durations: dict[str, float] = {}
+    steps = media_plan.get("steps")
+    if not isinstance(steps, list):
+        return durations
+    for step_index, step in enumerate(steps, start=1):
+        if not isinstance(step, Mapping):
+            continue
+        step_captures = [
+            capture
+            for capture in captures
+            if capture.name.startswith(f"{step_index:02d}_")
+        ]
+        if not step_captures:
+            continue
+        try:
+            step_duration = float(step.get("duration_seconds") or 0.0)
+        except (TypeError, ValueError):
+            step_duration = 0.0
+        if step_duration <= 0:
+            continue
+        frame_duration = step_duration / len(step_captures)
+        for capture in step_captures:
+            durations[capture.name] = frame_duration
+    return durations
 
 
 def _write_compatibility_prelude(package_dir: Path, request: Any) -> None:

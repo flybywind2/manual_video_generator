@@ -8,7 +8,11 @@ import pytest
 
 from backend.app.browser_runner import run_trace_replay
 from backend.app.execution_trace import ExecutionTrace
-from backend.app.trace_replay import TraceReplayError, replay_execution_trace
+from backend.app.trace_replay import (
+    TraceReplayError,
+    _assert_observed_location,
+    replay_execution_trace,
+)
 
 
 def _trace() -> ExecutionTrace:
@@ -94,6 +98,8 @@ class _FakeLocator:
         self.selector = selector
 
     def count(self) -> int:
+        if self.selector in self.page.invalid_selectors:
+            raise RuntimeError(f"invalid selector: {self.selector}")
         return 1 if self.selector in self.page.targets else 0
 
     def wait_for(self, **kwargs) -> None:
@@ -118,6 +124,8 @@ class _FakeLocator:
 
     def click(self) -> None:
         self.page.events.append(("click", self.selector))
+        if self.page.fail_locator_click:
+            raise RuntimeError("locator did not become stable")
         self.page.state_version += 1
         if self.page.off_origin_after_click:
             self.page.url = "https://example.com/escaped"
@@ -138,12 +146,23 @@ class _FakePage:
         self.force_bad_input_value = False
         self.off_origin_after_click = False
         self.semantic_targets: set[str] = set()
+        self.fail_locator_click = False
+        self.text_by_state: dict[int, str] = {}
+        self.invalid_selectors: set[str] = set()
+        self.mouse = SimpleNamespace(click=self._mouse_click)
+
+    def _mouse_click(self, x: float, y: float) -> None:
+        self.events.append(("mouse.click", x, y))
+        self.state_version += 1
 
     def set_default_timeout(self, timeout: int) -> None:
         self.events.append(("default_timeout", timeout))
 
     def set_default_navigation_timeout(self, timeout: int) -> None:
         self.events.append(("navigation_timeout", timeout))
+
+    def set_viewport_size(self, size: dict[str, int]) -> None:
+        self.events.append(("viewport", size))
 
     def add_style_tag(self, *, content: str) -> None:
         self.events.append(("style", "manual-replay-highlight" in content))
@@ -153,7 +172,10 @@ class _FakePage:
             return {
                 "url": self.url,
                 "title": "QSike Tech Notes",
-                "text": f"Playwright result state {self.state_version}",
+                "text": self.text_by_state.get(
+                    self.state_version,
+                    f"Playwright result state {self.state_version}",
+                ),
                 "stateVersion": self.state_version,
             }
         self.events.append(("evaluate", script, args))
@@ -216,13 +238,19 @@ class _FakePlaywrightContext:
         return False
 
 
-def _run(tmp_path: Path, page: _FakePage, trace: ExecutionTrace | None = None):
+def _run(
+    tmp_path: Path,
+    page: _FakePage,
+    trace: ExecutionTrace | None = None,
+    *,
+    input_values: dict[str, str] | None = None,
+):
     events: list[tuple] = []
     result = replay_execution_trace(
         trace=trace or _trace(),
         request=SimpleNamespace(
             target_url="https://qsike.com/",
-            input_values={"search_query": "Playwright"},
+            input_values=input_values or {"search_query": "Playwright"},
         ),
         job_dir=tmp_path,
         cdp_endpoint="http://127.0.0.1:43129",
@@ -245,10 +273,17 @@ def test_trace_replay_executes_semantic_actions_with_visuals_timing_and_captures
     assert ("fill", "#search-query", "Playwright") in page.events
     assert ("click", "aria-ref=e-search") in page.events
     assert any(event[0] == "style" and event[1] is True for event in page.events)
+    assert sum(1 for event in page.events if event[0] == "style") == 3
+    assert ("viewport", {"width": 1280, "height": 800}) in page.events
     assert any(event[0] == "locator.evaluate" for event in page.events)
     assert sum(page.waits) >= 6000
-    assert len(result.captures) == 10
+    assert len(result.captures) == 12
     assert all(path.exists() for path in result.captures)
+    focus_names = [path.name for path in result.captures if path.name.endswith("_focus.png")]
+    assert focus_names == [
+        "02_01_fill-search_focus.png",
+        "02_02_click-search_focus.png",
+    ]
     assert result.final_frame.exists()
     assert result.action_log_path.exists()
     assert result.selector_trace_path.exists()
@@ -266,6 +301,9 @@ def test_trace_replay_executes_semantic_actions_with_visuals_timing_and_captures
 
     action_log = json.loads(result.action_log_path.read_text(encoding="utf-8"))
     assert all(entry["status"] == "ok" for entry in action_log)
+    assert [entry.get("focus_capture") for entry in action_log if entry.get("focus_capture")] == [
+        str(tmp_path / "captures" / "replay" / name) for name in focus_names
+    ]
     selectors = json.loads(result.selector_trace_path.read_text(encoding="utf-8"))
     assert {entry["resolved_selector"] for entry in selectors} == {
         "#search-query",
@@ -284,6 +322,87 @@ def test_trace_replay_fails_when_exact_target_is_missing(tmp_path: Path) -> None
     log = json.loads((tmp_path / "trace_replay_log.json").read_text(encoding="utf-8"))
     assert log[-1]["action_id"] == "click-search"
     assert log[-1]["status"] == "failed"
+
+
+def test_trace_replay_uses_bounding_box_click_when_visible_locator_never_stabilizes(
+    tmp_path: Path,
+) -> None:
+    page = _FakePage()
+    page.fail_locator_click = True
+
+    result, _events = _run(tmp_path, page)
+
+    assert result.status == "ok"
+    assert ("mouse.click", 220.0, 142.0) in page.events
+    action_log = json.loads(result.action_log_path.read_text(encoding="utf-8"))
+    click_entry = next(entry for entry in action_log if entry["action_id"] == "click-search")
+    assert click_entry["method"] == "click-coordinate:aria-ref=e-search"
+
+
+def test_trace_replay_uses_value_key_as_fill_label_fallback(tmp_path: Path) -> None:
+    page = _FakePage()
+    page.targets.remove("#search-query")
+    page.semantic_targets.add("label=LOT 번호")
+    trace = _trace()
+    trace.input_values = ["LOT 번호"]
+    fill = trace.steps[1].actions[0]
+    fill.selector = "#e13"
+    fill.ref = "e13"
+    fill.label = "LOT 번호 조회"
+    fill.value_key = "LOT 번호"
+
+    result, _events = _run(
+        tmp_path,
+        page,
+        trace,
+        input_values={"LOT 번호": "LOT-001"},
+    )
+
+    assert result.status == "ok"
+    assert ("fill", "label=LOT 번호", "LOT-001") in page.events
+
+
+def test_trace_replay_verifies_action_evidence_before_click_that_dismisses_it(
+    tmp_path: Path,
+) -> None:
+    trace = _trace()
+    click = trace.steps[1].actions[1]
+    click.evidence = type(trace.steps[2].actions[1].evidence).model_validate(
+        {
+            "screenshot_path": "discovery/cookie-banner.png",
+            "visible_text": ["Cookie banner"],
+        }
+    )
+    page = _FakePage()
+    page.text_by_state[2] = "Cookie banner"
+    page.text_by_state[3] = "Playwright result after banner closed"
+
+    result, _events = _run(tmp_path, page, trace=trace)
+
+    assert result.status == "ok"
+
+
+def test_trace_replay_resets_target_before_trace_without_navigation_step(tmp_path: Path) -> None:
+    raw = _trace().model_dump(mode="json")
+    raw["steps"] = raw["steps"][1:]
+    trace = ExecutionTrace.model_validate(raw)
+    page = _FakePage()
+    page.url = "https://qsike.com/posts/discovery-result/"
+
+    result, _events = _run(tmp_path, page, trace=trace)
+
+    assert result.status == "ok"
+    goto_events = [event for event in page.events if event[0] == "goto"]
+    assert goto_events == [
+        (
+            "goto",
+            "https://qsike.com/",
+            {"wait_until": "domcontentloaded", "timeout": 5000},
+        )
+    ]
+    assert page.events.index(goto_events[0]) < next(
+        index for index, event in enumerate(page.events) if event[0] == "screenshot"
+    )
 
 
 def test_trace_replay_verifies_filled_value(tmp_path: Path) -> None:
@@ -411,6 +530,21 @@ def test_trace_replay_falls_back_from_stale_ref_to_unique_semantic_label(tmp_pat
     assert click_selector["resolved_selector"] == "role=button[name=검색]"
 
 
+def test_trace_replay_ignores_invalid_frame_ref_and_uses_semantic_label(tmp_path: Path) -> None:
+    trace = _trace()
+    click = trace.steps[1].actions[1]
+    click.ref = "f8e14"
+    click.selector = ""
+    page = _FakePage()
+    page.invalid_selectors.add("aria-ref=f8e14")
+    page.semantic_targets.add("role=button[name=검색]")
+
+    result, _events = _run(tmp_path, page, trace=trace)
+
+    assert result.status == "ok"
+    assert ("click", "role=button[name=검색]") in page.events
+
+
 def test_trace_replay_rejects_same_origin_but_wrong_observed_path_before_action(
     tmp_path: Path,
 ) -> None:
@@ -423,3 +557,14 @@ def test_trace_replay_rejects_same_origin_but_wrong_observed_path_before_action(
 
     assert exc_info.value.code == "replay_diverged"
     assert exc_info.value.action_id == "fill-search"
+
+
+def test_observed_location_treats_hash_fragment_as_same_document() -> None:
+    page = SimpleNamespace(url="https://qsike.com/categories/")
+
+    _assert_observed_location(
+        page,
+        "https://qsike.com/categories/#ai-infra",
+        step_id="step-category",
+        action_id="open-note",
+    )

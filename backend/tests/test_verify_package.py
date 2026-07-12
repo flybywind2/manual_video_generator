@@ -1,8 +1,101 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from backend.app.pipeline import PipelineInput, run_pipeline
+from backend.app.pipeline import PipelineInput
+
+
+def run_pipeline(_request, *, base_dir: Path, capture_browser: bool):
+    assert capture_browser is False
+    package_dir = base_dir / "jobs" / "fixture-job"
+    package_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_text(name: str, content: str = "{}") -> Path:
+        path = package_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def write_bytes(name: str, content: bytes) -> Path:
+        path = package_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
+    preview = write_text("preview.html", "<html>preview</html>")
+    manual = write_text("manual.md", "# Manual")
+    video = write_bytes("manual_video_agent_usage.mp4", b"video")
+    action_plan = write_text("action_plan.json")
+    approval_log = write_text("approval_log.json")
+    masking_log = write_text("masking_log.json")
+    subtitles = write_text("subtitles.vtt", "WEBVTT\n")
+    audit_log = write_text(
+        "audit_log.jsonl",
+        json.dumps(
+            {
+                "timestamp": "2026-07-12T00:00:00+09:00",
+                "run_id": "fixture-job",
+                "actor": "manifest",
+                "status": "ok",
+            }
+        )
+        + "\n",
+    )
+    audio = write_bytes("tts/01_step.wav", b"RIFFaudio")
+    tts_metadata = write_text(
+        "tts/tts_metadata.json",
+        json.dumps({"entries": [{"step_id": "step", "audio": str(audio)}]}),
+    )
+    video_render = write_text("video_render.json", json.dumps({"quality": {"status": "passed"}}))
+    supporting = {
+        "request": write_text("request.json"),
+        "planner_trace": write_text("planner_trace.json"),
+        "rehearsal_log": write_text("rehearsal_log.json"),
+        "playwright_mcp_calls": write_text("playwright_mcp_calls.json"),
+        "audit_log": audit_log,
+        "subtitles": subtitles,
+        "media_plan": write_text("media_plan.json"),
+        "tts_metadata": tts_metadata,
+        "video_render": video_render,
+        "opencode_prompt": write_text("opencode_prompt.md", "prompt"),
+        "opencode_metadata": write_text("opencode_agent.json"),
+        "hyperframes_composition": write_text("hyperframes/index.html", "<html></html>"),
+        "hyperframes_manifest": write_text("hyperframes/hyperframes_manifest.json"),
+    }
+    manifest_path = package_dir / "package_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "job_id": "fixture-job",
+                "status": "completed",
+                "artifacts": {
+                    "html_preview": str(preview),
+                    "markdown_manual": str(manual),
+                    "video": str(video),
+                    "action_plan": str(action_plan),
+                    "approval_log": str(approval_log),
+                    "masking_log": str(masking_log),
+                    "subtitles": str(subtitles),
+                    "audit_log": str(audit_log),
+                    "tts_audio": [str(audio)],
+                    "tts_metadata": str(tts_metadata),
+                },
+                "supporting_artifacts": {key: str(value) for key, value in supporting.items()},
+                "degradations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts = SimpleNamespace(
+        package_manifest=manifest_path,
+        planner_trace=supporting["planner_trace"],
+        video=video,
+        audit_log=audit_log,
+        tts_audio=[audio],
+        tts_metadata=tts_metadata,
+    )
+    return SimpleNamespace(package_dir=package_dir, artifacts=artifacts)
 
 
 def _load_verify_module():

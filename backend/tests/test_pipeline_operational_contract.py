@@ -151,8 +151,9 @@ def _fake_services(calls: list[str], *, fail_stage: str = "") -> OrchestratorSer
         path.write_text('{"status":"completed","entries":[]}', encoding="utf-8")
         return path
 
-    def source_video_builder(package_dir, _captures):
+    def source_video_builder(package_dir, _captures, *, frame_durations_seconds=None):
         calls.append("source_video")
+        assert frame_durations_seconds
         path = package_dir / "manual_video_agent_usage.webm"
         path.write_bytes(b"webm")
         return path
@@ -210,6 +211,10 @@ def _fake_services(calls: list[str], *, fail_stage: str = "") -> OrchestratorSer
         discovery_factory=lambda _settings: Discovery(),
         trace_validator=lambda trace, request, policy: calls.append("trace_validation")
         or validate_execution_trace(trace, request, policy),
+        discovery_evidence_validator=lambda trace, **_kwargs: {
+            "status": "verified",
+            "final_url": trace.completion_evidence.final_url,
+        },
         tts_synthesizer=tts_synthesizer,
         trace_replayer=trace_replayer,
         masker=masker,

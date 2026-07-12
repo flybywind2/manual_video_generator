@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "name": "qsike-service-manual",
+  "description": "Public read-only acceptance scenario for the OpenCode-only video pipeline.",
+  "request": {
+    "request_text": "QSike Tech Notes 서비스를 소개한다. 첫 화면에 쿠키와 광고 데이터 선택 안내가 보이면 필수만 허용을 선택해 닫고, AI 인프라·반도체·데이터센터·AX 주제 영역을 설명한다. 주제별 기술 노트에서 AI 인프라 영역을 열고 대표 기술 노트 하나를 선택해 제목, 발행일, 태그, 본문을 읽는 방법을 보여준다.",
+    "target_url": "https://qsike.com/",
+    "role": "방문자",
+    "completion_condition": "선택한 대표 기술 노트 상세 화면에서 글 제목, 발행일, 태그와 본문이 보이면 완료",
+    "input_values": {}
+  },
+  "policy": {
+    "allowed_origins": [
+      "https://qsike.com"
+    ],
+    "read_only": true,
+    "allowed_click_labels": [
+      "필수만 허용",
+      "AI 인프라",
+      "대표 기술 노트"
+    ],
+    "forbidden_actions": [
+      "로그인",
+      "저장",
+      "등록",
+      "제출",
+      "삭제",
+      "승인",
+      "구매",
+      "업로드"
+    ]
+  },
+  "expected_trace": {
+    "minimum_steps": 4,
+    "required_action_types": [
+      "navigate",
+      "capture",
+      "click"
+    ],
+    "visible_evidence": [
+      "QSike Tech Notes",
+      "AI 시대를 움직이는 기술 인프라를 쉽게 읽습니다.",
+      "주제별 기술 노트",
+      "발행"
+    ],
+    "completion_url_pattern": "https://qsike.com/posts/"
+  },
+  "expected_media": {
+    "minimum_duration_seconds": 20,
+    "require_video_stream": true,
+    "require_audio": true,
+    "require_subtitles": true,
+    "require_pointer_or_highlight": true,
+    "require_nonblank_frames": true,
+    "forbid_duplicate_narration": true
+  },
+  "required_artifacts": [
+    "opencode.json",
+    "opencode_events.jsonl",
+    "opencode_execution_trace.json",
+    "opencode_browser_metadata.json",
+    "action_plan.json",
+    "trace_replay_log.json",
+    "capture_action_log.json",
+    "selector_trace.json",
+    "final_frame.png",
+    "tts/tts_metadata.json",
+    "subtitles.vtt",
+    "video_render.json",
+    "audit_log.jsonl",
+    "workflow_state.json",
+    "support_log.md",
+    "package_manifest.json"
+  ]
+}

@@ -20,6 +20,15 @@ def test_python_runtime_contract_is_exact_3_13_14():
     assert pyproject["project"]["requires-python"] == "==3.13.14"
 
 
+def test_editable_install_only_discovers_backend_packages():
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["build-system"]["build-backend"] == "setuptools.build_meta"
+    package_find = pyproject["tool"]["setuptools"]["packages"]["find"]
+    assert package_find["include"] == ["backend", "backend.*"]
+    assert package_find["exclude"] == ["backend.tests", "backend.tests.*"]
+
+
 def _markdown_section(content: str, heading: str, next_heading_prefix: str) -> str:
     start = content.index(heading)
     end = content.find(f"\n{next_heading_prefix}", start + len(heading))
@@ -97,6 +106,40 @@ def test_readme_describes_current_bundle_builder_scope_without_overclaiming():
     assert "별도 staging" in bundle_setup
 
 
+def test_readme_documents_current_opencode_trace_repair_and_generic_scope():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "manual-video-browser" in readme
+    assert "manual-video-finalizer" in readme
+    assert "모델이 선언한 입력 키는 사용자 요청의 허용 키와 대조" in readme
+    assert "label당 ref가 유일할 때만" in readme
+    for action_type in ("`navigate`", "`fill`", "`click`", "`press`", "`wait`", "`capture`"):
+        assert action_type in readme
+    for unsupported in ("iframe", "drag/drop", "파일 업로드·다운로드", "교차 origin"):
+        assert unsupported in readme
+
+
+def test_readme_documents_current_edit_continue_and_rerender_api():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    for endpoint in (
+        "/api/pipeline/draft",
+        "/api/pipeline/continue/{job_id}",
+        "/api/pipeline/rerender/{job_id}",
+        "/api/artifacts/text/{artifact_path}",
+    ):
+        assert endpoint in readme
+    assert "artifact_edit_log.jsonl" in readme
+
+
+def test_readme_does_not_overclaim_automatic_screenshot_masking():
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "스크린샷 픽셀 마스킹을 자동 수행하지 않습니다" in readme
+    assert "masking_log.json" in readme
+    assert "review_required" in readme
+
+
 def _powershell() -> str:
     executable = shutil.which("powershell") or shutil.which("pwsh")
     if not executable:
@@ -157,6 +200,12 @@ def _powershell_script(name: str, *arguments: str, env: dict[str, str] | None = 
 def _fake_python_3_13_14(tmp_path: Path) -> Path:
     executable = tmp_path / "fake python 3.13.14.cmd"
     executable.write_text("@echo 3.13.14\n", encoding="utf-8")
+    return executable
+
+
+def _fake_python_3_14_0(tmp_path: Path) -> Path:
+    executable = tmp_path / "fake python 3.14.0.cmd"
+    executable.write_text("@echo 3.14.0\n", encoding="utf-8")
     return executable
 
 
@@ -425,9 +474,10 @@ def test_runtime_scripts_use_resolved_python_without_bare_operational_invocation
         assert "Invoke-CheckedNativeCommand" in script, name
 
 
-def test_doctor_python_check_reports_structured_exact_version_mismatch():
+def test_doctor_python_check_reports_structured_exact_version_mismatch(tmp_path: Path):
+    mismatched_python = _fake_python_3_14_0(tmp_path)
     env = os.environ.copy()
-    env["MANUAL_AGENT_PYTHON"] = sys.executable
+    env["MANUAL_AGENT_PYTHON"] = str(mismatched_python)
 
     completed = _powershell_script("doctor.ps1", "-Json", env=env)
 
@@ -436,8 +486,8 @@ def test_doctor_python_check_reports_structured_exact_version_mismatch():
     python_check = next(item for item in checks if item["name"] == "python")
     assert python_check["status"] == "FAIL"
     assert python_check["expected_version"] == "3.13.14"
-    assert python_check["actual_version"] != "3.13.14"
-    assert Path(python_check["executable"]).resolve() == Path(sys.executable).resolve()
+    assert python_check["actual_version"] == "3.14.0"
+    assert Path(python_check["executable"]).resolve() == mismatched_python.resolve()
 
 
 def test_build_bundle_rejects_mismatch_without_touching_existing_unmarked_dist(tmp_path: Path):
@@ -448,7 +498,7 @@ def test_build_bundle_rejects_mismatch_without_touching_existing_unmarked_dist(t
     keep.write_text("keep\n", encoding="utf-8")
     dist.with_suffix(".zip").write_bytes(b"stale-success")
     env = os.environ.copy()
-    env["MANUAL_AGENT_PYTHON"] = sys.executable
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_14_0(tmp_path))
 
     completed = _powershell_script(
         "build_bundle.ps1",
@@ -695,7 +745,7 @@ def test_bootstrap_rejects_mismatch_before_creating_output_directory(tmp_path: P
     output_dir = tmp_path / "must-not-exist"
     env = os.environ.copy()
     env["MANUAL_AGENT_OUTPUT_DIR"] = str(output_dir)
-    env["MANUAL_AGENT_PYTHON"] = sys.executable
+    env["MANUAL_AGENT_PYTHON"] = str(_fake_python_3_14_0(tmp_path))
 
     completed = _powershell_script("bootstrap.ps1", env=env)
 

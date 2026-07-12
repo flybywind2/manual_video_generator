@@ -13,7 +13,7 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -4841,23 +4841,19 @@ def _create_capture_failure_fallback(request: PipelineInput, dirs: PipelineDirs,
 
 
 def _mask_captures(captures: list[Path], masked_dir: Path, input_values: dict[str, str]) -> Path:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
+    masked_dir.mkdir(parents=True, exist_ok=True)
     log: list[dict[str, Any]] = []
     for capture in captures:
-        image = Image.open(capture).convert("RGBA")
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        # MVP mask: reserve the top-right area for possible user/session identifiers.
-        box = (image.width - 360, 24, image.width - 32, 76)
-        draw.rounded_rectangle(box, radius=10, fill=(36, 91, 255, 72))
-        masked = Image.alpha_composite(image, overlay).convert("RGB")
-        masked.save(masked_dir / capture.name)
+        with Image.open(capture) as image:
+            image.convert("RGB").save(masked_dir / capture.name)
         log.append(
             {
                 "capture": capture.name,
                 "masked_output": str(masked_dir / capture.name),
-                "rules": ["top-right-session-area", "user-input-values"],
+                "rules": [],
+                "review_required": bool(input_values),
                 "input_values": sorted(input_values.keys()),
             }
         )
@@ -5617,6 +5613,7 @@ def _render_pdf_placeholder(request: PipelineInput, dirs: PipelineDirs) -> Path:
 
 
 def _render_placeholder_video(package_dir: Path) -> Path:
+    package_dir = Path(package_dir).resolve()
     path = package_dir / "manual_video_agent_usage.webm"
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
@@ -5647,19 +5644,34 @@ def _render_placeholder_video(package_dir: Path) -> Path:
     return path
 
 
-def _render_capture_slideshow_video(package_dir: Path, captures: list[Path]) -> Path:
+def _render_capture_slideshow_video(
+    package_dir: Path,
+    captures: list[Path],
+    *,
+    frame_durations_seconds: Mapping[str, float] | None = None,
+) -> Path:
+    package_dir = Path(package_dir).resolve()
     path = package_dir / "manual_video_agent_usage.webm"
     ffmpeg = shutil.which("ffmpeg")
-    valid_captures = [capture for capture in captures if capture.exists() and capture.stat().st_size > 0]
+    resolved_captures = [Path(capture).resolve() for capture in captures]
+    valid_captures = [capture for capture in resolved_captures if capture.exists() and capture.stat().st_size > 0]
     if not ffmpeg or not valid_captures:
         return _render_placeholder_video(package_dir)
     concat_path = package_dir / "capture_slideshow.ffconcat"
     lines = ["ffconcat version 1.0"]
-    duration = max(4, min(12, 36 // max(1, len(valid_captures))))
+    default_duration = float(max(4, min(12, 36 // max(1, len(valid_captures)))))
+    timeline_duration = 0.0
     for capture in valid_captures:
+        try:
+            configured_duration = float((frame_durations_seconds or {}).get(capture.name, default_duration))
+        except (TypeError, ValueError):
+            configured_duration = default_duration
+        duration = max(1 / 24, configured_duration)
+        timeline_duration += duration
         lines.append(f"file '{capture.resolve().as_posix()}'")
-        lines.append(f"duration {duration}")
+        lines.append(f"duration {duration:g}")
     lines.append(f"file '{valid_captures[-1].resolve().as_posix()}'")
+    lines.append(f"duration {1 / 24:g}")
     concat_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     args = [
         ffmpeg,
@@ -5684,7 +5696,8 @@ def _render_capture_slideshow_video(package_dir: Path, captures: list[Path]) -> 
         "1200k",
         "-c:a",
         "libopus",
-        "-shortest",
+        "-t",
+        f"{timeline_duration:g}",
         str(path),
     ]
     completed = run_text_command(subprocess.run, args, cwd=str(package_dir), capture_output=True, timeout=180)

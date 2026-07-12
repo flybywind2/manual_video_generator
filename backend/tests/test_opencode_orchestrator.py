@@ -20,12 +20,21 @@ from backend.app.config import load_settings
 from backend.app.adapters.opencode_browser import (
     OpenCodeBrowserDiscovery,
     OpenCodeBrowserDiscoveryError,
+    _compact_observation_evidence,
+    _normalize_observer_trace,
+    _observed_unique_refs_by_label,
 )
 from backend.app.browser_session import BrowserSessionError, BrowserSessionManager
+from backend.app.discovery_evidence import DiscoveryEvidenceError
 from backend.app.env_bootstrap import discover_browser_executable
-from backend.app.opencode_orchestrator import OpenCodeVideoOrchestrator, OrchestratorServices
+from backend.app.opencode_orchestrator import (
+    OpenCodeVideoOrchestrator,
+    OrchestratorServices,
+    _frame_durations_for_media_plan,
+)
 from backend.app.adapters.tts import SupertonicTtsError
 from backend.app.pipeline import PipelineInput
+from tools.verify_package import verify_manifest
 
 
 def _request(**overrides: object) -> SimpleNamespace:
@@ -101,6 +110,25 @@ def test_valid_execution_trace_is_parsed_and_returned() -> None:
     assert trace.schema_version == "1.0"
     assert [step.id for step in trace.steps] == ["step-intro", "step-open-note"]
     assert trace.completion_evidence.assertions == ["글 제목과 본문이 표시된다."]
+
+
+def test_execution_trace_may_start_with_observed_ui_action_because_replay_owns_reset() -> None:
+    raw = _valid_trace()
+    raw["steps"][0]["actions"].pop(0)
+
+    trace = _validate(raw)
+
+    assert trace.steps[0].actions[0].type == "capture"
+
+
+def test_execution_trace_rejects_input_keys_not_supplied_by_request() -> None:
+    raw = _valid_trace()
+    raw["input_values"] = ["invented_key"]
+
+    with pytest.raises(TraceValidationError) as exc_info:
+        _validate(raw)
+
+    assert exc_info.value.code == "unknown_value_key"
 
 
 @pytest.mark.parametrize(
@@ -317,32 +345,461 @@ def _opencode_stdout(trace: dict[str, object] | None = None) -> str:
     return "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
 
 
+def test_compact_observation_evidence_keeps_home_and_latest_page_events() -> None:
+    events = [
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "playwright_browser_find",
+                "state": {
+                    "status": "completed",
+                    "input": {"text": f"item-{index:02d}"},
+                    "output": f"### Result\nFound item-{index:02d}",
+                },
+            },
+        }
+        for index in range(30)
+    ]
+
+    compact = _compact_observation_evidence(events)
+
+    assert [record["input"]["text"] for record in compact] == [
+        *(f"item-{index:02d}" for index in range(8)),
+        *(f"item-{index:02d}" for index in range(14, 30)),
+    ]
+
+
+def test_observed_ref_recovery_uses_latest_ref_across_snapshot_generations() -> None:
+    def snapshot(ref: str) -> dict[str, object]:
+        return {
+            "type": "tool_use",
+            "part": {
+                "tool": "playwright_browser_snapshot",
+                "state": {
+                    "status": "completed",
+                    "output": f'- button "확인" [ref={ref}] [cursor=pointer]',
+                },
+            },
+        }
+
+    assert _observed_unique_refs_by_label([snapshot("e33"), snapshot("f2e33")]) == {
+        "확인": "f2e33"
+    }
+
+
+def test_observed_ref_recovery_does_not_guess_duplicate_labels_in_one_snapshot() -> None:
+    events = [
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "playwright_browser_snapshot",
+                "state": {
+                    "status": "completed",
+                    "output": (
+                        '- button "확인" [ref=e33] [cursor=pointer]\n'
+                        '- button "확인" [ref=e44] [cursor=pointer]'
+                    ),
+                },
+            },
+        }
+    ]
+
+    assert "확인" not in _observed_unique_refs_by_label(events)
+
+
+def test_normalize_observer_trace_turns_observed_link_navigation_into_click() -> None:
+    candidate = {
+        "schema_version": "1.0",
+        "status": "completed",
+        "request_summary": "AI 인프라 영역을 연다.",
+        "input_values": [],
+        "steps": [
+            {
+                "id": "step-home",
+                "title": "홈",
+                "narration": "홈 화면을 연다.",
+                "actions": [
+                    {
+                        "id": "action-home",
+                        "type": "navigate",
+                        "target_url": "https://qsike.com/",
+                        "observed_url": None,
+                    },
+                    {
+                        "id": "action-overview",
+                        "type": "navigate",
+                        "label": "서비스 소개",
+                        "observed_url": "https://qsike.com/",
+                    }
+                ],
+            },
+            {
+                "id": "step-category",
+                "title": "AI 인프라",
+                "narration": "AI 인프라 링크를 선택한다.",
+                "actions": [
+                    {
+                        "id": "action-category",
+                        "type": "navigate",
+                        "target_url": "https://qsike.com/categories/#ai-infra",
+                        "observed_url": "https://qsike.com/",
+                        "evidence": {
+                            "screenshot_path": "category.png",
+                            "visible_text": ["AI 인프라"],
+                        },
+                    }
+                ],
+            },
+        ],
+        "completion_evidence": {
+            "final_url": "https://qsike.com/categories/#ai-infra",
+            "assertions": ["AI 인프라 목록이 보인다."],
+            "screenshot_path": "invented.png",
+        },
+    }
+
+    normalized, removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        completion_condition="AI 인프라 목록이 보이면 완료",
+        checkpoint={
+            "url": "https://qsike.com/categories/#ai-infra",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    home = normalized["steps"][0]["actions"][0]
+    overview = normalized["steps"][0]["actions"][1]
+    category = normalized["steps"][1]["actions"][0]
+    assert home["observed_url"] == "https://qsike.com/"
+    assert overview == {
+        "id": "action-overview",
+        "type": "capture",
+        "label": "서비스 소개",
+        "observed_url": "https://qsike.com/",
+    }
+    assert category == {
+        "id": "action-category",
+        "type": "click",
+        "selector": "a[href='/categories/#ai-infra']",
+        "label": "AI 인프라",
+        "observed_url": "https://qsike.com/",
+    }
+    assert normalized["steps"][-1] == {
+        "id": "step-completion",
+        "title": "완료 화면 확인",
+        "narration": "마지막으로 AI 인프라 목록이 보이는지 확인합니다.",
+        "actions": [
+            {
+                "id": "action-completion-capture",
+                "type": "capture",
+                "observed_url": "https://qsike.com/categories/#ai-infra",
+                "expected_after": "AI 인프라 목록이 보이면 완료",
+            }
+        ],
+    }
+    assert normalized["completion_evidence"]["screenshot_path"] == "discovery_final.png"
+    assert removed == 1
+
+
+def test_normalize_observer_trace_adds_intro_and_completion_around_click_only_trace() -> None:
+    candidate = {
+        "schema_version": "1.0",
+        "status": "completed",
+        "request_summary": "기술 노트 사용 방법을 설명한다.",
+        "input_values": [],
+        "steps": [
+            {
+                "id": "step-category",
+                "title": "주제 선택",
+                "narration": "AI 인프라 주제를 선택합니다.",
+                "actions": [
+                    {
+                        "id": "action-category",
+                        "type": "click",
+                        "selector": "a[href='/categories/#ai-infra']",
+                        "label": "AI 인프라",
+                        "observed_url": "https://qsike.com/",
+                    }
+                ],
+            },
+            {
+                "id": "step-note",
+                "title": "글 선택",
+                "narration": "대표 글을 선택합니다.",
+                "actions": [
+                    {
+                        "id": "action-note",
+                        "type": "click",
+                        "selector": "a:has-text('대표 글')",
+                        "label": "대표 글",
+                        "observed_url": "https://qsike.com/categories/#ai-infra",
+                    }
+                ],
+            },
+        ],
+        "completion_evidence": {
+            "final_url": "https://qsike.com/posts/example/",
+            "assertions": ["글 제목과 본문이 보인다."],
+            "screenshot_path": "invented.png",
+        },
+    }
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        completion_condition="글 제목, 발행일, 태그와 본문이 보이면 완료",
+        checkpoint={
+            "url": "https://qsike.com/posts/example/",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    assert normalized["steps"][0] == {
+        "id": "step-open-target",
+        "title": "서비스 첫 화면 열기",
+        "narration": "먼저 대상 서비스의 첫 화면을 열어 주요 구성과 시작 위치를 확인합니다.",
+        "actions": [
+            {
+                "id": "action-open-target",
+                "type": "navigate",
+                "target_url": "https://qsike.com/",
+                "observed_url": "https://qsike.com/",
+                "expected_after": "대상 서비스 첫 화면이 표시됩니다.",
+            }
+        ],
+    }
+    assert normalized["steps"][-1]["actions"] == [
+        {
+            "id": "action-completion-capture",
+            "type": "capture",
+            "observed_url": "https://qsike.com/posts/example/",
+            "expected_after": "글 제목, 발행일, 태그와 본문이 보이면 완료",
+        }
+    ]
+    assert normalized["steps"][-1]["narration"] == (
+        "마지막으로 글 제목, 발행일, 태그와 본문이 보이는지 확인합니다."
+    )
+
+
+def test_normalize_observer_trace_does_not_duplicate_existing_boundary_steps() -> None:
+    candidate = _valid_trace()
+    candidate["steps"][-1]["actions"] = [
+        {
+            "id": "action-final-capture",
+            "type": "capture",
+            "observed_url": "https://qsike.com/notes/playwright/",
+        }
+    ]
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        completion_condition="최근 글 상세 화면 확인",
+        checkpoint={
+            "url": "https://qsike.com/notes/playwright",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    assert len(normalized["steps"]) == len(candidate["steps"])
+    assert normalized["steps"][0]["actions"][0]["type"] == "navigate"
+    assert normalized["steps"][-1]["actions"][-1]["id"] == "action-final-capture"
+
+
+def test_normalize_observer_trace_recovers_missing_fill_value_key_from_request_contract() -> None:
+    candidate = _valid_trace()
+    candidate["input_values"] = ["LOT 번호"]
+    candidate["steps"][1]["actions"] = [
+        {
+            "id": "action-fill-lot",
+            "type": "fill",
+            "selector": "#e13",
+            "ref": "e13",
+            "label": "LOT 번호 조회",
+            "observed_url": "https://qsike.com/",
+        }
+    ]
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        allowed_input_keys=["LOT 번호"],
+        checkpoint={
+            "url": "https://qsike.com/notes/playwright",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    fill = normalized["steps"][1]["actions"][0]
+    assert fill["value_key"] == "LOT 번호"
+
+
+def test_normalize_observer_trace_rebuilds_input_keys_from_request_contract() -> None:
+    candidate = _valid_trace()
+    candidate["input_values"] = ["lot_number_search"]
+    candidate["steps"][1]["actions"] = [
+        {
+            "id": "action-fill-lot",
+            "type": "fill",
+            "selector": "input[data-action='lot-search']",
+            "ref": "e13",
+            "label": "LOT 번호 조회",
+            "observed_url": "https://qsike.com/",
+        }
+    ]
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        allowed_input_keys=["LOT 번호"],
+        checkpoint={
+            "url": "https://qsike.com/notes/playwright",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    assert normalized["input_values"] == ["LOT 번호"]
+    assert normalized["steps"][1]["actions"][0]["value_key"] == "LOT 번호"
+
+
+def test_normalize_observer_trace_repairs_untrusted_fill_key_when_unambiguous() -> None:
+    candidate = _valid_trace()
+    candidate["input_values"] = ["lot_number_search"]
+    candidate["steps"][1]["actions"] = [
+        {
+            "id": "action-fill-lot",
+            "type": "fill",
+            "selector": "input[data-action='lot-search']",
+            "label": "LOT 번호 조회",
+            "value_key": "lot_number_search",
+            "observed_url": "https://qsike.com/",
+        }
+    ]
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        allowed_input_keys=["LOT 번호"],
+        checkpoint={
+            "url": "https://qsike.com/notes/playwright",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    assert normalized["input_values"] == ["LOT 번호"]
+    assert normalized["steps"][1]["actions"][0]["value_key"] == "LOT 번호"
+
+
+def test_normalize_observer_trace_does_not_guess_ambiguous_fill_value_key() -> None:
+    candidate = _valid_trace()
+    candidate["steps"][1]["actions"] = [
+        {
+            "id": "action-fill",
+            "type": "fill",
+            "selector": "input",
+            "label": "검색 조건",
+            "observed_url": "https://qsike.com/",
+        }
+    ]
+
+    normalized, _removed = _normalize_observer_trace(
+        candidate,
+        original_target_url="https://qsike.com/",
+        allowed_input_keys=["LOT 번호", "라인"],
+        checkpoint={
+            "url": "https://qsike.com/notes/playwright",
+            "screenshot_path": "discovery_final.png",
+        },
+    )
+
+    assert "value_key" not in normalized["steps"][1]["actions"][0]
+
+
 def test_opencode_browser_discovery_writes_isolated_mcp_config_and_extracts_trace(
     tmp_path: Path,
 ) -> None:
     settings = _opencode_settings()
     request = _browser_request()
-    expected_trace = _valid_trace()
+    observer_trace = _valid_trace()
+    expected_trace = deepcopy(observer_trace)
+    expected_trace["completion_evidence"]["screenshot_path"] = "discovery_final.png"
+    expected_trace["steps"][0]["actions"][1].pop("evidence")
+    expected_trace["steps"].append(
+        {
+            "id": "step-completion",
+            "title": "완료 화면 확인",
+            "narration": "마지막으로 요청한 상세 화면에서 결과가 올바르게 표시되는지 확인합니다.",
+            "actions": [
+                {
+                    "id": "action-completion-capture",
+                    "type": "capture",
+                    "observed_url": "https://qsike.com/notes/playwright",
+                    "expected_after": "최근 글 상세 화면 확인",
+                }
+            ],
+        }
+    )
     endpoint = "http://127.0.0.1:43129"
+    calls: list[list[str]] = []
 
     def fake_runner(args, **kwargs):
+        calls.append(list(args))
         assert kwargs["cwd"] == str(tmp_path)
         assert kwargs["timeout"] == 45.0
         assert args[1:4] == ["run", "--format", "json"]
         assert "--agent" in args
+        assert args[args.index("--agent") + 1] == "manual-video-browser"
         assert "--model" not in args
         assert "ignored/model" not in args
 
         config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
         assert list(config["mcp"]) == ["playwright"]
+        assert config["default_agent"] == "manual-video-browser"
+        finalizer = config["agent"]["manual-video-finalizer"]
+        assert finalizer["mode"] == "primary"
+        assert finalizer["steps"] == 2
+        assert finalizer["tools"] == {"*": False}
+        assert finalizer["permission"] == {"*": "deny"}
+        assert "model" not in finalizer
+        agent = config["agent"]["manual-video-browser"]
+        assert agent["mode"] == "primary"
+        assert agent["steps"] == 32
+        assert agent["temperature"] == 0
+        assert "model" not in agent
+        assert agent["tools"]["read"] is True
+        assert agent["tools"]["grep"] is True
+        assert agent["permission"]["read"] == {
+            "*": "deny",
+            ".playwright-mcp/*": "allow",
+        }
+        assert agent["permission"]["grep"] == "allow"
+        assert "Never retry the same failed browser action" in agent["prompt"]
+        assert "Do not click cookie-consent or preference controls during discovery" in agent["prompt"]
+        assert "Only Playwright MCP evidence can justify completed" in agent["prompt"]
+        assert "Search the saved snapshot with grep" in agent["prompt"]
+        assert '`{"target":"e42","element":"observed link label"}`' in agent["prompt"]
+        assert "target must be only the bare ref" in agent["prompt"]
+        assert '`{"type":"png","scale":"css","filename":"discovery_final.png","fullPage":false}`' in agent["prompt"]
+        assert "A .yml snapshot is not screenshot evidence" in agent["prompt"]
+        assert "Search exact labels explicitly named in the request" in agent["prompt"]
         mcp_command = config["mcp"]["playwright"]["command"]
         assert Path(mcp_command[0]).name.lower() in {"npx", "npx.cmd"}
         assert mcp_command[1] == "@playwright/mcp@1.2.3"
         assert mcp_command[-2:] == ["--cdp-endpoint", endpoint]
         assert "--headless" not in mcp_command
-        assert config["tools"] == {"*": False, "playwright_*": True}
+        assert "--caps=vision" in mcp_command
+        assert "--timeout-action=15000" in mcp_command
+        assert "--viewport-size=1280x800" in mcp_command
+        assert "--output-mode=file" in mcp_command
+        assert config["tools"] == {
+            "*": False,
+            "playwright_*": True,
+            "playwright_browser_run_code_unsafe": False,
+        }
         assert config["permission"]["*"] == "deny"
         assert config["permission"]["playwright_*"] == "allow"
+        assert config["permission"]["playwright_browser_run_code_unsafe"] == "deny"
 
         prompt = (tmp_path / "opencode_browser_prompt.md").read_text(encoding="utf-8")
         assert "QSike 서비스를 소개" in prompt
@@ -350,28 +807,62 @@ def test_opencode_browser_discovery_writes_isolated_mcp_config_and_extracts_trac
         assert "search_query" in prompt
         assert "Playwright" in prompt
         assert "plain-password" not in prompt
+        assert '"steps": [' in prompt
+        assert '"actions": [' in prompt
+        assert '"observed_url":' in prompt
+        assert '"completion_evidence": {' in prompt
+        assert '"final_url":' in prompt
+        assert '"assertions": [' in prompt
+        assert '"screenshot_path":' in prompt
+        assert "input_values must be a JSON array" in prompt
+        assert "Do not use action_type, description, current_url, page_title, or observed_elements" in prompt
+        assert "Do not replace a requested visible click with direct navigation" in prompt
+        assert "Replay initialization is owned by the backend" in prompt
+        assert "Omit fields that do not apply; never emit null" in prompt
+        assert "Every observed_url and final_url must be an absolute URL" in prompt
+        assert "A tool result containing ### Error or TimeoutError is a failed action" in prompt
+        assert "Do not activate cookie-consent or preference controls during discovery" in prompt
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
-            stdout=_opencode_stdout(expected_trace),
+            stdout=_opencode_stdout(observer_trace),
             stderr="diagnostic stderr",
         )
 
-    result = OpenCodeBrowserDiscovery(settings, command_runner=fake_runner).run(
+    def checkpoint_collector(*, cdp_endpoint: str, job_dir: Path):
+        assert cdp_endpoint == endpoint
+        (job_dir / "discovery_final.png").write_bytes(b"png")
+        return {
+            "url": "https://qsike.com/notes/playwright",
+            "title": "Playwright note",
+            "screenshot_path": "discovery_final.png",
+            "visible_text": ["글 제목과 본문이 표시된다."],
+        }
+
+    result = OpenCodeBrowserDiscovery(
+        settings,
+        command_runner=fake_runner,
+        checkpoint_collector=checkpoint_collector,
+    ).run(
         request=request,
         job_dir=tmp_path,
         cdp_endpoint=endpoint,
     )
 
     assert result.status == "completed"
+    assert len(calls) == 1
     assert result.trace == expected_trace
     assert result.config_path == tmp_path / "opencode.json"
-    assert result.event_log_path.read_text(encoding="utf-8") == _opencode_stdout(expected_trace)
+    combined = result.event_log_path.read_text(encoding="utf-8")
+    assert "backend_playwright_capture" in combined
     assert json.loads(result.trace_path.read_text(encoding="utf-8")) == expected_trace
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["returncode"] == 0
     assert metadata["stderr"] == "diagnostic stderr"
     assert metadata["model_source"] == "opencode-default"
+    assert metadata["observer_trace_present"] is True
+    assert metadata["trace_source"] == "observer-normalized"
+    assert metadata["removed_action_evidence_count"] == 1
     assert result.support_summary_path.read_text(encoding="utf-8").startswith("OPENCODE_BROWSER_OK")
 
 
@@ -454,24 +945,166 @@ def test_opencode_browser_discovery_rejects_success_without_final_trace(tmp_path
     assert exc_info.value.code == "opencode_trace_missing"
 
 
+def test_opencode_browser_discovery_finalizes_fresh_session_with_compact_observation_evidence(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    finalizer_trace = _valid_trace()
+    finalizer_trace["input_values"] = [{"search_query": "Playwright"}]
+    finalizer_trace["steps"][1]["actions"].insert(
+        0,
+        {
+            "id": "action-fill-search",
+            "type": "fill",
+            "selector": "input[name='search']",
+            "label": "검색어",
+            "observed_url": "https://qsike.com/",
+        },
+    )
+    finalizer_trace["steps"][1]["actions"][1].pop("ref")
+    finalizer_trace["completion_evidence"]["screenshot_path"] = "discovery_final.png"
+    expected_trace = deepcopy(finalizer_trace)
+    expected_trace["input_values"] = ["search_query"]
+    expected_trace["steps"][1]["actions"][0]["value_key"] = "search_query"
+    expected_trace["steps"][1]["actions"][1]["ref"] = "e42"
+    expected_trace["steps"][0]["actions"][1].pop("evidence")
+    observe_stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "sessionID": "ses-observe-1",
+                    "part": {"type": "step-start"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "sessionID": "ses-observe-1",
+                    "part": {
+                        "tool": "playwright_browser_navigate",
+                        "state": {
+                            "status": "completed",
+                            "input": {"url": "https://qsike.com/"},
+                            "output": "### Page\n- Page URL: https://qsike.com/",
+                        },
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "sessionID": "ses-observe-1",
+                    "part": {
+                        "tool": "playwright_browser_snapshot",
+                        "state": {
+                            "status": "completed",
+                            "input": {},
+                            "output": (
+                                "### Page\n- Page URL: https://qsike.com/\n"
+                                "### Snapshot\n- button \"최근 글\" [ref=e42] [cursor=pointer]"
+                            ),
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+
+    def checkpoint_collector(*, cdp_endpoint: str, job_dir: Path):
+        assert cdp_endpoint == "http://127.0.0.1:43129"
+        screenshot = job_dir / "discovery_final.png"
+        screenshot.write_bytes(b"png")
+        return {
+            "url": "https://qsike.com/notes/playwright",
+            "title": "Playwright note",
+            "screenshot_path": "discovery_final.png",
+            "visible_text": ["글 제목과 본문이 표시된다."],
+        }
+
+    def fake_runner(args, **kwargs):
+        calls.append(list(args))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(args, 0, stdout=observe_stdout, stderr="")
+        assert "--session" not in args
+        assert args[args.index("--agent") + 1] == "manual-video-finalizer"
+        assert "--model" not in args
+        assert "discovery_final.png" in args[-1]
+        assert "playwright_browser_navigate" in args[-1]
+        assert "https://qsike.com/" in args[-1]
+        assert "Every step must contain at least one action" in args[-1]
+        assert "Every action must include an absolute observed_url" in args[-1]
+        assert "Do not add an initial navigate action" in args[-1]
+        assert "Omit action-level evidence" in args[-1]
+        assert '"observer_trace_candidate": {}' in args[-1]
+        return subprocess.CompletedProcess(args, 0, stdout=_opencode_stdout(finalizer_trace), stderr="")
+
+    result = OpenCodeBrowserDiscovery(
+        _opencode_settings(),
+        command_runner=fake_runner,
+        checkpoint_collector=checkpoint_collector,
+    ).run(
+        request=_browser_request(),
+        job_dir=tmp_path,
+        cdp_endpoint="http://127.0.0.1:43129",
+    )
+
+    assert len(calls) == 2
+    assert result.trace == expected_trace
+    assert result.observe_event_log_path.read_text(encoding="utf-8") == observe_stdout
+    assert result.finalize_event_log_path.read_text(encoding="utf-8") == _opencode_stdout(finalizer_trace)
+    combined = result.event_log_path.read_text(encoding="utf-8")
+    assert "backend_playwright_capture" in combined
+    assert "ses-observe-1" in combined
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["observe_session_id"] == "ses-observe-1"
+    assert metadata["finalize_session_reused"] is False
+
+
 def test_opencode_browser_discovery_combines_split_final_text_events(tmp_path: Path) -> None:
-    trace_text = json.dumps(_valid_trace(), ensure_ascii=False)
+    finalizer_trace = _valid_trace()
+    finalizer_trace["completion_evidence"]["screenshot_path"] = "discovery_final.png"
+    expected_trace = deepcopy(finalizer_trace)
+    expected_trace["steps"][0]["actions"][1].pop("evidence")
+    trace_text = json.dumps(finalizer_trace, ensure_ascii=False)
     midpoint = len(trace_text) // 2
-    stdout = "\n".join(
+    finalize_stdout = "\n".join(
         json.dumps({"type": "text", "part": {"text": chunk}}, ensure_ascii=False)
         for chunk in (trace_text[:midpoint], trace_text[midpoint:])
     )
+    calls = 0
+    observer_stdout = json.dumps(
+        {"type": "step_start", "sessionID": "ses-split-finalizer", "part": {"type": "step-start"}}
+    )
 
     def fake_runner(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = observer_stdout if calls == 1 else finalize_stdout
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-    result = OpenCodeBrowserDiscovery(_opencode_settings(), command_runner=fake_runner).run(
+    def checkpoint_collector(*, cdp_endpoint: str, job_dir: Path):
+        (job_dir / "discovery_final.png").write_bytes(b"png")
+        return {
+            "url": "https://qsike.com/notes/playwright",
+            "title": "Playwright note",
+            "screenshot_path": "discovery_final.png",
+            "visible_text": ["글 제목과 본문이 표시된다."],
+        }
+
+    result = OpenCodeBrowserDiscovery(
+        _opencode_settings(),
+        command_runner=fake_runner,
+        checkpoint_collector=checkpoint_collector,
+    ).run(
         request=_browser_request(),
         job_dir=tmp_path,
         cdp_endpoint="http://127.0.0.1:9222",
     )
 
-    assert result.trace == _valid_trace()
+    assert calls == 2
+    assert result.trace == expected_trace
 
 
 @pytest.mark.parametrize(
@@ -572,7 +1205,9 @@ def test_browser_session_launches_edge_on_dynamic_loopback_cdp_and_cleans_proces
     assert "--remote-debugging-address=127.0.0.1" in command
     assert "--remote-debugging-port=43129" in command
     assert "--edge-skip-compat-layer-relaunch" in command
+    assert "--disable-sync" in command
     assert f"--user-data-dir={(tmp_path / 'edge-profile').resolve()}" in command
+    assert "--window-size=1280,800" in command
     assert "--auth-server-allowlist=*.corp.local" in command
     assert "--auth-negotiate-delegate-allowlist=*.corp.local" in command
     assert "employee-id" not in " ".join(command)
@@ -638,6 +1273,54 @@ def test_browser_session_reports_profile_lock_without_launching(tmp_path: Path) 
 
     assert exc_info.value.code == "profile_locked"
     assert "existing-owner" not in str(exc_info.value)
+
+
+def test_browser_session_reclaims_dead_pid_profile_lock(tmp_path: Path) -> None:
+    settings = _session_settings(tmp_path)
+    profile = tmp_path / "edge-profile"
+    profile.mkdir(parents=True)
+    (profile / ".manual-agent-cdp.lock").write_text("pid=4242\n", encoding="utf-8")
+    process = _FakeBrowserProcess(pid=5252)
+    checked_pids: list[int] = []
+    terminated: list[int] = []
+
+    manager = BrowserSessionManager(
+        settings,
+        process_factory=lambda *_args, **_kwargs: process,
+        readiness_probe=lambda _endpoint: True,
+        port_allocator=lambda: 43129,
+        executable_resolver=lambda *_args, **_kwargs: Path("C:/Edge/msedge.exe"),
+        process_tree_terminator=lambda item: terminated.append(item.pid),
+        process_alive_probe=lambda pid: checked_pids.append(pid) or False,
+    )
+
+    with manager as session:
+        assert session.pid == 5252
+        assert (profile / ".manual-agent-cdp.lock").read_text(encoding="utf-8") == "pid=5252\n"
+
+    assert checked_pids == [4242]
+    assert terminated == [5252]
+    assert not (profile / ".manual-agent-cdp.lock").exists()
+
+
+def test_browser_session_keeps_live_pid_profile_lock(tmp_path: Path) -> None:
+    settings = _session_settings(tmp_path)
+    profile = tmp_path / "edge-profile"
+    profile.mkdir(parents=True)
+    (profile / ".manual-agent-cdp.lock").write_text("pid=4242\n", encoding="utf-8")
+
+    with pytest.raises(BrowserSessionError) as exc_info:
+        with BrowserSessionManager(
+            settings,
+            process_factory=lambda *_args, **_kwargs: pytest.fail("live profile lock must not launch"),
+            readiness_probe=lambda _endpoint: True,
+            executable_resolver=lambda *_args, **_kwargs: Path("C:/Edge/msedge.exe"),
+            process_alive_probe=lambda pid: pid == 4242,
+        ):
+            pass
+
+    assert exc_info.value.code == "profile_locked"
+    assert (profile / ".manual-agent-cdp.lock").read_text(encoding="utf-8") == "pid=4242\n"
 
 
 def test_browser_session_timeout_terminates_owned_process_and_releases_profile(tmp_path: Path) -> None:
@@ -753,6 +1436,17 @@ def _orchestrator_services(
         calls.append("trace_validation")
         return validate_execution_trace(trace, request, policy)
 
+    def discovery_evidence_validator(trace, *, event_log_path, job_dir):
+        calls.append("discovery_evidence")
+        if fail_stage == "discovery_evidence":
+            raise DiscoveryEvidenceError("completion_url_unverified", "failed")
+        return SimpleNamespace(
+            to_safe_dict=lambda: {
+                "status": "verified",
+                "final_url": trace.completion_evidence.final_url,
+            }
+        )
+
     def tts_synthesizer(plan, settings, tts_dir):
         calls.append("supertonic")
         if fail_stage == "tts":
@@ -768,6 +1462,7 @@ def _orchestrator_services(
                 "speaker": "M1",
                 "language": "ko",
                 "duration_seconds": 1.0,
+                "audio": str(audio),
             }
         ]
         metadata.write_text(json.dumps({"status": "completed", "entries": entries}), encoding="utf-8")
@@ -817,8 +1512,9 @@ def _orchestrator_services(
         path.write_text('{"status":"completed","entries":[]}', encoding="utf-8")
         return path
 
-    def source_video_builder(package_dir, captures):
+    def source_video_builder(package_dir, captures, *, frame_durations_seconds=None):
         calls.append("source_video")
+        assert frame_durations_seconds
         path = package_dir / "manual_video_agent_usage.webm"
         path.write_bytes(b"webm")
         return path
@@ -873,6 +1569,7 @@ def _orchestrator_services(
         browser_session_factory=browser_session_factory,
         discovery_factory=discovery_factory,
         trace_validator=trace_validator,
+        discovery_evidence_validator=discovery_evidence_validator,
         tts_synthesizer=tts_synthesizer,
         trace_replayer=trace_replayer,
         masker=masker,
@@ -922,6 +1619,7 @@ def test_opencode_orchestrator_runs_only_the_new_fail_fast_pipeline(
         "browser_session.enter",
         "opencode_discovery",
         "trace_validation",
+        "discovery_evidence",
         "supertonic",
         "trace_replay",
         "browser_session.exit",
@@ -936,8 +1634,10 @@ def test_opencode_orchestrator_runs_only_the_new_fail_fast_pipeline(
     manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))
     assert manifest["pipeline"] == "opencode-only"
     assert manifest["degradations"] == []
+    assert manifest["render_quality"]["status"] == "passed"
     assert Path(manifest["supporting_artifacts"]["opencode_execution_trace"]).exists()
     assert result.artifacts.video.read_bytes() == b"mp4"
+    assert verify_manifest(result.artifacts.package_manifest) == []
     actors = {
         json.loads(line)["actor"]
         for line in result.artifacts.audit_log.read_text(encoding="utf-8").splitlines()
@@ -946,6 +1646,7 @@ def test_opencode_orchestrator_runs_only_the_new_fail_fast_pipeline(
         "environment",
         "browser_session",
         "opencode",
+        "discovery_evidence",
         "trace_validation",
         "tts",
         "replay",
@@ -955,10 +1656,38 @@ def test_opencode_orchestrator_runs_only_the_new_fail_fast_pipeline(
     }
 
 
+def test_frame_durations_follow_each_narrated_step_timeline() -> None:
+    captures = [
+        Path("01_01_before.png"),
+        Path("01_01_after.png"),
+        Path("02_01_before.png"),
+        Path("02_01_focus.png"),
+        Path("02_01_after.png"),
+    ]
+    media_plan = {
+        "steps": [
+            {"id": "step-one", "duration_seconds": 4.0},
+            {"id": "step-two", "duration_seconds": 6.0},
+        ]
+    }
+
+    durations = _frame_durations_for_media_plan(captures, media_plan)
+
+    assert durations == {
+        "01_01_before.png": 2.0,
+        "01_01_after.png": 2.0,
+        "02_01_before.png": 2.0,
+        "02_01_focus.png": 2.0,
+        "02_01_after.png": 2.0,
+    }
+    assert sum(durations.values()) == 10.0
+
+
 @pytest.mark.parametrize(
     ("fail_stage", "error_type"),
     [
         ("opencode", OpenCodeBrowserDiscoveryError),
+        ("discovery_evidence", DiscoveryEvidenceError),
         ("tts", SupertonicTtsError),
     ],
 )
@@ -1064,3 +1793,32 @@ def test_pipeline_public_run_function_delegates_to_opencode_orchestrator(
 
     assert result is sentinel
     assert calls == [(_orchestrator_request(), tmp_path, False)]
+
+
+def test_qsike_acceptance_fixture_defines_live_quality_and_package_contract() -> None:
+    fixture_path = Path("test_scenarios/qsike_service_manual.json")
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    request = PipelineInput.model_validate(fixture["request"])
+    assert request.target_url == "https://qsike.com/"
+    assert "쿠키" in request.request_text
+    assert "대표 기술 노트" in request.request_text
+    assert fixture["policy"]["allowed_origins"] == ["https://qsike.com"]
+    assert fixture["policy"]["read_only"] is True
+    assert fixture["expected_trace"]["minimum_steps"] >= 4
+    assert {"QSike Tech Notes", "주제별 기술 노트", "발행"}.issubset(
+        set(fixture["expected_trace"]["visible_evidence"])
+    )
+    assert fixture["expected_media"]["minimum_duration_seconds"] >= 20
+    assert fixture["expected_media"]["require_audio"] is True
+    assert fixture["expected_media"]["require_subtitles"] is True
+    assert fixture["expected_media"]["require_nonblank_frames"] is True
+    assert fixture["expected_media"]["forbid_duplicate_narration"] is True
+    assert {
+        "opencode_execution_trace.json",
+        "trace_replay_log.json",
+        "selector_trace.json",
+        "tts/tts_metadata.json",
+        "subtitles.vtt",
+        "package_manifest.json",
+    }.issubset(set(fixture["required_artifacts"]))

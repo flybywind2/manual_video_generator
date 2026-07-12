@@ -133,6 +133,12 @@ def validate_execution_trace(
     _validate_sensitive_data(parsed, raw, request_values, policy)
     _validate_actions(parsed, request_values, policy)
     _validate_origins(parsed, str(_request_value(request, "target_url", "")), policy)
+    unknown_input_keys = set(parsed.input_values) - {str(key) for key in request_values}
+    if unknown_input_keys:
+        raise TraceValidationError(
+            "unknown_value_key",
+            f"execution trace references unknown input keys: {', '.join(sorted(unknown_input_keys))}",
+        )
     _validate_completion(parsed)
     return parsed
 

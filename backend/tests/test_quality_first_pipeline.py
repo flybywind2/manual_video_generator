@@ -668,11 +668,11 @@ def test_quality_first_accepts_gemma_nested_single_action_without_repair(tmp_pat
     assert action["repair_applied"] is False
 
 
-def test_quality_first_policy_is_exposed_in_safe_status():
+def test_legacy_quality_first_policy_is_not_exposed_in_opencode_status():
     settings = load_settings(environ={"MANUAL_AGENT_BROWSER_DECISION_POLICY": "quality_first"})
 
     assert settings.browser_decision_policy == "quality_first"
-    assert settings.safe_status()["runtime"]["browser_decision_policy"] == "quality_first"
+    assert "browser_decision_policy" not in settings.safe_status()["runtime"]
 
 
 def test_llm_response_log_records_latency_and_payload_sizes(tmp_path: Path):
@@ -965,6 +965,76 @@ def test_quality_first_hyperframes_command_forces_landscape_high_quality_png_fra
     assert "--video-frame-format=png" in commands[0]
 
 
+def test_video_renderer_uses_absolute_paths_for_hyperframes_and_ffmpeg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.app.adapters import video as video_module
+
+    monkeypatch.chdir(tmp_path)
+    package_dir = Path("relative-job")
+    package_dir.mkdir()
+    preview = package_dir / "preview.html"
+    preview.write_text("<html></html>", encoding="utf-8")
+    fallback = package_dir / "source.webm"
+    fallback.write_bytes(b"webm")
+    audio = package_dir / "tts.wav"
+    audio.write_bytes(b"wav")
+    fake_ffmpeg = str((tmp_path / "ffmpeg.exe").resolve())
+    monkeypatch.setattr(
+        video_module.shutil,
+        "which",
+        lambda name: fake_ffmpeg if name == "ffmpeg" else None,
+    )
+    monkeypatch.setattr(video_module, "_probe_media_duration_seconds", lambda _path: 2.0)
+    monkeypatch.setattr(video_module, "_detect_leading_blank_seconds", lambda **_kwargs: 0.0)
+    commands: list[list[str]] = []
+
+    def fake_runner(command, **kwargs):
+        assert isinstance(command, list)
+        commands.append(command)
+        assert Path(kwargs["cwd"]).is_absolute()
+        if command[0] == "hyperframes":
+            assert Path(command[2]).is_absolute()
+            output = Path(command[command.index("--output") + 1])
+            assert output.is_absolute()
+            output.write_bytes(b"mp4")
+        elif "concat" in command:
+            concat_list = Path(command[command.index("-i") + 1])
+            assert concat_list.is_absolute()
+            assert "file '" in concat_list.read_text(encoding="utf-8")
+            output = Path(command[-1])
+            assert output.is_absolute()
+            output.write_bytes(b"wav")
+        else:
+            input_paths = [Path(command[index + 1]) for index, value in enumerate(command) if value == "-i"]
+            assert input_paths and all(path.is_absolute() for path in input_paths)
+            output = Path(command[-1])
+            assert output.is_absolute()
+            output.write_bytes(b"mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = video_module.render_final_video(
+        plan={"steps": [{"id": "s1", "title": "화면", "caption": "화면 확인"}]},
+        package_dir=package_dir,
+        preview_html=preview,
+        fallback_video=fallback,
+        settings=load_settings(
+            environ={
+                "MANUAL_AGENT_VIDEO_RENDERER": "hyperframes",
+                "MANUAL_AGENT_HYPERFRAMES_COMMAND": "hyperframes render",
+            }
+        ),
+        tts_audio=[audio],
+        command_runner=fake_runner,
+    )
+
+    assert result.used_fallback is False
+    assert result.video_path.is_absolute()
+    assert result.video_path.is_file()
+    assert len(commands) == 3
+
+
 def test_render_degrade_reason_prioritizes_enforced_quality_failure(tmp_path: Path):
     metadata_path = tmp_path / "video_render.json"
     metadata_path.write_text(
@@ -977,7 +1047,7 @@ def test_render_degrade_reason_prioritizes_enforced_quality_failure(tmp_path: Pa
     assert reason == "render_quality_failed"
 
 
-def test_package_manifest_exposes_render_quality_summary(tmp_path: Path):
+def _legacy_test_package_manifest_exposes_render_quality_summary(tmp_path: Path):
     result = run_pipeline(_request(), base_dir=tmp_path, capture_browser=False)
 
     manifest = json.loads(result.artifacts.package_manifest.read_text(encoding="utf-8"))

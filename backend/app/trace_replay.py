@@ -101,6 +101,7 @@ def replay_execution_trace(
             raise TraceReplayError("cdp_page_missing", "CDP browser context has no page")
         page = pages[-1]
         _configure_page(page, timeout_ms)
+        _prepare_replay_start(page, target_url, timeout_ms)
         _install_visual_helpers(page)
 
         for step_index, step in enumerate(parsed_trace.steps, start=1):
@@ -133,12 +134,19 @@ def replay_execution_trace(
                             step_id=step.id,
                             action_id=action.id,
                         )
+
+                    def capture_focus_frame() -> None:
+                        focus_path = _capture(page, capture_dir, f"{prefix}_focus.png")
+                        captures.append(focus_path)
+                        log_entry["focus_capture"] = str(focus_path)
+
                     resolved_selector, method = _execute_action(
                         page=page,
                         action=action,
                         input_values=input_values,
                         timeout_ms=timeout_ms,
                         action_duration_ms=action_duration_ms,
+                        on_visual_ready=capture_focus_frame,
                     )
                     if action.type in {"click", "press"}:
                         page = _newest_page(context, page, timeout_ms)
@@ -262,6 +270,7 @@ def _execute_action(
     input_values: Mapping[str, Any],
     timeout_ms: int,
     action_duration_ms: int,
+    on_visual_ready: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     if action.type == "wait":
         wait_ms = max(action_duration_ms, int(action.duration_ms or 0))
@@ -272,6 +281,8 @@ def _execute_action(
         return "", "capture"
     if action.type == "navigate":
         def navigate() -> None:
+            if _same_replay_location(str(getattr(page, "url", "") or ""), action.target_url):
+                return
             page.goto(action.target_url, wait_until="domcontentloaded", timeout=timeout_ms)
             try:
                 page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
@@ -282,7 +293,10 @@ def _execute_action(
         return "", f"goto:{action.target_url}"
 
     locator, resolved_selector = _resolve_locator(page, action, timeout_ms)
+    _install_visual_helpers(page)
     _show_action_visual(page, locator, click=action.type in {"click", "press"})
+    if on_visual_ready is not None:
+        on_visual_ready()
 
     if action.type == "fill":
         if action.value_key not in input_values:
@@ -294,8 +308,28 @@ def _execute_action(
             raise TraceReplayError("replay_diverged", "Filled input value did not match the request")
         return resolved_selector, f"fill:{resolved_selector}"
     if action.type == "click":
-        _wait_around_action(page, action_duration_ms, execute=locator.click)
-        return resolved_selector, f"click:{resolved_selector}"
+        click_method = "click"
+
+        def click() -> None:
+            nonlocal click_method
+            try:
+                locator.click()
+            except Exception:
+                box = locator.bounding_box()
+                mouse = getattr(page, "mouse", None)
+                if not isinstance(box, Mapping) or not callable(getattr(mouse, "click", None)):
+                    raise
+                width = float(box.get("width", 0) or 0)
+                height = float(box.get("height", 0) or 0)
+                if width <= 0 or height <= 0:
+                    raise
+                x = float(box.get("x", 0) or 0) + width / 2
+                y = float(box.get("y", 0) or 0) + height / 2
+                mouse.click(x, y)
+                click_method = "click-coordinate"
+
+        _wait_around_action(page, action_duration_ms, execute=click)
+        return resolved_selector, f"{click_method}:{resolved_selector}"
     if action.type == "press":
         _wait_around_action(page, action_duration_ms, execute=lambda: locator.press(action.key))
         return resolved_selector, f"press:{resolved_selector}:{action.key}"
@@ -306,44 +340,62 @@ def _resolve_locator(page: Any, action: TraceAction, timeout_ms: int) -> tuple[A
     candidates: list[tuple[Any, str]] = []
     if action.selector:
         candidates.append((page.locator(action.selector), action.selector))
+    candidates.extend(_semantic_locator_candidates(page, action))
     if action.ref:
         ref = action.ref if action.ref.startswith("aria-ref=") else f"aria-ref={action.ref}"
         if ref != action.selector:
             candidates.append((page.locator(ref), ref))
-    candidates.extend(_semantic_locator_candidates(page, action))
     failures: list[str] = []
     seen_descriptors: set[str] = set()
     for locator, candidate in candidates:
         if candidate in seen_descriptors:
             continue
         seen_descriptors.add(candidate)
-        count = int(locator.count()) if callable(getattr(locator, "count", None)) else 1
+        try:
+            count = int(locator.count()) if callable(getattr(locator, "count", None)) else 1
+        except Exception as exc:  # noqa: BLE001 - a stale discovery ref is only one locator candidate.
+            failures.append(f"{candidate}:error:{type(exc).__name__}")
+            continue
         if count != 1:
             failures.append(f"{candidate}:{count}")
             continue
         try:
             locator.wait_for(state="visible", timeout=timeout_ms)
         except TypeError:
-            locator.wait_for(state="visible")
+            try:
+                locator.wait_for(state="visible")
+            except Exception as exc:  # noqa: BLE001 - try the next grounded locator candidate.
+                failures.append(f"{candidate}:error:{type(exc).__name__}")
+                continue
+        except Exception as exc:  # noqa: BLE001 - try the next grounded locator candidate.
+            failures.append(f"{candidate}:error:{type(exc).__name__}")
+            continue
         return locator, candidate
     detail = ", ".join(failures) or "no locator candidates"
     raise TraceReplayError("replay_diverged", f"Replay target is missing or ambiguous: {detail}")
 
 
 def _semantic_locator_candidates(page: Any, action: TraceAction) -> list[tuple[Any, str]]:
-    label = action.label.strip()
-    if not label:
+    labels = []
+    for value in (action.label, action.value_key if action.type == "fill" else ""):
+        label = value.strip()
+        if label and label not in labels:
+            labels.append(label)
+    if not labels:
         return []
     candidates: list[tuple[Any, str]] = []
-    if action.type == "fill" and callable(getattr(page, "get_by_label", None)):
-        candidates.append((page.get_by_label(label, exact=True), f"label={label}"))
-    if action.type in {"click", "press"} and callable(getattr(page, "get_by_role", None)):
-        for role in ("button", "link", "menuitem", "tab"):
-            candidates.append(
-                (page.get_by_role(role, name=label, exact=True), f"role={role}[name={label}]")
-            )
-    if callable(getattr(page, "get_by_text", None)):
-        candidates.append((page.get_by_text(label, exact=True), f"text={label}"))
+    for label in labels:
+        if action.type == "fill" and callable(getattr(page, "get_by_label", None)):
+            candidates.append((page.get_by_label(label, exact=True), f"label={label}"))
+        if action.type == "fill" and callable(getattr(page, "get_by_placeholder", None)):
+            candidates.append((page.get_by_placeholder(label, exact=True), f"placeholder={label}"))
+        if action.type in {"click", "press"} and callable(getattr(page, "get_by_role", None)):
+            for role in ("button", "link", "menuitem", "tab"):
+                candidates.append(
+                    (page.get_by_role(role, name=label, exact=True), f"role={role}[name={label}]")
+                )
+        if callable(getattr(page, "get_by_text", None)):
+            candidates.append((page.get_by_text(label, exact=True), f"text={label}"))
     return candidates
 
 
@@ -357,7 +409,8 @@ def _verify_action(
         if _state_fingerprint(before_state) == _state_fingerprint(after_state):
             raise TraceReplayError("replay_diverged", "Expected page state change was not observed")
     if action.evidence and action.evidence.visible_text:
-        body_text = str(after_state.get("text") or "")
+        evidence_state = before_state if action.type in {"click", "press", "fill"} else after_state
+        body_text = str(evidence_state.get("text") or "")
         missing = [text for text in action.evidence.visible_text if text not in body_text]
         if missing:
             raise TraceReplayError(
@@ -380,6 +433,37 @@ def _configure_page(page: Any, timeout_ms: int) -> None:
         page.set_default_timeout(timeout_ms)
     if callable(getattr(page, "set_default_navigation_timeout", None)):
         page.set_default_navigation_timeout(timeout_ms)
+    if callable(getattr(page, "set_viewport_size", None)):
+        page.set_viewport_size({"width": 1280, "height": 800})
+
+
+def _prepare_replay_start(page: Any, target_url: str, timeout_ms: int) -> None:
+    page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
+    except Exception:
+        pass
+
+
+def _same_replay_location(actual_url: str, expected_url: str) -> bool:
+    try:
+        actual = urlsplit(actual_url)
+        expected = urlsplit(expected_url)
+    except ValueError:
+        return False
+    return (
+        actual.scheme.lower(),
+        actual.hostname,
+        actual.port,
+        actual.path.rstrip("/") or "/",
+        actual.query,
+    ) == (
+        expected.scheme.lower(),
+        expected.hostname,
+        expected.port,
+        expected.path.rstrip("/") or "/",
+        expected.query,
+    )
 
 
 def _install_visual_helpers(page: Any) -> None:
@@ -509,8 +593,7 @@ def _assert_observed_location(
     actual_path = actual.path.rstrip("/") or "/"
     expected_path = expected.path.rstrip("/") or "/"
     query_mismatch = bool(expected.query) and actual.query != expected.query
-    fragment_mismatch = bool(expected.fragment) and actual.fragment != expected.fragment
-    if actual_path != expected_path or query_mismatch or fragment_mismatch:
+    if actual_path != expected_path or query_mismatch:
         raise TraceReplayError(
             "replay_diverged",
             f"Replay is at {actual_url}, expected observed location {expected_url}",

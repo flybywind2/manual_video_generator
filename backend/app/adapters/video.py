@@ -38,7 +38,10 @@ def render_final_video(
     tts_audio: list[Path] | None = None,
     command_runner: CommandRunner | None = None,
 ) -> VideoRenderResult:
-    audio_paths = [Path(path) for path in (tts_audio or [])]
+    package_dir = Path(package_dir).resolve()
+    preview_html = Path(preview_html).resolve()
+    fallback_video = Path(fallback_video).resolve()
+    audio_paths = [Path(path).resolve() for path in (tts_audio or [])]
     duration_seconds, duration_source, step_durations = _composition_timing(plan, audio_paths)
     composition_dir = _write_hyperframes_composition(
         plan,

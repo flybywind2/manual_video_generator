@@ -84,7 +84,13 @@ def _build_command(settings: AppSettings, prompt: str) -> list[str]:
     return build_opencode_run_command(settings, prompt)
 
 
-def build_opencode_run_command(settings: AppSettings, prompt: str) -> list[str]:
+def build_opencode_run_command(
+    settings: AppSettings,
+    prompt: str,
+    *,
+    agent_override: str | None = None,
+    session_id: str = "",
+) -> list[str]:
     command = shlex.split(settings.opencode_command, posix=False)
     if not command:
         return []
@@ -92,8 +98,11 @@ def build_opencode_run_command(settings: AppSettings, prompt: str) -> list[str]:
         resolved = shutil.which(command[0])
         if resolved:
             command[0] = resolved
-    if settings.opencode_agent:
-        command.extend(["--agent", settings.opencode_agent])
+    agent = settings.opencode_agent if agent_override is None else agent_override
+    if session_id:
+        command.extend(["--session", session_id])
+    if agent:
+        command.extend(["--agent", agent])
     command.append(prompt)
     return command
 

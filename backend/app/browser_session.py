@@ -19,6 +19,7 @@ ReadinessProbe = Callable[[str], bool]
 PortAllocator = Callable[[], int]
 ExecutableResolver = Callable[..., Path | None]
 ProcessTreeTerminator = Callable[[Any], None]
+ProcessAliveProbe = Callable[[int], bool]
 
 
 class BrowserSessionError(RuntimeError):
@@ -57,6 +58,7 @@ class BrowserSessionManager:
         port_allocator: PortAllocator | None = None,
         executable_resolver: ExecutableResolver = discover_browser_executable,
         process_tree_terminator: ProcessTreeTerminator | None = None,
+        process_alive_probe: ProcessAliveProbe | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         startup_timeout_seconds: float | None = None,
@@ -67,6 +69,7 @@ class BrowserSessionManager:
         self.port_allocator = port_allocator or _allocate_loopback_port
         self.executable_resolver = executable_resolver
         self.process_tree_terminator = process_tree_terminator or _terminate_process_tree
+        self.process_alive_probe = process_alive_probe or _is_process_alive
         self.sleep = sleep
         self.clock = clock
         configured_timeout = float(getattr(settings, "request_timeout_seconds", 20.0) or 20.0)
@@ -178,9 +181,30 @@ class BrowserSessionManager:
             with lock_path.open("x", encoding="utf-8") as handle:
                 handle.write("starting\n")
         except FileExistsError as exc:
-            raise BrowserSessionError("profile_locked", "Browser profile is already in use") from exc
+            if not self._reclaim_dead_profile_lock(lock_path):
+                raise BrowserSessionError("profile_locked", "Browser profile is already in use") from exc
+            try:
+                with lock_path.open("x", encoding="utf-8") as handle:
+                    handle.write("starting\n")
+            except FileExistsError as retry_exc:
+                raise BrowserSessionError("profile_locked", "Browser profile is already in use") from retry_exc
         self._profile_lock_path = lock_path
         self._owns_profile_lock = True
+
+    def _reclaim_dead_profile_lock(self, lock_path: Path) -> bool:
+        try:
+            content = lock_path.read_text(encoding="utf-8").strip()
+            if not content.startswith("pid="):
+                return False
+            pid = int(content.removeprefix("pid=").strip())
+            if pid <= 0 or self.process_alive_probe(pid):
+                return False
+            if lock_path.read_text(encoding="utf-8").strip() != content:
+                return False
+            lock_path.unlink()
+            return True
+        except (OSError, ValueError):
+            return False
 
     def _write_lock_owner(self, pid: int | None) -> None:
         if self._owns_profile_lock and self._profile_lock_path is not None:
@@ -253,7 +277,9 @@ def _build_edge_command(*, executable: Path, profile_path: Path, port: int, logi
         f"--user-data-dir={profile_path}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-sync",
         "--edge-skip-compat-layer-relaunch",
+        "--window-size=1280,800",
         "--new-window",
         "about:blank",
     ]
@@ -281,6 +307,40 @@ def _probe_cdp(endpoint: str) -> bool:
             return 200 <= int(response.status) < 300
     except Exception:
         return False
+
+
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5
+        try:
+            exit_code = wintypes.DWORD()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _terminate_process_tree(process: Any) -> None:

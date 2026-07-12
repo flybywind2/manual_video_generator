@@ -5,11 +5,11 @@ from backend.app.adapters.browser_agent import decide_browser_agent_action
 from backend.app.config import load_settings
 
 
-def test_page_agent_setting_is_exposed_in_status():
+def test_page_agent_legacy_setting_is_not_exposed_in_opencode_status():
     settings = load_settings(environ={"MANUAL_AGENT_ENABLE_PAGE_AGENT": "true"})
 
     assert settings.enable_page_agent is True
-    assert settings.safe_status()["runtime"]["enable_page_agent"] is True
+    assert "enable_page_agent" not in settings.safe_status()["runtime"]
 
 
 def test_page_agent_prefers_selector_for_textless_icon_click():
