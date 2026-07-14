@@ -14,3 +14,4 @@ dist/
 output/
 runtime/
 .env
+.worktrees/
