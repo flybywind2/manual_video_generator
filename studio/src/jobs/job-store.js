@@ -4,8 +4,10 @@ import {
   open,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
+  unlink,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import {
@@ -39,6 +41,12 @@ const FORBIDDEN_JOB_IDS = new Set([
   ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
 ]);
 const FORBIDDEN_DATA_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const PUBLIC_REFERENCE_KEYS = new Set([
+  "credentialid",
+  "credentialref",
+  "vaultid",
+  "passwordselector",
+]);
 const EVENT_FIELDS = Object.freeze([
   "jobId",
   "sequence",
@@ -54,7 +62,14 @@ const SNAPSHOT_FIELDS = Object.freeze([
   "updatedAt",
   "eventSequence",
 ]);
+const OWNER_FIELDS = Object.freeze(["pid", "token", "createdAt"]);
+const ROOT_LOCK_NAME = ".studio-owner.lock";
 const atomicWriteChains = new Map();
+const jobOperationChains = new Map();
+const rootLeaseChains = new Map();
+const rootOwners = new Map();
+const rootListenerGroups = new Map();
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 function jobError(code, message, reason, retryable = false) {
   return new StudioError(message, {
@@ -81,7 +96,25 @@ function assertJobId(jobId) {
 }
 
 function isSensitiveKey(key) {
-  const normalized = key.replace(/[^A-Za-z0-9]/gu, "").toLowerCase();
+  const normalized = key
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9]/gu, "")
+    .toLowerCase();
+  if (PUBLIC_REFERENCE_KEYS.has(normalized)) {
+    return false;
+  }
+  if (
+    [
+      "apikey",
+      "privatekey",
+      "accesskey",
+      "secretkey",
+      "passwordhash",
+      "passwordderived",
+    ].some((marker) => normalized.includes(marker))
+  ) {
+    return true;
+  }
   return [
     "authorization",
     "cookie",
@@ -91,7 +124,7 @@ function isSensitiveKey(key) {
     "passphrase",
     "secret",
     "token",
-  ].some((suffix) => normalized.endsWith(suffix));
+  ].some((marker) => normalized.includes(marker));
 }
 
 function publicDataError(code, reason) {
@@ -247,6 +280,23 @@ function ensureContained(root, candidate) {
   return child;
 }
 
+function canonicalPathKey(path) {
+  const canonical = resolve(path);
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+function serializeOperation(chains, key, operation) {
+  const previous = chains.get(key) ?? Promise.resolve();
+  const result = previous.then(operation, operation);
+  const gate = result.catch(() => undefined).finally(() => {
+    if (chains.get(key) === gate) {
+      chains.delete(key);
+    }
+  });
+  chains.set(key, gate);
+  return result;
+}
+
 async function durableAppend(path, line) {
   let handle;
   try {
@@ -279,6 +329,23 @@ async function renameAtomically(temporary, target) {
       waitedMs += intervalMs;
       intervalMs = Math.min(intervalMs * 2, 32);
     }
+  }
+}
+
+async function syncDirectory(path) {
+  const handle = await open(path, "r");
+  try {
+    try {
+      await handle.sync();
+    } catch (error) {
+      if (process.platform !== "win32" || error?.code !== "EPERM") {
+        throw error;
+      }
+      // Node cannot FlushFileBuffers on directory handles on Windows. NTFS still
+      // provides atomic rename; all file contents are flushed before publication.
+    }
+  } finally {
+    await handle.close();
   }
 }
 
@@ -417,15 +484,34 @@ function validateEvent(rawEvent, jobId, previous) {
   });
 }
 
-function parseEvents(text, jobId) {
-  if (typeof text !== "string" || !text.endsWith("\n")) {
+function parseEvents(bytes, jobId) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
     throw jobError(
       "CORRUPT_JOB_DATA",
       "The persisted event stream is corrupt.",
-      "unterminated_event_stream",
+      "empty_event_stream",
     );
   }
-  const lines = text.slice(0, -1).split("\n");
+  const lastNewline = bytes.lastIndexOf(0x0a);
+  if (lastNewline < 0) {
+    throw jobError(
+      "CORRUPT_JOB_DATA",
+      "The persisted event stream is corrupt.",
+      "no_committed_event",
+    );
+  }
+  const committedEnd = lastNewline + 1;
+  let committedText;
+  try {
+    committedText = utf8Decoder.decode(bytes.subarray(0, committedEnd));
+  } catch {
+    throw jobError(
+      "CORRUPT_JOB_DATA",
+      "The persisted event stream is corrupt.",
+      "invalid_event_utf8",
+    );
+  }
+  const lines = committedText.slice(0, -1).split("\n");
   if (lines.length === 0 || lines.some((line) => line.length === 0)) {
     throw jobError(
       "CORRUPT_JOB_DATA",
@@ -438,7 +524,31 @@ function parseEvents(text, jobId) {
     const parsed = parseJson(line, "event");
     events.push(validateEvent(parsed, jobId, events.at(-1)));
   }
-  return Object.freeze(events);
+  return Object.freeze({
+    events: Object.freeze(events),
+    committedEnd,
+    originalLength: bytes.length,
+  });
+}
+
+async function truncateUncommittedTail(path, committedEnd, expectedLength) {
+  let handle;
+  try {
+    handle = await open(path, "r+");
+    const { size } = await handle.stat();
+    if (size !== expectedLength) {
+      throw jobError(
+        "CONCURRENT_JOB_WRITE",
+        "The event stream changed while it was being recovered.",
+        "event_size_changed",
+        true,
+      );
+    }
+    await handle.truncate(committedEnd);
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
 }
 
 function snapshotFromEvents(jobId, events) {
@@ -460,12 +570,315 @@ function validSnapshot(value, recovered) {
   );
 }
 
+function parseOwnerMetadata(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw jobError(
+      "INVALID_ROOT_OWNER",
+      "The jobs root owner record is invalid.",
+      "invalid_owner_json",
+    );
+  }
+  if (
+    !exactOwnFields(value, OWNER_FIELDS) ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid <= 0 ||
+    typeof value.token !== "string" ||
+    !/^[A-Za-z0-9-]{8,128}$/u.test(value.token) ||
+    typeof value.createdAt !== "string" ||
+    safeTimestamp(value.createdAt) !== value.createdAt
+  ) {
+    throw jobError(
+      "INVALID_ROOT_OWNER",
+      "The jobs root owner record is invalid.",
+      "invalid_owner_contract",
+    );
+  }
+  return Object.freeze({
+    pid: value.pid,
+    token: value.token,
+    createdAt: value.createdAt,
+  });
+}
+
+async function readOwnerMetadata(lockPath) {
+  let entry;
+  try {
+    entry = await lstat(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw jobError(
+      "UNSAFE_JOB_PATH",
+      "The jobs root owner path is unsafe.",
+      "unsafe_owner_path",
+    );
+  }
+  return parseOwnerMetadata(await readFile(lockPath, "utf8"));
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function ownerMatches(left, right) {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.pid === right.pid &&
+    left.token === right.token &&
+    left.createdAt === right.createdAt
+  );
+}
+
+function ownershipLost() {
+  return jobError(
+    "ROOT_LOCK_OWNERSHIP_LOST",
+    "The jobs root ownership was lost.",
+    "owner_record_changed",
+  );
+}
+
+async function createOwnerFile(lockPath, metadata) {
+  let handle;
+  let created = false;
+  let committed = false;
+  try {
+    handle = await open(lockPath, "wx", 0o600);
+    created = true;
+    await handle.writeFile(JSON.stringify(metadata), "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    committed = true;
+  } finally {
+    await handle?.close();
+    if (created && !committed) {
+      try {
+        await unlink(lockPath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
+async function acquireRootLease(root) {
+  const canonicalRoot = await realpath(root);
+  const key = canonicalPathKey(canonicalRoot);
+  return serializeOperation(rootLeaseChains, key, async () => {
+    const existing = rootOwners.get(key);
+    if (existing !== undefined) {
+      const persisted = await readOwnerMetadata(existing.lockPath);
+      if (
+        persisted === undefined ||
+        persisted.pid !== process.pid ||
+        persisted.token !== existing.token
+      ) {
+        rootOwners.delete(key);
+        throw jobError(
+          "ROOT_LOCK_OWNERSHIP_LOST",
+          "The jobs root ownership was lost.",
+          "owner_record_changed",
+        );
+      }
+      existing.references += 1;
+      return Object.freeze({ key, token: existing.token });
+    }
+
+    const lockPath = ensureContained(root, join(root, ROOT_LOCK_NAME));
+    const token = randomUUID();
+    const metadata = Object.freeze({
+      pid: process.pid,
+      token,
+      createdAt: new Date().toISOString(),
+    });
+    for (;;) {
+      try {
+        await createOwnerFile(lockPath, metadata);
+        rootOwners.set(key, { lockPath, token, references: 1 });
+        return Object.freeze({ key, token });
+      } catch (error) {
+        if (error?.code !== "EEXIST") {
+          throw error;
+        }
+      }
+
+      const owner = await readOwnerMetadata(lockPath);
+      if (owner === undefined) {
+        continue;
+      }
+      if (processIsAlive(owner.pid)) {
+        throw jobError(
+          "JOBS_ROOT_LOCKED",
+          "Another local service process owns the jobs root.",
+          "live_foreign_owner",
+          true,
+        );
+      }
+
+      const stalePath = ensureContained(
+        root,
+        join(root, `.studio-owner.stale.${randomUUID()}`),
+      );
+      try {
+        await rename(lockPath, stalePath);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          continue;
+        }
+        throw error;
+      }
+      const claimedOwner = await readOwnerMetadata(stalePath);
+      if (!ownerMatches(claimedOwner, owner)) {
+        try {
+          await rename(stalePath, lockPath);
+        } catch {
+          throw jobError(
+            "ROOT_LOCK_RECOVERY_RACE",
+            "The jobs root owner changed during stale recovery.",
+            "owner_changed_during_recovery",
+            true,
+          );
+        }
+        if (claimedOwner !== undefined && processIsAlive(claimedOwner.pid)) {
+          throw jobError(
+            "JOBS_ROOT_LOCKED",
+            "Another local service process owns the jobs root.",
+            "live_foreign_owner",
+            true,
+          );
+        }
+        continue;
+      }
+      await unlink(stalePath);
+    }
+  });
+}
+
+async function verifyRootLease(lease) {
+  return serializeOperation(rootLeaseChains, lease.key, async () => {
+    const existing = rootOwners.get(lease.key);
+    if (existing === undefined || existing.token !== lease.token) {
+      throw ownershipLost();
+    }
+    const persisted = await readOwnerMetadata(existing.lockPath);
+    if (
+      persisted === undefined ||
+      persisted.pid !== process.pid ||
+      persisted.token !== existing.token
+    ) {
+      rootOwners.delete(lease.key);
+      throw ownershipLost();
+    }
+  });
+}
+
+async function releaseRootLease(lease) {
+  return serializeOperation(rootLeaseChains, lease.key, async () => {
+    const existing = rootOwners.get(lease.key);
+    if (existing === undefined || existing.token !== lease.token) {
+      throw ownershipLost();
+    }
+    const persisted = await readOwnerMetadata(existing.lockPath);
+    if (
+      persisted === undefined ||
+      persisted.pid !== process.pid ||
+      persisted.token !== existing.token
+    ) {
+      rootOwners.delete(lease.key);
+      throw ownershipLost();
+    }
+    if (existing.references > 1) {
+      existing.references -= 1;
+      return;
+    }
+    const releasedPath = ensureContained(
+      dirname(existing.lockPath),
+      join(
+        dirname(existing.lockPath),
+        `.studio-owner.release.${existing.token}.${randomUUID()}`,
+      ),
+    );
+    try {
+      await renameAtomically(existing.lockPath, releasedPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        rootOwners.delete(lease.key);
+        throw ownershipLost();
+      }
+      throw error;
+    }
+
+    let releasedOwner;
+    try {
+      releasedOwner = await readOwnerMetadata(releasedPath);
+    } catch (error) {
+      rootOwners.delete(lease.key);
+      throw error;
+    }
+    if (!ownerMatches(releasedOwner, persisted)) {
+      rootOwners.delete(lease.key);
+      try {
+        await renameAtomically(releasedPath, existing.lockPath);
+      } catch {
+        throw jobError(
+          "ROOT_LOCK_RECOVERY_RACE",
+          "The jobs root owner changed during lease release.",
+          "owner_changed_during_release",
+          true,
+        );
+      }
+      throw ownershipLost();
+    }
+
+    rootOwners.delete(lease.key);
+    await unlink(releasedPath);
+    await syncDirectory(dirname(existing.lockPath));
+  });
+}
+
+async function removeCreateStaging(root, stagingPath) {
+  const resolvedRoot = resolve(root);
+  const resolvedStaging = resolve(stagingPath);
+  if (
+    dirname(resolvedStaging) !== resolvedRoot ||
+    !basename(resolvedStaging).startsWith(".create-")
+  ) {
+    throw jobError(
+      "UNSAFE_JOB_PATH",
+      "The create staging path is unsafe.",
+      "unsafe_staging_cleanup",
+    );
+  }
+  await rm(resolvedStaging, { force: true, recursive: true });
+}
+
 export class JobStore {
   #root;
   #now;
   #randomId;
-  #chains = new Map();
   #listeners = new Set();
+  #ownership;
+  #ownershipPromise;
+  #closed = false;
+  #closePromise;
+  #inFlight = new Set();
+  #listenerKey;
+  #listenerGroupRegistered = false;
 
   constructor({ root, now = () => new Date(), randomId = randomUUID } = {}) {
     if (typeof root !== "string" || root.length === 0 || !isAbsolute(root)) {
@@ -485,6 +898,7 @@ export class JobStore {
     this.#root = resolve(root);
     this.#now = now;
     this.#randomId = randomId;
+    this.#listenerKey = canonicalPathKey(this.#root);
   }
 
   get root() {
@@ -492,6 +906,13 @@ export class JobStore {
   }
 
   async #ensureRoot() {
+    if (this.#closed) {
+      throw jobError(
+        "JOB_STORE_CLOSED",
+        "The job store is closed.",
+        "closed_store",
+      );
+    }
     await mkdir(this.#root, { recursive: true });
     const rootStat = await lstat(this.#root);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -501,6 +922,57 @@ export class JobStore {
         "unsafe_root",
       );
     }
+    if (this.#ownership === undefined) {
+      if (this.#ownershipPromise === undefined) {
+        this.#ownershipPromise = acquireRootLease(this.#root)
+          .then((ownership) => {
+            this.#ownership = ownership;
+            return ownership;
+          })
+          .catch((error) => {
+            this.#ownershipPromise = undefined;
+            throw error;
+          });
+      }
+      await this.#ownershipPromise;
+    } else {
+      await verifyRootLease(this.#ownership);
+    }
+    this.#moveListenerGroup(this.#ownership.key);
+  }
+
+  #attachListenerGroup() {
+    if (this.#listenerGroupRegistered || this.#listeners.size === 0) {
+      return;
+    }
+    let group = rootListenerGroups.get(this.#listenerKey);
+    if (group === undefined) {
+      group = new Set();
+      rootListenerGroups.set(this.#listenerKey, group);
+    }
+    group.add(this.#listeners);
+    this.#listenerGroupRegistered = true;
+  }
+
+  #detachListenerGroup() {
+    if (!this.#listenerGroupRegistered) {
+      return;
+    }
+    const group = rootListenerGroups.get(this.#listenerKey);
+    group?.delete(this.#listeners);
+    if (group?.size === 0) {
+      rootListenerGroups.delete(this.#listenerKey);
+    }
+    this.#listenerGroupRegistered = false;
+  }
+
+  #moveListenerGroup(listenerKey) {
+    if (listenerKey === this.#listenerKey) {
+      return;
+    }
+    this.#detachListenerGroup();
+    this.#listenerKey = listenerKey;
+    this.#attachListenerGroup();
   }
 
   #paths(jobId) {
@@ -545,28 +1017,38 @@ export class JobStore {
   }
 
   #serialize(jobId, operation) {
-    const previous = this.#chains.get(jobId) ?? Promise.resolve();
-    const result = previous.then(operation, operation);
-    const gate = result.catch(() => undefined).finally(() => {
-      if (this.#chains.get(jobId) === gate) {
-        this.#chains.delete(jobId);
-      }
-    });
-    this.#chains.set(jobId, gate);
-    return result;
+    const key = canonicalPathKey(this.#paths(jobId).directory);
+    return this.#track(serializeOperation(jobOperationChains, key, operation));
+  }
+
+  #track(operation) {
+    this.#inFlight.add(operation);
+    const remove = () => this.#inFlight.delete(operation);
+    operation.then(remove, remove);
+    return operation;
   }
 
   #notify(event) {
-    for (const listener of [...this.#listeners]) {
-      try {
-        Promise.resolve(listener(event)).catch(() => undefined);
-      } catch {
-        // Persistence and other listeners must survive a subscriber failure.
+    const group = rootListenerGroups.get(this.#listenerKey);
+    for (const listeners of group === undefined ? [] : [...group]) {
+      for (const listener of [...listeners]) {
+        try {
+          Promise.resolve(listener(event)).catch(() => undefined);
+        } catch {
+          // Persistence and other listeners must survive a subscriber failure.
+        }
       }
     }
   }
 
   onEvent(listener) {
+    if (this.#closed) {
+      throw jobError(
+        "JOB_STORE_CLOSED",
+        "The job store is closed.",
+        "closed_store",
+      );
+    }
     if (typeof listener !== "function") {
       throw jobError(
         "INVALID_EVENT_LISTENER",
@@ -575,59 +1057,115 @@ export class JobStore {
       );
     }
     this.#listeners.add(listener);
+    this.#attachListenerGroup();
     let closed = false;
     return () => {
       if (!closed) {
         closed = true;
         this.#listeners.delete(listener);
+        if (this.#listeners.size === 0) {
+          this.#detachListenerGroup();
+        }
       }
     };
   }
 
   async create(request) {
-    await this.#ensureRoot();
     const safeRequest = clonePublicData(request);
     const jobId = assertJobId(this.#randomId());
-    const paths = this.#paths(jobId);
-    try {
-      await mkdir(paths.directory, { recursive: false });
-    } catch (error) {
-      if (error?.code === "EEXIST") {
+    return this.#serialize(jobId, async () => {
+      await this.#ensureRoot();
+      const finalPaths = this.#paths(jobId);
+      try {
+        await lstat(finalPaths.directory);
         throw jobError(
           "JOB_ID_COLLISION",
           "The generated job identifier already exists.",
           "identifier_collision",
           true,
         );
+      } catch (error) {
+        if (error instanceof StudioError) {
+          throw error;
+        }
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
       }
-      throw error;
-    }
-    const timestamp = safeTimestamp(this.#now());
-    const event = Object.freeze({
-      jobId,
-      sequence: 1,
-      timestamp,
-      event: "JOB_CREATED",
-      state: "created",
-      data: Object.freeze({}),
-    });
-    const snapshot = Object.freeze({
-      id: jobId,
-      state: "created",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      eventSequence: 1,
-    });
-    try {
-      await writeJsonAtomically(paths.request, safeRequest);
-      await durableAppend(paths.events, `${JSON.stringify(event)}\n`);
+
+      const stagingDirectory = ensureContained(
+        this.#root,
+        join(this.#root, `.create-${jobId}-${randomUUID()}`),
+      );
+      const stagingPaths = Object.freeze({
+        directory: stagingDirectory,
+        request: ensureContained(
+          this.#root,
+          join(stagingDirectory, "request.json"),
+        ),
+        snapshot: ensureContained(
+          this.#root,
+          join(stagingDirectory, "job.json"),
+        ),
+        events: ensureContained(
+          this.#root,
+          join(stagingDirectory, "events.jsonl"),
+        ),
+      });
+      await mkdir(stagingDirectory, { recursive: false });
+      const timestamp = safeTimestamp(this.#now());
+      const event = Object.freeze({
+        jobId,
+        sequence: 1,
+        timestamp,
+        event: "JOB_CREATED",
+        state: "created",
+        data: Object.freeze({}),
+      });
+      const snapshot = Object.freeze({
+        id: jobId,
+        state: "created",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        eventSequence: 1,
+      });
+      let committed = false;
+      try {
+        await writeJsonAtomically(stagingPaths.request, safeRequest);
+        await durableAppend(
+          stagingPaths.events,
+          `${JSON.stringify(event)}\n`,
+        );
+        await writeJsonAtomically(stagingPaths.snapshot, snapshot);
+        await syncDirectory(stagingPaths.directory);
+        try {
+          await rename(stagingPaths.directory, finalPaths.directory);
+        } catch (error) {
+          if (
+            error?.code === "EEXIST" ||
+            error?.code === "ENOTEMPTY" ||
+            error?.code === "EPERM"
+          ) {
+            throw jobError(
+              "JOB_ID_COLLISION",
+              "The generated job identifier already exists.",
+              "identifier_collision",
+              true,
+            );
+          }
+          throw error;
+        }
+        committed = true;
+        await syncDirectory(this.#root);
+      } catch (error) {
+        if (!committed) {
+          await removeCreateStaging(this.#root, stagingPaths.directory);
+        }
+        throw error;
+      }
       this.#notify(event);
-      await writeJsonAtomically(paths.snapshot, snapshot);
-    } catch (error) {
-      await rm(paths.directory, { force: true, recursive: true });
-      throw error;
-    }
-    return freezeSnapshot(snapshot, safeRequest);
+      return freezeSnapshot(snapshot, safeRequest);
+    });
   }
 
   async #loadInternal(jobId) {
@@ -639,9 +1177,9 @@ export class JobStore {
     const snapshotExists = await this.#assertSafeEntry(paths.snapshot, {
       required: false,
     });
-    const [requestText, eventText] = await Promise.all([
+    const [requestText, eventBytes] = await Promise.all([
       readFile(paths.request, "utf8"),
-      readFile(paths.events, "utf8"),
+      readFile(paths.events),
     ]);
     let safeRequest;
     try {
@@ -656,7 +1194,15 @@ export class JobStore {
         "request_contract_invalid",
       );
     }
-    const events = parseEvents(eventText, jobId);
+    const parsedEvents = parseEvents(eventBytes, jobId);
+    if (parsedEvents.committedEnd < parsedEvents.originalLength) {
+      await truncateUncommittedTail(
+        paths.events,
+        parsedEvents.committedEnd,
+        parsedEvents.originalLength,
+      );
+    }
+    const { events } = parsedEvents;
     const recovered = snapshotFromEvents(jobId, events);
     let persistedSnapshot;
     if (snapshotExists) {
@@ -728,12 +1274,16 @@ export class JobStore {
       const paths = this.#paths(validId);
       await durableAppend(paths.events, `${JSON.stringify(event)}\n`);
       this.#notify(event);
-      await writeJsonAtomically(paths.snapshot, snapshot);
+      try {
+        await writeJsonAtomically(paths.snapshot, snapshot);
+      } catch {
+        // The durable event is the commit record; job.json is a repairable cache.
+      }
       return freezeSnapshot(snapshot, current.request);
     });
   }
 
-  async list() {
+  async #listInternal() {
     await this.#ensureRoot();
     const entries = await readdir(this.#root, { withFileTypes: true });
     const jobs = [];
@@ -746,7 +1296,39 @@ export class JobStore {
       } catch {
         continue;
       }
-      jobs.push(await this.load(entry.name));
+      try {
+        jobs.push(await this.load(entry.name));
+      } catch (error) {
+        if (
+          !(error instanceof StudioError) ||
+          !["CORRUPT_JOB_DATA", "JOB_NOT_FOUND", "UNSAFE_JOB_PATH"].includes(
+            error.code,
+          )
+        ) {
+          throw error;
+        }
+        await this.#serialize(entry.name, async () => {
+          const source = this.#paths(entry.name).directory;
+          let sourceStat;
+          try {
+            sourceStat = await lstat(source);
+          } catch (sourceError) {
+            if (sourceError?.code === "ENOENT") {
+              return;
+            }
+            throw sourceError;
+          }
+          if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
+            return;
+          }
+          const quarantine = ensureContained(
+            this.#root,
+            join(this.#root, `.corrupt-${entry.name}-${randomUUID()}`),
+          );
+          await rename(source, quarantine);
+          await syncDirectory(this.#root);
+        });
+      }
     }
     jobs.sort((left, right) => {
       const newest = right.createdAt.localeCompare(left.createdAt);
@@ -756,5 +1338,35 @@ export class JobStore {
       return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
     });
     return Object.freeze(jobs);
+  }
+
+  list() {
+    return this.#track(this.#listInternal());
+  }
+
+  close() {
+    if (this.#closePromise !== undefined) {
+      return this.#closePromise;
+    }
+    this.#closed = true;
+    this.#detachListenerGroup();
+    this.#listeners.clear();
+    const pending = [...this.#inFlight];
+    this.#closePromise = (async () => {
+      await Promise.allSettled(pending);
+      let ownership = this.#ownership;
+      if (ownership === undefined && this.#ownershipPromise !== undefined) {
+        try {
+          ownership = await this.#ownershipPromise;
+        } catch {
+          return;
+        }
+      }
+      if (ownership !== undefined) {
+        await releaseRootLease(ownership);
+        this.#ownership = undefined;
+      }
+    })();
+    return this.#closePromise;
   }
 }

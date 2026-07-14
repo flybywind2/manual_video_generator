@@ -9,10 +9,21 @@ function invalidSubscription(reason) {
   });
 }
 
+function validEvent(event, jobId, afterSequence) {
+  return (
+    event !== null &&
+    typeof event === "object" &&
+    event.jobId === jobId &&
+    Number.isSafeInteger(event.sequence) &&
+    event.sequence > afterSequence
+  );
+}
+
 export class EventBus {
   #store;
+  #maxPending;
 
-  constructor({ store } = {}) {
+  constructor({ store, maxPending = 100 } = {}) {
     if (
       store === null ||
       typeof store !== "object" ||
@@ -21,7 +32,15 @@ export class EventBus {
     ) {
       invalidSubscription("event_store_required");
     }
+    if (
+      !Number.isSafeInteger(maxPending) ||
+      maxPending < 1 ||
+      maxPending > 10_000
+    ) {
+      invalidSubscription("max_pending_invalid");
+    }
     this.#store = store;
+    this.#maxPending = maxPending;
   }
 
   subscribe(jobId, afterSequence = 0, listener) {
@@ -35,80 +54,173 @@ export class EventBus {
       invalidSubscription("listener_required");
     }
 
-    let closed = false;
+    let isClosed = false;
+    let closeReason;
     let replaying = true;
-    let lastSequence = afterSequence;
+    let active = false;
+    let acceptedSequence = afterSequence;
+    let lastDeliveredSequence = afterSequence;
+    let unsubscribe;
+    let closedResolved = false;
     const buffered = new Map();
+    const queue = [];
+    const idleWaiters = new Set();
+    let resolveClosed;
+    const closed = new Promise((resolve) => {
+      resolveClosed = resolve;
+    });
 
-    const deliver = (event) => {
-      if (
-        closed ||
-        event === null ||
-        typeof event !== "object" ||
-        event.jobId !== jobId ||
-        !Number.isSafeInteger(event.sequence) ||
-        event.sequence <= lastSequence
-      ) {
+    const finishIdle = () => {
+      if (active || queue.length > 0) {
         return;
       }
-      lastSequence = event.sequence;
-      try {
-        Promise.resolve(listener(event)).catch(() => undefined);
-      } catch {
-        // A subscriber is never allowed to break persistence or its peers.
+      for (const resolve of idleWaiters) {
+        resolve();
       }
+      idleWaiters.clear();
+      if (isClosed && !closedResolved) {
+        closedResolved = true;
+        resolveClosed(
+          Object.freeze({
+            reason: closeReason,
+            lastDeliveredSequence,
+          }),
+        );
+      }
+    };
+
+    const idle = () => {
+      if (!active && queue.length === 0) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => idleWaiters.add(resolve));
+    };
+
+    const closeInternal = (reason) => {
+      if (isClosed) {
+        return;
+      }
+      isClosed = true;
+      closeReason = reason;
+      buffered.clear();
+      for (const item of queue.splice(0)) {
+        item.resolve(false);
+      }
+      unsubscribe?.();
+      finishIdle();
+    };
+
+    const pump = () => {
+      if (active || isClosed) {
+        finishIdle();
+        return;
+      }
+      const item = queue.shift();
+      if (item === undefined) {
+        finishIdle();
+        return;
+      }
+      active = true;
+      let effect;
+      try {
+        effect = listener(item.event);
+      } catch {
+        effect = undefined;
+      }
+      Promise.resolve(effect)
+        .catch(() => undefined)
+        .then(() => {
+          lastDeliveredSequence = item.event.sequence;
+          active = false;
+          item.resolve(true);
+          if (isClosed) {
+            finishIdle();
+          } else {
+            pump();
+          }
+        });
+    };
+
+    const enqueue = (event) => {
+      if (
+        isClosed ||
+        !validEvent(event, jobId, acceptedSequence)
+      ) {
+        return Promise.resolve(false);
+      }
+      if ((active ? 1 : 0) + queue.length >= this.#maxPending) {
+        closeInternal("backpressure");
+        return Promise.resolve(false);
+      }
+      acceptedSequence = event.sequence;
+      const completion = new Promise((resolve) => {
+        queue.push({ event, resolve });
+      });
+      pump();
+      return completion;
     };
 
     const onLiveEvent = (event) => {
       if (
-        closed ||
-        event === null ||
-        typeof event !== "object" ||
-        event.jobId !== jobId ||
-        !Number.isSafeInteger(event.sequence) ||
-        event.sequence <= lastSequence
+        isClosed ||
+        !validEvent(event, jobId, acceptedSequence) ||
+        buffered.has(event.sequence)
       ) {
         return;
       }
       if (replaying) {
+        if (
+          buffered.size + (active ? 1 : 0) + queue.length >=
+          this.#maxPending
+        ) {
+          closeInternal("backpressure");
+          return;
+        }
         buffered.set(event.sequence, event);
       } else {
-        deliver(event);
+        void enqueue(event);
       }
     };
 
-    const unsubscribe = this.#store.onEvent(onLiveEvent);
-    const close = () => {
-      if (!closed) {
-        closed = true;
-        buffered.clear();
-        unsubscribe();
-      }
-    };
+    unsubscribe = this.#store.onEvent(onLiveEvent);
     const ready = (async () => {
       try {
         const persisted = await this.#store.readEvents(jobId, afterSequence);
-        if (closed) {
-          return;
-        }
         for (const event of [...persisted].sort(
           (left, right) => left.sequence - right.sequence,
         )) {
-          deliver(event);
+          if (isClosed) {
+            return;
+          }
+          await enqueue(event);
         }
+        if (isClosed) {
+          return;
+        }
+        const bufferedDeliveries = [];
         for (const event of [...buffered.values()].sort(
           (left, right) => left.sequence - right.sequence,
         )) {
-          deliver(event);
+          if (event.sequence > acceptedSequence) {
+            bufferedDeliveries.push(enqueue(event));
+          }
         }
         buffered.clear();
         replaying = false;
+        await Promise.all(bufferedDeliveries);
+        await idle();
       } catch (error) {
-        close();
+        closeInternal("source_error");
+        await idle();
         throw error;
       }
     })();
 
-    return Object.freeze({ ready, close });
+    return Object.freeze({
+      ready,
+      closed,
+      idle,
+      close: () => closeInternal("client"),
+    });
   }
 }

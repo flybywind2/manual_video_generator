@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, readdirSync, watch, writeFileSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -7,6 +9,7 @@ import {
   readdir,
   rm,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +46,44 @@ function deferred() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function waitForOutput(child, expected, timeoutMs = 5_000) {
+  child.stdout.setEncoding("utf8");
+  let output = "";
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for child output: ${output}`));
+    }, timeoutMs);
+    const onData = (chunk) => {
+      output += chunk;
+      if (output.includes(expected)) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onExit = (code) => {
+      cleanup();
+      reject(new Error(`Child exited with ${code}: ${output}`));
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.stdout.off("data", onData);
+      child.off("exit", onExit);
+    };
+    child.stdout.on("data", onData);
+    child.on("exit", onExit);
+  });
+}
+
+async function terminateChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill();
+  await exited;
 }
 
 function request(overrides = {}) {
@@ -334,6 +375,457 @@ test("restart replays a durable event newer than job.json and repairs the snapsh
   );
 });
 
+test("load truncates only an unterminated trailing event by its byte offset", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([CREATED_AT, "2026-07-14T01:02:04.000Z"]),
+    randomId: () => "job-partial-tail",
+  });
+  await store.create(request());
+  const eventsPath = join(root, "job-partial-tail", "events.jsonl");
+  const committedPrefix = await readFile(eventsPath);
+  const multibytePartial = Buffer.from('{"sequence":2,"note":"한');
+  await appendFile(
+    eventsPath,
+    multibytePartial.subarray(0, multibytePartial.length - 1),
+  );
+
+  const recovered = await store.load("job-partial-tail");
+  assert.equal(recovered.state, "created");
+  assert.equal(recovered.eventSequence, 1);
+  assert.deepEqual(await readFile(eventsPath), committedPrefix);
+
+  const transitioned = await store.transition(
+    "job-partial-tail",
+    "START_AUTHENTICATION",
+    {},
+  );
+  assert.equal(transitioned.eventSequence, 2);
+  assert.deepEqual(
+    (await store.readEvents("job-partial-tail", 0)).map(({ sequence }) => sequence),
+    [1, 2],
+  );
+});
+
+test("load rejects a complete newline-terminated malformed event", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: () => CREATED_AT,
+    randomId: () => "job-complete-forgery",
+  });
+  await store.create(request());
+  await appendFile(
+    join(root, "job-complete-forgery", "events.jsonl"),
+    `${JSON.stringify({ forged: true })}\n`,
+    "utf8",
+  );
+
+  await assert.rejects(store.load("job-complete-forgery"), {
+    code: "CORRUPT_JOB_DATA",
+  });
+});
+
+test("a durable transition remains committed when snapshot replacement fails", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([CREATED_AT, "2026-07-14T01:02:04.000Z"]),
+    randomId: () => "job-committed-append",
+  });
+  await store.create(request());
+  const snapshotPath = join(root, "job-committed-append", "job.json");
+  const heldReader = await open(snapshotPath, "r");
+  let committed;
+  try {
+    committed = await store.transition(
+      "job-committed-append",
+      "START_AUTHENTICATION",
+      {},
+    );
+  } finally {
+    await heldReader.close();
+  }
+  assert.equal(committed.state, "authenticating");
+  assert.equal(committed.eventSequence, 2);
+
+  const restarted = new JobStore({ root });
+  const recovered = await restarted.load("job-committed-append");
+  assert.equal(recovered.state, "authenticating");
+  assert.equal(recovered.eventSequence, 2);
+  assert.deepEqual(
+    (await restarted.readEvents("job-committed-append", 0)).map(
+      ({ sequence }) => sequence,
+    ),
+    [1, 2],
+  );
+});
+
+test("close keeps root ownership until an in-flight transition settles", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([CREATED_AT, "2026-07-14T01:02:04.000Z"]),
+    randomId: () => "job-close-in-flight",
+  });
+  await store.create(request());
+  const snapshotPath = join(root, "job-close-in-flight", "job.json");
+  const heldReader = await open(snapshotPath, "r");
+  const appendCommitted = deferred();
+  store.onEvent((event) => {
+    if (event.event === "START_AUTHENTICATION") {
+      appendCommitted.resolve();
+    }
+  });
+  const transitionPromise = store.transition(
+    "job-close-in-flight",
+    "START_AUTHENTICATION",
+    {},
+  );
+  await appendCommitted.promise;
+  let closeSettled = false;
+  const closePromise = store.close().then(() => {
+    closeSettled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(closeSettled, false);
+  assert.equal(existsSync(join(root, ".studio-owner.lock")), true);
+  await heldReader.close();
+  await transitionPromise;
+  await closePromise;
+  assert.equal(existsSync(join(root, ".studio-owner.lock")), false);
+});
+
+test("two stores sharing one root serialize transitions by canonical job path", async (t) => {
+  const root = await temporaryRoot(t);
+  const first = new JobStore({
+    root,
+    now: sequential([CREATED_AT, "2026-07-14T01:02:04.000Z"]),
+    randomId: () => "job-shared-chain",
+  });
+  const second = new JobStore({
+    root,
+    now: () => "2026-07-14T01:02:05.000Z",
+  });
+  await first.create(request());
+
+  const [authenticated, awaitingLogin] = await Promise.all([
+    first.transition("job-shared-chain", "START_AUTHENTICATION", {}),
+    second.transition("job-shared-chain", "AUTH_REQUIRED", {}),
+  ]);
+
+  assert.equal(authenticated.state, "authenticating");
+  assert.equal(authenticated.eventSequence, 2);
+  assert.equal(awaitingLogin.state, "awaiting_manual_login");
+  assert.equal(awaitingLogin.eventSequence, 3);
+  assert.deepEqual(
+    (await first.readEvents("job-shared-chain", 0)).map(
+      ({ sequence, event }) => [sequence, event],
+    ),
+    [
+      [1, "JOB_CREATED"],
+      [2, "START_AUTHENTICATION"],
+      [3, "AUTH_REQUIRED"],
+    ],
+  );
+  await second.close();
+  await first.close();
+});
+
+test("a live foreign process owns the jobs root exclusively", async (t) => {
+  const root = await temporaryRoot(t);
+  const moduleUrl = new URL("../../src/jobs/job-store.js", import.meta.url).href;
+  const script = `
+    import { JobStore } from ${JSON.stringify(moduleUrl)};
+    const store = new JobStore({ root: ${JSON.stringify(root)} });
+    await store.list();
+    process.stdout.write("READY\\n");
+    process.on("SIGTERM", async () => {
+      await store.close?.();
+      process.exit(0);
+    });
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  t.after(() => terminateChild(child));
+  await waitForOutput(child, "READY\n");
+
+  const foreign = new JobStore({ root });
+  await assert.rejects(foreign.list(), {
+    code: "JOBS_ROOT_LOCKED",
+    retryable: true,
+  });
+  await terminateChild(child);
+});
+
+test("a demonstrably stale root owner is replaced and released explicitly", async (t) => {
+  const root = await temporaryRoot(t);
+  const lockPath = join(root, ".studio-owner.lock");
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: 2_147_483_647,
+      token: "stale-owner-token",
+      createdAt: CREATED_AT,
+    }),
+    "utf8",
+  );
+  const store = new JobStore({ root });
+
+  await store.list();
+  const owner = JSON.parse(await readFile(lockPath, "utf8"));
+  assert.equal(owner.pid, process.pid);
+  assert.notEqual(owner.token, "stale-owner-token");
+  await store.close();
+  await assert.rejects(readFile(lockPath), { code: "ENOENT" });
+});
+
+test("stale recovery never deletes an owner that replaced the inspected lease", async (t) => {
+  const root = await temporaryRoot(t);
+  const lockPath = join(root, ".studio-owner.lock");
+  const stalePid = 2_147_483_647;
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: stalePid,
+      token: "stale-race-token",
+      createdAt: CREATED_AT,
+    }),
+    "utf8",
+  );
+  const foreignOwner = {
+    pid: process.pid,
+    token: "foreign-race-token",
+    createdAt: CREATED_AT,
+  };
+  const originalKill = process.kill;
+  process.kill = (pid, signal) => {
+    if (pid === stalePid) {
+      writeFileSync(lockPath, JSON.stringify(foreignOwner), "utf8");
+      const missing = new Error("stale pid");
+      missing.code = "ESRCH";
+      throw missing;
+    }
+    return originalKill.call(process, pid, signal);
+  };
+  try {
+    const store = new JobStore({ root });
+    await assert.rejects(store.list(), { code: "JOBS_ROOT_LOCKED" });
+  } finally {
+    process.kill = originalKill;
+  }
+  assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), foreignOwner);
+});
+
+test("root ownership never follows a lock symlink", async (t) => {
+  const root = await temporaryRoot(t);
+  const jobsRoot = join(root, "jobs");
+  const outside = join(root, "outside-owner");
+  await mkdir(jobsRoot, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "marker.txt"), "unchanged", "utf8");
+  await symlink(outside, join(jobsRoot, ".studio-owner.lock"), "junction");
+  const store = new JobStore({ root: jobsRoot });
+
+  await assert.rejects(store.list(), { code: "UNSAFE_JOB_PATH" });
+  assert.equal(await readFile(join(outside, "marker.txt"), "utf8"), "unchanged");
+});
+
+test("operations and close fail closed without deleting a replaced active lease", async (t) => {
+  const root = await temporaryRoot(t);
+  const first = new JobStore({ root });
+  const second = new JobStore({ root });
+  await first.list();
+  await second.list();
+  const lockPath = join(root, ".studio-owner.lock");
+  const foreignOwner = {
+    pid: process.pid,
+    token: "foreign-live-token",
+    createdAt: CREATED_AT,
+  };
+  await writeFile(lockPath, JSON.stringify(foreignOwner), "utf8");
+
+  let operationError;
+  try {
+    await second.list();
+  } catch (error) {
+    operationError = error;
+  }
+  let closeError;
+  try {
+    await first.close();
+  } catch (error) {
+    closeError = error;
+  }
+  assert.equal(operationError?.code, "ROOT_LOCK_OWNERSHIP_LOST");
+  assert.equal(closeError?.code, "ROOT_LOCK_OWNERSHIP_LOST");
+  assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), foreignOwner);
+});
+
+test("close cannot delete a new owner installed during lease release", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({ root });
+  await store.list();
+  const lockPath = join(root, ".studio-owner.lock");
+  const foreignOwner = {
+    pid: process.pid,
+    token: "replacement-release-token",
+    createdAt: CREATED_AT,
+  };
+  const replacementInstalled = deferred();
+  const watcher = watch(root, (_eventType, filename) => {
+    if (!String(filename).startsWith(".studio-owner.release.")) {
+      return;
+    }
+    try {
+      writeFileSync(lockPath, JSON.stringify(foreignOwner), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      replacementInstalled.resolve();
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        replacementInstalled.reject(error);
+      }
+    }
+  });
+  t.after(() => watcher.close());
+  const timeout = setTimeout(
+    () => replacementInstalled.reject(new Error("release handoff was not observable")),
+    2_000,
+  );
+
+  const closePromise = store.close();
+  try {
+    await replacementInstalled.promise;
+  } finally {
+    clearTimeout(timeout);
+  }
+  await closePromise;
+  assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), foreignOwner);
+});
+
+test("create publishes JOB_CREATED only after an atomic complete directory commit", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: () => CREATED_AT,
+    randomId: () => "job-publish-complete",
+  });
+  let publication;
+  const unsubscribe = store.onEvent((event) => {
+    if (event.event !== "JOB_CREATED") {
+      return;
+    }
+    const jobRoot = join(root, event.jobId);
+    publication = {
+      request: existsSync(join(jobRoot, "request.json")),
+      snapshot: existsSync(join(jobRoot, "job.json")),
+      events: existsSync(join(jobRoot, "events.jsonl")),
+      staging: readdirSync(root).some((name) => name.startsWith(".create-")),
+    };
+  });
+
+  await store.create(request());
+  unsubscribe();
+  assert.deepEqual(publication, {
+    request: true,
+    snapshot: true,
+    events: true,
+    staging: false,
+  });
+});
+
+test("list quarantines an incomplete visible job and ignores orphan create staging", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: () => CREATED_AT,
+    randomId: () => "job-intact",
+  });
+  await store.create(request());
+  await mkdir(join(root, "job-incomplete"));
+  await writeFile(
+    join(root, "job-incomplete", "request.json"),
+    JSON.stringify(request()),
+    "utf8",
+  );
+  const orphanStaging = join(root, ".create-job-orphan-deadbeef");
+  await mkdir(orphanStaging);
+  await writeFile(join(orphanStaging, "request.json"), "partial", "utf8");
+
+  assert.deepEqual(
+    (await store.list()).map(({ id }) => id),
+    ["job-intact"],
+  );
+  const names = await readdir(root);
+  assert.equal(names.includes("job-incomplete"), false);
+  assert.equal(
+    names.some((name) => name.startsWith(".corrupt-job-incomplete-")),
+    true,
+  );
+  assert.equal(names.includes(".create-job-orphan-deadbeef"), true);
+});
+
+test("secret-derived key variants are rejected before persistent files exist", async (t) => {
+  const parent = await temporaryRoot(t);
+  const sensitiveKeys = [
+    "apiKey",
+    "privateKey",
+    "accessKey",
+    "secretKey",
+    "passwordHash",
+    "passwordDerivedKey",
+    "tokenValue",
+    "passwordValue",
+    "authorizationHeader",
+    "cookieHeader",
+    "passwordHybrid",
+    "secretFluid",
+    "tokenValid",
+  ];
+
+  for (const [index, key] of sensitiveKeys.entries()) {
+    await t.test(key, async () => {
+      const root = join(parent, `case-${index}`);
+      const store = new JobStore({
+        root,
+        randomId: () => `job-sensitive-${index}`,
+      });
+      await assert.rejects(
+        store.create(request({ nested: { [key]: "plaintext-value" } })),
+        { code: "SENSITIVE_PUBLIC_DATA" },
+      );
+      await assert.rejects(readdir(root), { code: "ENOENT" });
+    });
+  }
+});
+
+test("opaque credential references and password selectors remain public-safe", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: () => CREATED_AT,
+    randomId: () => "job-safe-references",
+  });
+  const safeRequest = request({
+    credentialId: "vault-entry-7",
+    nested: {
+      credentialRef: "login-profile",
+      vaultId: "local-vault",
+      passwordSelector: "#password",
+    },
+  });
+
+  const created = await store.create(safeRequest);
+  assert.deepEqual(created.request, safeRequest);
+});
+
 test("list sorts newest first with an ID tie-break and ignores symlinks", async (t) => {
   const root = await temporaryRoot(t);
   const ids = ["job-old", "job-z", "job-a"];
@@ -528,4 +1020,186 @@ test("subscriber failure cannot break persistence or another subscriber", async 
   );
   bad.close();
   good.close();
+});
+
+test("EventBus awaits replay callbacks and completes every effect in sequence", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([
+      CREATED_AT,
+      "2026-07-14T01:02:04.000Z",
+      "2026-07-14T01:02:05.000Z",
+      "2026-07-14T01:02:06.000Z",
+    ]),
+    randomId: () => "job-async-order",
+  });
+  await store.create(request());
+  await store.transition("job-async-order", "START_AUTHENTICATION", {});
+  const replayStarted = deferred();
+  const releaseReplay = deferred();
+  const liveStarted = deferred();
+  const releaseLive = deferred();
+  const effects = [];
+  const bus = new EventBus({ store });
+  const subscription = bus.subscribe("job-async-order", 0, async ({ sequence }) => {
+    if (sequence === 1) {
+      replayStarted.resolve();
+      await releaseReplay.promise;
+    }
+    if (sequence === 3) {
+      liveStarted.resolve();
+      await releaseLive.promise;
+    }
+    effects.push(sequence);
+  });
+  let readySettled = false;
+  subscription.ready.then(() => {
+    readySettled = true;
+  });
+
+  await replayStarted.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(readySettled, false);
+  assert.deepEqual(effects, []);
+  releaseReplay.resolve();
+  await subscription.ready;
+  assert.deepEqual(effects, [1, 2]);
+
+  await store.transition("job-async-order", "AUTH_REQUIRED", {});
+  await liveStarted.promise;
+  await store.transition("job-async-order", "CONFIRM_LOGIN", {});
+  assert.deepEqual(effects, [1, 2]);
+  releaseLive.resolve();
+  await subscription.idle();
+  assert.deepEqual(effects, [1, 2, 3, 4]);
+  subscription.close();
+  await subscription.closed;
+});
+
+test("EventBus observes sibling-store commits that occur during replay", async (t) => {
+  const root = await temporaryRoot(t);
+  const first = new JobStore({
+    root,
+    now: () => CREATED_AT,
+    randomId: () => "job-sibling-events",
+  });
+  const second = new JobStore({
+    root,
+    now: () => "2026-07-14T01:02:04.000Z",
+  });
+  await first.create(request());
+  const replayStarted = deferred();
+  const releaseReplay = deferred();
+  const effects = [];
+  const subscription = new EventBus({ store: first }).subscribe(
+    "job-sibling-events",
+    0,
+    async ({ sequence }) => {
+      if (sequence === 1) {
+        replayStarted.resolve();
+        await releaseReplay.promise;
+      }
+      effects.push(sequence);
+    },
+  );
+
+  await replayStarted.promise;
+  await second.transition("job-sibling-events", "START_AUTHENTICATION", {});
+  releaseReplay.resolve();
+  await subscription.ready;
+  await subscription.idle();
+
+  assert.deepEqual(effects, [1, 2]);
+  subscription.close();
+  await subscription.closed;
+  await second.close();
+  await first.close();
+});
+
+test("EventBus unsubscribe skips queued callbacks that have not started", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([
+      CREATED_AT,
+      "2026-07-14T01:02:04.000Z",
+      "2026-07-14T01:02:05.000Z",
+    ]),
+    randomId: () => "job-unsubscribe-queue",
+  });
+  await store.create(request());
+  const activeStarted = deferred();
+  const releaseActive = deferred();
+  const effects = [];
+  const subscription = new EventBus({ store }).subscribe(
+    "job-unsubscribe-queue",
+    1,
+    async ({ sequence }) => {
+      if (sequence === 2) {
+        activeStarted.resolve();
+        await releaseActive.promise;
+      }
+      effects.push(sequence);
+    },
+  );
+  await subscription.ready;
+  await store.transition("job-unsubscribe-queue", "START_AUTHENTICATION", {});
+  await activeStarted.promise;
+  await store.transition("job-unsubscribe-queue", "AUTH_REQUIRED", {});
+
+  subscription.close();
+  releaseActive.resolve();
+  const closed = await subscription.closed;
+  assert.deepEqual(effects, [2]);
+  assert.deepEqual(closed, {
+    reason: "client",
+    lastDeliveredSequence: 2,
+  });
+});
+
+test("EventBus closes on bounded backpressure so persisted events can replay", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    now: sequential([
+      CREATED_AT,
+      "2026-07-14T01:02:04.000Z",
+      "2026-07-14T01:02:05.000Z",
+      "2026-07-14T01:02:06.000Z",
+    ]),
+    randomId: () => "job-backpressure",
+  });
+  await store.create(request());
+  const activeStarted = deferred();
+  const releaseActive = deferred();
+  const effects = [];
+  const subscription = new EventBus({ store, maxPending: 2 }).subscribe(
+    "job-backpressure",
+    1,
+    async ({ sequence }) => {
+      if (sequence === 2) {
+        activeStarted.resolve();
+        await releaseActive.promise;
+      }
+      effects.push(sequence);
+    },
+  );
+  await subscription.ready;
+  await store.transition("job-backpressure", "START_AUTHENTICATION", {});
+  await activeStarted.promise;
+  await store.transition("job-backpressure", "AUTH_REQUIRED", {});
+  await store.transition("job-backpressure", "CONFIRM_LOGIN", {});
+  assert.deepEqual(effects, []);
+
+  releaseActive.resolve();
+  assert.deepEqual(await subscription.closed, {
+    reason: "backpressure",
+    lastDeliveredSequence: 2,
+  });
+  assert.deepEqual(effects, [2]);
+  assert.deepEqual(
+    (await store.readEvents("job-backpressure", 2)).map(({ sequence }) => sequence),
+    [3, 4],
+  );
 });
