@@ -145,6 +145,9 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(planner.body, /target origin/iu);
   assert.match(planner.body, /omit the `filename` argument/iu);
   assert.match(planner.body, /never navigate by URL or browser history/iu);
+  assert.match(planner.body, /schemaVersion.*1\.1/isu);
+  assert.match(planner.body, /exact ordered `calls`/iu);
+  assert.match(planner.body, /browser_(?:click|fill_form|press_key|type|wait_for)/iu);
 
   const executor = parseFrontMatter(await readFile(executorPath, "utf8"));
   assert.match(executor.body, /approved plan digest/iu);
@@ -154,6 +157,9 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(executor.body, /one JSON execution report/iu);
   assert.match(executor.body, /omit the `filename` argument/iu);
   assert.match(executor.body, /never navigate by URL or browser history/iu);
+  assert.match(executor.body, /schemaVersion.*1\.0/isu);
+  assert.match(executor.body, /exact supplied call queue/iu);
+  assert.match(executor.body, /toolCalls.*steps/isu);
 });
 
 async function selectedOpenCode() {
