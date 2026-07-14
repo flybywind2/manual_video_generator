@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import { createRedactor } from "../../src/security/redactor.js";
@@ -70,6 +71,55 @@ test("chooses the longest cross-secret representation regardless of order", () =
     const redactor = createRedactor({ secrets, sensitiveKeys: [] });
     assert.equal(redactor.text("%61|%61"), `${REDACTED}|${REDACTED}`);
   }
+});
+
+test("fails closed before allowed common-prefix patterns can block the event loop", () => {
+  const prefix = "a".repeat(500);
+  const suffixes = Array.from(
+    { length: 128 },
+    (_, index) => String.fromCodePoint(0x100 + index),
+  );
+  const redactor = createRedactor({
+    secrets: suffixes.map((suffix) => prefix + suffix),
+    sensitiveKeys: [],
+  });
+  const started = performance.now();
+
+  const nonmatch = redactor.text("a".repeat(5_000));
+  const match = redactor.text("a".repeat(5_000) + suffixes[0]);
+  const elapsedMs = performance.now() - started;
+
+  assert.equal(nonmatch, REDACTED);
+  assert.equal(match, REDACTED);
+  assert.equal(
+    elapsedMs < 2_000,
+    true,
+    `redaction exceeded the bounded runtime: ${Math.round(elapsedMs)}ms`,
+  );
+});
+
+test("fails closed for oversized matcher work while preserving normal precision", () => {
+  const longPrefix = "b".repeat(4_095);
+  const largeMatcher = createRedactor({
+    secrets: [`${longPrefix}x`, `${longPrefix}y`],
+    sensitiveKeys: [],
+  });
+  assert.equal(largeMatcher.text("b".repeat(5_000)), REDACTED);
+
+  const boundedInput = createRedactor({
+    secrets: ["needle"],
+    sensitiveKeys: [],
+  });
+  assert.equal(boundedInput.text("x".repeat(125_001)), REDACTED);
+
+  const normal = createRedactor({
+    secrets: ["name/ box?value", "short"],
+    sensitiveKeys: [],
+  });
+  assert.equal(
+    normal.text("prefix n%61me%2f+box%3fvalue suffix"),
+    `prefix ${REDACTED} suffix`,
+  );
 });
 
 test("rejects unpaired Unicode secrets and redacts valid emoji encodings", () => {

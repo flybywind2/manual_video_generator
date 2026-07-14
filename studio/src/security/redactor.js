@@ -8,6 +8,8 @@ const MAX_NODES = 10_000;
 const MAX_CONFIGURATION_ITEMS = 128;
 const MAX_CONFIGURATION_ITEM_LENGTH = 4_096;
 const MAX_CONFIGURATION_TEXT = 65_536;
+const MAX_REDACTION_WORK = 8_000_000;
+const MIN_REDACTION_WORK_WEIGHT = 64;
 
 function invalidConfiguration() {
   throw new TypeError(INVALID_CONFIGURATION);
@@ -157,15 +159,26 @@ function createSecretPattern(secrets) {
   if (sources.length === 0) {
     return null;
   }
+  const workWeight = Math.max(
+    MIN_REDACTION_WORK_WEIGHT,
+    entries.reduce(
+      (total, entry) => total + entry.literalLength + 1,
+      0,
+    ),
+  );
   return Object.freeze({
     candidates: Object.freeze(
       sources.map((source) => new RegExp(source, "uy")),
     ),
     search: new RegExp(sources.join("|"), "gu"),
+    workWeight,
   });
 }
 
 function replaceSecrets(input, matcher) {
+  if (input.length > Math.floor(MAX_REDACTION_WORK / matcher.workWeight)) {
+    return REDACTED;
+  }
   let output = "";
   let copiedThrough = 0;
   let replaced = false;
