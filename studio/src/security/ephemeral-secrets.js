@@ -182,6 +182,22 @@ function pathPrefixes(path) {
   return prefixes;
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function verifyRoot(runtimeRoot, { create }) {
   const root = validateRoot(runtimeRoot);
   const prefixes = pathPrefixes(root);
@@ -290,6 +306,8 @@ function inspectCredentials(credentials) {
     username.value.length > MAX_USERNAME_LENGTH ||
     password.value.length === 0 ||
     password.value.length > MAX_PASSWORD_LENGTH ||
+    !isWellFormedUnicode(username.value) ||
+    !isWellFormedUnicode(password.value) ||
     /[\0\r\n]/u.test(username.value) ||
     /[\0\r\n]/u.test(password.value)
   ) {
@@ -475,7 +493,11 @@ async function exactDirectoryEntry(path, snapshot) {
   return canonicalPath(actual) === canonicalPath(path);
 }
 
-async function removeStrictOperationDirectory(root, target) {
+async function removeStrictOperationDirectory(
+  root,
+  target,
+  expectedSecretEntry,
+) {
   ensureContained(root, target);
   const entry = await safeLstat(target);
   if (entry === undefined) {
@@ -495,34 +517,30 @@ async function removeStrictOperationDirectory(root, target) {
       "The ephemeral secret path is unsafe.",
     );
   }
-  const names = await readdir(target);
-  if (names.length === 0) {
-    if (!(await exactDirectoryEntry(target, entry))) {
-      return "skipped";
-    }
-    await rmdir(target);
-    return "removed";
-  }
-  if (names.length !== 1 || names[0] !== DOTENV_FILE) {
-    return "skipped";
-  }
-
   const secretPath = ensureContained(root, join(target, DOTENV_FILE));
   const secretEntry = await safeLstat(secretPath);
-  if (
-    secretEntry === undefined ||
-    secretEntry.isSymbolicLink() ||
-    !secretEntry.isFile() ||
-    !(await exactRegularEntry(secretPath, secretEntry))
-  ) {
-    return "skipped";
+  let removedSecret = false;
+  if (secretEntry !== undefined) {
+    const expected = expectedSecretEntry ?? secretEntry;
+    if (
+      secretEntry.isSymbolicLink() ||
+      !secretEntry.isFile() ||
+      !sameIdentity(expected, secretEntry) ||
+      !(await exactDirectoryEntry(target, entry)) ||
+      !(await exactRegularEntry(secretPath, expected)) ||
+      !(await exactDirectoryEntry(target, entry))
+    ) {
+      return "skipped";
+    }
+    await unlink(secretPath);
+    removedSecret = true;
   }
-  await unlink(secretPath);
+
   if (
     (await readdir(target)).length !== 0 ||
     !(await exactDirectoryEntry(target, entry))
   ) {
-    return "skipped";
+    return removedSecret ? "cleaned" : "skipped";
   }
   await rmdir(target);
   return "removed";
@@ -604,12 +622,27 @@ export async function withEphemeralSecrets(
   assertNotAborted(signal);
   let operation;
   let handle;
+  let secretEntry;
   try {
     operation = await createOperationDirectory(root);
     await applyAcl(Object.freeze({ kind: "directory", path: operation }));
     assertNotAborted(signal);
     const secretPath = ensureContained(root, join(operation, DOTENV_FILE));
     handle = await open(secretPath, "wx", 0o600);
+    const openedEntry = await handle.stat();
+    secretEntry = await safeLstat(secretPath);
+    if (
+      secretEntry === undefined ||
+      secretEntry.isSymbolicLink() ||
+      !secretEntry.isFile() ||
+      !sameIdentity(openedEntry, secretEntry) ||
+      !(await exactRegularEntry(secretPath, secretEntry))
+    ) {
+      throw ephemeralError(
+        "EPHEMERAL_CREATE_FAILED",
+        "The ephemeral secret file could not be created safely.",
+      );
+    }
     await applyAcl(Object.freeze({ kind: "file", path: secretPath }));
     assertNotAborted(signal);
     await handle.writeFile(dotenvText, "utf8");
@@ -622,7 +655,11 @@ export async function withEphemeralSecrets(
     await handle?.close();
     if (operation !== undefined) {
       try {
-        const outcome = await removeStrictOperationDirectory(root, operation);
+        const outcome = await removeStrictOperationDirectory(
+          root,
+          operation,
+          secretEntry,
+        );
         if (outcome === "skipped") {
           throw new Error("unsafe cleanup structure");
         }

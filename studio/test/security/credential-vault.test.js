@@ -168,6 +168,42 @@ test("rejects invalid credential shapes without invoking getters or PowerShell",
   assert.equal(calls, 0);
 });
 
+test("rejects unpaired Unicode surrogates before creating the vault", async (t) => {
+  const root = await temporaryRoot(t);
+  let calls = 0;
+  const vault = new CredentialVault({
+    root,
+    runPowerShell: async () => {
+      calls += 1;
+      throw new Error("must not run");
+    },
+  });
+
+  for (const credentials of [
+    { username: `bad\uD800`, password: PASSWORD },
+    { username: `bad\uDC00`, password: PASSWORD },
+    { username: USERNAME, password: `bad\uD800` },
+    { username: USERNAME, password: `bad\uDC00` },
+  ]) {
+    await assert.rejects(vault.save("fixture", credentials), {
+      code: "INVALID_CREDENTIALS",
+      message: "The credentials are invalid.",
+    });
+  }
+  assert.equal(calls, 0);
+  await assert.rejects(readdir(root), { code: "ENOENT" });
+});
+
+test("round-trips well-formed supplementary Unicode credentials", async (t) => {
+  const root = await temporaryRoot(t);
+  const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
+  const credentials = { username: "operator-😀", password: "lock-🔐" };
+
+  await vault.save("emoji", credentials);
+
+  assert.deepEqual(await vault.load("emoji"), credentials);
+});
+
 test("normalizes hostile option and credential reflection traps", async (t) => {
   const root = await temporaryRoot(t);
   const marker = "vault-proxy-private-marker";

@@ -69,8 +69,8 @@ test("round-trips exact values through the bundled MCP dotenv parser after ACLs"
   const { runtimeRoot } = await temporaryStudio(t);
   const events = [];
   const credentials = {
-    username: 'user $ # = " \\ tail',
-    password: "pass='value'\\end",
+    username: 'user 😀 $ # = " \\ tail',
+    password: "pass='value'\\end🔐",
   };
 
   const result = await withEphemeralSecrets(
@@ -181,6 +181,42 @@ test("rejects dotenv injection and non-allowlisted credential fields", async (t)
   assert.equal(await pathExists(runtimeRoot), false);
 });
 
+test("rejects unpaired Unicode surrogates before creating runtime plaintext", async (t) => {
+  const { runtimeRoot } = await temporaryStudio(t);
+  let aclCalls = 0;
+  let callbackCalls = 0;
+  const invalid = [
+    { username: `bad\uD800`, password: PASSWORD },
+    { username: `bad\uDC00`, password: PASSWORD },
+    { username: USERNAME, password: `bad\uD800` },
+    { username: USERNAME, password: `bad\uDC00` },
+  ];
+
+  for (const credentials of invalid) {
+    await assert.rejects(
+      withEphemeralSecrets(
+        runtimeRoot,
+        credentials,
+        async () => {
+          callbackCalls += 1;
+        },
+        {
+          applyAcl: async () => {
+            aclCalls += 1;
+          },
+        },
+      ),
+      {
+        code: "INVALID_EPHEMERAL_CREDENTIALS",
+        message: "The ephemeral credentials are invalid.",
+      },
+    );
+  }
+  assert.equal(aclCalls, 0);
+  assert.equal(callbackCalls, 0);
+  assert.equal(await pathExists(runtimeRoot), false);
+});
+
 test("normalizes hostile credential and option reflection traps", async (t) => {
   const { runtimeRoot } = await temporaryStudio(t);
   const marker = "ephemeral-proxy-private-marker";
@@ -272,6 +308,56 @@ test("cleans the operation directory after success and a thrown callback error",
     (error) => error === callbackError,
   );
   assert.equal(await pathExists(failureDirectory), false);
+});
+
+test("removes owned plaintext even when callbacks leave unrelated siblings", async (t) => {
+  const { runtimeRoot } = await temporaryStudio(t);
+  const applyAcl = async () => undefined;
+
+  for (const callbackFails of [false, true]) {
+    let secretPath;
+    let operationDirectory;
+    const callbackError = new Error("callback failed after adding a sibling");
+    const outcome = await withEphemeralSecrets(
+      runtimeRoot,
+      { username: USERNAME, password: PASSWORD },
+      async (path) => {
+        secretPath = path;
+        operationDirectory = dirname(path);
+        await writeFile(join(operationDirectory, "unrelated.txt"), "keep", "utf8");
+        await mkdir(join(operationDirectory, "nested"));
+        if (callbackFails) {
+          throw callbackError;
+        }
+        return "finished";
+      },
+      { applyAcl },
+    ).then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+
+    if (outcome.error !== undefined) {
+      assert.equal(
+        outcome.error === callbackError ||
+          outcome.error.code === "EPHEMERAL_CLEANUP_FAILED",
+        true,
+      );
+    } else {
+      assert.equal(callbackFails, false);
+      assert.equal(outcome.value, "finished");
+    }
+    assert.equal(await pathExists(secretPath), false);
+    assert.equal(
+      await readFile(join(operationDirectory, "unrelated.txt"), "utf8"),
+      "keep",
+    );
+    assert.equal(await pathExists(join(operationDirectory, "nested")), true);
+    assert.equal(
+      (await readdir(operationDirectory)).includes(".mcp-redaction.env"),
+      false,
+    );
+  }
 });
 
 test("does not invoke a callback for an already-aborted signal", async (t) => {
@@ -469,6 +555,8 @@ test("scavenges only strict stale operation directories without following links"
   const extra = join(runtimeRoot, `op-${"e".repeat(32)}`);
   const nested = join(runtimeRoot, `op-${"f".repeat(32)}`);
   const reparse = join(runtimeRoot, `op-${"1".repeat(32)}`);
+  const maliciousLink = join(runtimeRoot, `op-${"2".repeat(32)}`);
+  const maliciousDirectory = join(runtimeRoot, `op-${"3".repeat(32)}`);
   const outside = join(base, "outside-stale");
   await mkdir(empty);
   await mkdir(exact);
@@ -481,9 +569,13 @@ test("scavenges only strict stale operation directories without following links"
   await mkdir(join(nested, "nested"));
   await mkdir(reparse);
   await writeFile(join(reparse, ".mcp-redaction.env"), "partial", "utf8");
+  await mkdir(maliciousLink);
+  await mkdir(maliciousDirectory);
+  await mkdir(join(maliciousDirectory, ".mcp-redaction.env"));
   await mkdir(outside);
   await writeFile(join(outside, "sentinel"), "outside", "utf8");
   await symlink(outside, join(reparse, "outside-link"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(outside, join(maliciousLink, ".mcp-redaction.env"), process.platform === "win32" ? "junction" : "dir");
   await writeFile(strictFile, "unrelated", "utf8");
   await symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
   await mkdir(join(runtimeRoot, "op-not-strict"));
@@ -495,8 +587,13 @@ test("scavenges only strict stale operation directories without following links"
   assert.equal(await pathExists(empty), false);
   assert.equal(await pathExists(exact), false);
   assert.equal(await readFile(join(extra, "unrelated.txt"), "utf8"), "keep-extra");
+  assert.equal(await pathExists(join(extra, ".mcp-redaction.env")), false);
   assert.equal(await pathExists(nested), true);
+  assert.equal(await pathExists(join(nested, ".mcp-redaction.env")), false);
   assert.equal(await pathExists(reparse), true);
+  assert.equal(await pathExists(join(reparse, ".mcp-redaction.env")), false);
+  assert.equal(await pathExists(join(maliciousLink, ".mcp-redaction.env")), true);
+  assert.equal(await pathExists(join(maliciousDirectory, ".mcp-redaction.env")), true);
   assert.equal(await readFile(join(outside, "sentinel"), "utf8"), "outside");
   assert.equal(await readFile(strictFile, "utf8"), "unrelated");
   assert.equal(await pathExists(linked), true);
@@ -510,6 +607,8 @@ test("scavenges only strict stale operation directories without following links"
       `op-${"e".repeat(32)}`,
       `op-${"f".repeat(32)}`,
       `op-${"1".repeat(32)}`,
+      `op-${"2".repeat(32)}`,
+      `op-${"3".repeat(32)}`,
       "unrelated",
     ].sort(),
   );

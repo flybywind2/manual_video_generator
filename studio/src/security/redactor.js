@@ -13,6 +13,22 @@ function invalidConfiguration() {
   throw new TypeError(INVALID_CONFIGURATION);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function readStringList(configuration, name) {
   const descriptor = Object.getOwnPropertyDescriptor(configuration, name);
   if (descriptor === undefined) {
@@ -53,7 +69,8 @@ function readStringList(configuration, name) {
     if (
       values.length > MAX_CONFIGURATION_ITEMS ||
       item.value.length > MAX_CONFIGURATION_ITEM_LENGTH ||
-      textLength > MAX_CONFIGURATION_TEXT
+      textLength > MAX_CONFIGURATION_TEXT ||
+      !isWellFormedUnicode(item.value)
     ) {
       invalidConfiguration();
     }
@@ -137,7 +154,43 @@ function createSecretPattern(secrets) {
 
   entries.sort((left, right) => right.literalLength - left.literalLength);
   const sources = [...new Set(entries.map(({ source }) => source))];
-  return sources.length === 0 ? null : new RegExp(sources.join("|"), "gu");
+  if (sources.length === 0) {
+    return null;
+  }
+  return Object.freeze({
+    candidates: Object.freeze(
+      sources.map((source) => new RegExp(source, "uy")),
+    ),
+    search: new RegExp(sources.join("|"), "gu"),
+  });
+}
+
+function replaceSecrets(input, matcher) {
+  let output = "";
+  let copiedThrough = 0;
+  let replaced = false;
+  matcher.search.lastIndex = 0;
+
+  while (true) {
+    const found = matcher.search.exec(input);
+    if (found === null) {
+      break;
+    }
+    let longest = found[0];
+    for (const candidate of matcher.candidates) {
+      candidate.lastIndex = found.index;
+      const exact = candidate.exec(input);
+      if (exact !== null && exact[0].length > longest.length) {
+        longest = exact[0];
+      }
+    }
+    output += input.slice(copiedThrough, found.index) + REDACTED;
+    copiedThrough = found.index + longest.length;
+    matcher.search.lastIndex = copiedThrough;
+    replaced = true;
+  }
+
+  return replaced ? output + input.slice(copiedThrough) : input;
 }
 
 function normalizeSensitiveKey(key) {
@@ -258,7 +311,7 @@ export function createRedactor(configuration = {}) {
     invalidConfiguration();
   }
   const replaceText = (input) =>
-    pattern === null ? input : input.replace(pattern, REDACTED);
+    pattern === null ? input : replaceSecrets(input, pattern);
 
   const text = Object.freeze((input) =>
     typeof input === "string" ? replaceText(input) : REDACTED,

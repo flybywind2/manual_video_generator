@@ -105,6 +105,22 @@ function validateName(name) {
   return name;
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function inspectCredentials(value) {
   if (
     value === null ||
@@ -140,7 +156,9 @@ function inspectCredentials(value) {
     username.value.length === 0 ||
     username.value.length > 256 ||
     password.value.length === 0 ||
-    password.value.length > 4_096
+    password.value.length > 4_096 ||
+    !isWellFormedUnicode(username.value) ||
+    !isWellFormedUnicode(password.value)
   ) {
     throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
   }

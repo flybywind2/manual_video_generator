@@ -54,6 +54,36 @@ test("redacts encodeURI and arbitrary raw-percent-form mixtures per character", 
   assert.equal(percent.text("%25"), REDACTED);
 });
 
+test("chooses the longest cross-secret representation regardless of order", () => {
+  for (const secrets of [
+    ["%", "/"],
+    ["/", "%"],
+  ]) {
+    const redactor = createRedactor({ secrets, sensitiveKeys: [] });
+    assert.equal(redactor.text("%2F|%2f"), `${REDACTED}|${REDACTED}`);
+  }
+
+  for (const secrets of [
+    ["%", "a"],
+    ["a", "%"],
+  ]) {
+    const redactor = createRedactor({ secrets, sensitiveKeys: [] });
+    assert.equal(redactor.text("%61|%61"), `${REDACTED}|${REDACTED}`);
+  }
+});
+
+test("rejects unpaired Unicode secrets and redacts valid emoji encodings", () => {
+  for (const secret of [`bad\uD800`, `bad\uDC00`]) {
+    assert.throws(
+      () => createRedactor({ secrets: [secret], sensitiveKeys: [] }),
+      { message: "Invalid redactor configuration." },
+    );
+  }
+
+  const redactor = createRedactor({ secrets: ["pair-😀"], sensitiveKeys: [] });
+  assert.equal(redactor.text("pair-😀|pair-%F0%9f%98%80"), `${REDACTED}|${REDACTED}`);
+});
+
 test("redacts case-insensitive sensitive keys throughout nested own data", () => {
   const redactor = createRedactor({
     secrets: [],
