@@ -340,6 +340,37 @@ test("cancelling an unstarted job never stops singleton runtimes owned elsewhere
   assert.deepEqual(calls, { browserStops: 0, openCodeStops: 0 });
 });
 
+test("released authentication ownership cannot stop runtimes later owned by another stage", async (t) => {
+  const { store } = await createStore(
+    t,
+    request({ authMode: "manual" }),
+    "job-release-auth",
+  );
+  let browserStops = 0;
+  let serverStops = 0;
+  const workflow = createAuthenticationWorkflow({
+    browserRuntime: {
+      start: async () => ({}),
+      stop: async () => { browserStops += 1; },
+    },
+    credentialVault: { load: async () => ({ username: "demo", password: "secret" }) },
+    jobStore: store,
+    openCodeServer: {
+      startJob: async () => ({}),
+      stop: async () => { serverStops += 1; },
+    },
+  });
+
+  await workflow.startAuthentication("job-release-auth");
+  assert.equal(workflow.releaseAuthentication("job-release-auth"), true);
+  assert.equal(workflow.releaseAuthentication("job-release-auth"), false);
+  await workflow.cancelAuthentication("job-release-auth");
+
+  assert.equal(browserStops, 0);
+  assert.equal(serverStops, 0);
+  assert.equal((await store.load("job-release-auth")).state, "cancelled");
+});
+
 test("cancellation winning the final auth persistence race is reported as cancellation", async (t) => {
   const jobId = "job-authfinalrace1";
   const { store } = await createStore(t, request(), jobId);

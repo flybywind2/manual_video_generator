@@ -11,6 +11,7 @@ import {
 
 const PLAN_EVENTS = new Set(["PLAN_READY", "UPDATE_PLAN", "APPROVE_PLAN"]);
 const MAX_PLANNER_TEXT_BYTES = 2 * 1024 * 1024;
+const DEFAULT_COMPLETION_CONDITION = "요청한 최종 화면이 보이면 완료";
 
 function planningError(code, message, retryable = false) {
   return new StudioError(message, {
@@ -58,7 +59,19 @@ function targetAuthority(request) {
     ) {
       throw new Error("target");
     }
+    const completionCondition =
+      typeof request.completionCondition === "string" &&
+      request.completionCondition.trim() !== ""
+        ? request.completionCondition.trim()
+        : DEFAULT_COMPLETION_CONDITION;
+    if (
+      completionCondition.length > 2_000 ||
+      /[\u0000\u000b\u000c\u000e-\u001f\u007f]/u.test(completionCondition)
+    ) {
+      throw new Error("completion condition");
+    }
     return Object.freeze({
+      completionCondition,
       prompt: request.prompt.trim(),
       targetOrigin: target.origin,
       targetUrl: target.href,
@@ -83,6 +96,7 @@ function plannerPrompt(authority) {
       targetUrl: authority.targetUrl,
       targetOrigin: authority.targetOrigin,
       userRequest: authority.prompt,
+      completionCondition: authority.completionCondition,
     }),
   ].join("\n");
 }

@@ -125,7 +125,9 @@ test("POST /api/jobs validates and persists a normalized public request", async 
     request: {
       targetUrl: "http://127.0.0.1:4317/fixture/login",
       prompt: "프로젝트 메뉴를 여는 방법",
+      completionCondition: "요청한 최종 화면이 보이면 완료",
       authMode: "manual",
+      voice: "F1",
     },
   });
   assert.deepEqual(await store.load("job-http-create"), body);
@@ -164,6 +166,8 @@ test("POST /api/jobs rejects invalid URLs, prompts, auth modes, and credential r
     validRequest({ authMode: "automatic" }),
     validRequest({ authMode: "manual", credentialId: "unexpected" }),
     validRequest({ authMode: "automatic", credentialId: "../secret" }),
+    validRequest({ completionCondition: "x".repeat(2_001) }),
+    validRequest({ voice: "custom-clone" }),
   ];
 
   for (const [index, request] of invalidCases.entries()) {
@@ -214,7 +218,13 @@ test("GET /api/jobs/:id returns a public snapshot and maps a missing job safely"
   assert.equal(response.status, 200);
   const body = await json(response);
   assert.equal(body.id, "job-public-read");
-  assert.deepEqual(Object.keys(body.request), ["targetUrl", "prompt", "authMode"]);
+  assert.deepEqual(Object.keys(body.request), [
+    "targetUrl",
+    "prompt",
+    "completionCondition",
+    "authMode",
+    "voice",
+  ]);
 
   const missing = await fetch(`${baseUrl}/api/jobs/job-missing`);
   assert.equal(missing.status, 404);

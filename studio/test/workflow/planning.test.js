@@ -58,6 +58,7 @@ async function createPlanningStore(t, jobId, { confirm = true } = {}) {
   await store.create({
     targetUrl: TARGET_URL,
     prompt: "프로젝트 메뉴를 여는 방법을 안내해 주세요.",
+    completionCondition: "Manual Video 완료 배지가 보이면 끝냅니다.",
     authMode: "manual",
   });
   await store.transition(jobId, "START_AUTHENTICATION", { authMode: "manual" });
@@ -123,6 +124,7 @@ test("planning uses the attached planner and durably stores the canonical plan a
   assert.equal(calls.runs[0].opencodePath, "C:\\tools\\opencode.exe");
   assert.match(calls.runs[0].prompt, /schemaVersion.*1\.1/su);
   assert.match(calls.runs[0].prompt, /프로젝트 메뉴를 여는 방법/u);
+  assert.match(calls.runs[0].prompt, /Manual Video 완료 배지/u);
 
   const event = (await store.readEvents(jobId)).at(-1);
   assert.equal(event.event, "PLAN_READY");

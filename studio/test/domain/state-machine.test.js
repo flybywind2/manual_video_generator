@@ -75,6 +75,11 @@ test("successful production stages follow the approved diagram", () => {
   }
 });
 
+test("preview edits invalidate approval and return to the minimum required media stage", () => {
+  assert.equal(transition("preview_review", "EDIT_NARRATION"), "narrating");
+  assert.equal(transition("preview_review", "EDIT_COMPOSITION"), "composing");
+});
+
 test("each fallible stage has an explicit named failure event", () => {
   const failures = [
     ["authenticating", "AUTHENTICATION_FAILED"],

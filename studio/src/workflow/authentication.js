@@ -362,6 +362,13 @@ export function createAuthenticationWorkflow(options) {
       });
     },
 
+    releaseAuthentication(jobId) {
+      const operation = operations.get(jobId);
+      if (operation === undefined) return false;
+      releaseOperation(jobId, operation);
+      return true;
+    },
+
     cancelAuthentication,
   });
 }

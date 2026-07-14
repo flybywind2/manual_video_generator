@@ -61,6 +61,8 @@ export const TRANSITIONS = Object.freeze({
   preview_review: freeze({
     APPROVE_PREVIEW: "rendering",
     CANCEL_JOB: "cancelled",
+    EDIT_COMPOSITION: "composing",
+    EDIT_NARRATION: "narrating",
   }),
   rendering: freeze({
     CANCEL_JOB: "cancelled",

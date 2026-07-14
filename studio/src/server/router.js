@@ -13,9 +13,15 @@ const DEFAULT_MAX_JSON_BYTES = 64 * 1024;
 const MAX_FORM_BYTES = 8 * 1024;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_PROMPT_LENGTH = 10_000;
+const MAX_COMPLETION_CONDITION_LENGTH = 2_000;
 const MAX_URL_LENGTH = 2_048;
 const MAX_ARTIFACT_FILES = 1_000;
 const CREDENTIAL_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const PLAN_DIGEST = /^[a-f0-9]{64}$/u;
+const SCENE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const VOICES = new Set(["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"]);
+const DEFAULT_COMPLETION_CONDITION = "요청한 최종 화면이 보이면 완료";
 const CHECK_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_CHECK_STATUS = new Set(["ready", "missing", "mismatch"]);
 const STATIC_ROUTES = Object.freeze(new Map([
@@ -39,10 +45,21 @@ const ARTIFACT_TYPES = Object.freeze(new Map([
   [".webvtt", "text/vtt; charset=utf-8"],
 ]));
 const ERROR_STATUS = Object.freeze({
+  AUTHENTICATION_STATE_INVALID: 409,
+  EXECUTION_ALREADY_RUNNING: 409,
+  EXECUTION_BUSY: 409,
+  EXECUTION_STATE_INVALID: 409,
   INVALID_JOB_ID: 400,
   INVALID_EVENT_SEQUENCE: 400,
   INVALID_EVENT_SUBSCRIPTION: 400,
   JOB_NOT_FOUND: 404,
+  MEDIA_EDIT_NOT_ALLOWED: 409,
+  MEDIA_RENDER_NOT_ALLOWED: 409,
+  PLAN_DIGEST_MISMATCH: 409,
+  PLANNING_STATE_INVALID: 409,
+  PREVIEW_DIGEST_MISMATCH: 409,
+  PRODUCTION_ALREADY_RUNNING: 409,
+  PRODUCTION_STATE_INVALID: 409,
   UNSAFE_JOB_PATH: 404,
   CORRUPT_JOB_DATA: 500,
   JOBS_ROOT_LOCKED: 503,
@@ -257,6 +274,19 @@ async function readJson(request, maximum) {
   }
 }
 
+async function readOptionalEmptyJson(request, maximum) {
+  if (
+    request.headers["transfer-encoding"] === undefined &&
+    (request.headers["content-length"] === undefined || request.headers["content-length"] === "0")
+  ) {
+    return;
+  }
+  const body = await readJson(request, maximum);
+  if (!isPlainRecord(body) || Reflect.ownKeys(body).length !== 0) {
+    throw new HttpError(400, "INVALID_JSON");
+  }
+}
+
 function isPlainRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
@@ -265,7 +295,14 @@ function validateJobRequest(value) {
   if (!isPlainRecord(value)) {
     throw new HttpError(400, "INVALID_JOB_REQUEST");
   }
-  const allowed = new Set(["targetUrl", "prompt", "authMode", "credentialId"]);
+  const allowed = new Set([
+    "targetUrl",
+    "prompt",
+    "completionCondition",
+    "authMode",
+    "credentialId",
+    "voice",
+  ]);
   const keys = Object.keys(value);
   if (keys.some((key) => !allowed.has(key))) {
     throw new HttpError(400, "INVALID_JOB_REQUEST");
@@ -296,13 +333,109 @@ function validateJobRequest(value) {
   } else if (value.credentialId !== undefined) {
     throw new HttpError(400, "INVALID_JOB_REQUEST");
   }
+  const completionCondition = typeof value.completionCondition === "string"
+    ? value.completionCondition.trim()
+    : "";
+  if (
+    completionCondition.length > MAX_COMPLETION_CONDITION_LENGTH ||
+    /[\u0000\u000b\u000c\u000e-\u001f\u007f]/u.test(completionCondition)
+  ) {
+    throw new HttpError(400, "INVALID_JOB_REQUEST");
+  }
+  const voice = value.voice ?? "F1";
+  if (typeof voice !== "string" || !VOICES.has(voice)) {
+    throw new HttpError(400, "INVALID_JOB_REQUEST");
+  }
 
   return Object.freeze({
     targetUrl: target.href,
     prompt,
+    completionCondition: completionCondition || DEFAULT_COMPLETION_CONDITION,
     authMode: value.authMode,
+    voice,
     ...(value.credentialId === undefined ? {} : { credentialId: value.credentialId }),
   });
+}
+
+function exactBody(value, allowed, required, code) {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some((key) => !allowed.includes(key)) ||
+    required.some((key) => !Object.hasOwn(value, key))
+  ) {
+    throw new HttpError(400, code);
+  }
+  return value;
+}
+
+function digestBody(value, field, code) {
+  const body = exactBody(value, [field], [field], code);
+  if (typeof body[field] !== "string" || !PLAN_DIGEST.test(body[field])) {
+    throw new HttpError(400, code);
+  }
+  return body[field];
+}
+
+function planUpdateBody(value) {
+  const body = exactBody(value, ["plan", "planDigest"], ["plan", "planDigest"], "INVALID_PLAN_REQUEST");
+  if (!isPlainRecord(body.plan) || typeof body.planDigest !== "string" || !PLAN_DIGEST.test(body.planDigest)) {
+    throw new HttpError(400, "INVALID_PLAN_REQUEST");
+  }
+  return body;
+}
+
+function mediaEditBody(value) {
+  const body = exactBody(
+    value,
+    ["previewDigest", "sceneId", "narrationText", "captionText"],
+    ["previewDigest", "sceneId"],
+    "INVALID_MEDIA_EDIT",
+  );
+  if (
+    typeof body.sceneId !== "string" ||
+    !SCENE_ID.test(body.sceneId) ||
+    typeof body.previewDigest !== "string" ||
+    !PLAN_DIGEST.test(body.previewDigest) ||
+    (!Object.hasOwn(body, "narrationText") && !Object.hasOwn(body, "captionText"))
+  ) {
+    throw new HttpError(400, "INVALID_MEDIA_EDIT");
+  }
+  for (const field of ["narrationText", "captionText"]) {
+    if (!Object.hasOwn(body, field)) continue;
+    if (
+      typeof body[field] !== "string" ||
+      body[field].trim().length === 0 ||
+      body[field].length > 4_000 ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(body[field])
+    ) {
+      throw new HttpError(400, "INVALID_MEDIA_EDIT");
+    }
+  }
+  return Object.freeze({
+    previewDigest: body.previewDigest,
+    sceneId: body.sceneId,
+    ...(Object.hasOwn(body, "narrationText") ? { narrationText: body.narrationText.trim() } : {}),
+    ...(Object.hasOwn(body, "captionText") ? { captionText: body.captionText.trim() } : {}),
+  });
+}
+
+function credentialBody(value) {
+  const body = exactBody(value, ["username", "password"], ["username", "password"], "INVALID_CREDENTIAL_REQUEST");
+  if (
+    typeof body.username !== "string" ||
+    body.username.length < 1 ||
+    body.username.length > 256 ||
+    typeof body.password !== "string" ||
+    body.password.length < 1 ||
+    body.password.length > 4_096
+  ) {
+    throw new HttpError(400, "INVALID_CREDENTIAL_REQUEST");
+  }
+  return { username: body.username, password: body.password };
+}
+
+function accepted(response, jobId, operation) {
+  sendJson(response, 202, { accepted: true, jobId, operation });
 }
 
 function safeHealth(value) {
@@ -841,6 +974,13 @@ export function createRouter({
   jobsRoot = jobStore?.root,
   publicRoot,
   maxJsonBytes = DEFAULT_MAX_JSON_BYTES,
+  credentialVault = null,
+  studioService = null,
+  scheduleBackground = (operation) => {
+    setImmediate(() => {
+      Promise.resolve().then(operation).catch(() => undefined);
+    });
+  },
 } = {}) {
   if (!jobStore || typeof jobStore.create !== "function" || typeof jobStore.load !== "function") {
     throw new TypeError("jobStore is required");
@@ -860,7 +1000,29 @@ export function createRouter({
   if (!Number.isSafeInteger(maxJsonBytes) || maxJsonBytes < 1 || maxJsonBytes > 1024 * 1024) {
     throw new TypeError("maxJsonBytes is invalid");
   }
+  if (studioService !== null) {
+    const methods = [
+      "authenticateAndPlan",
+      "confirmManualLoginAndPlan",
+      "updatePlan",
+      "approvePlan",
+      "execute",
+      "cancelJob",
+      "updateMediaPlan",
+      "approvePreview",
+    ];
+    if (methods.some((method) => typeof studioService?.[method] !== "function")) {
+      throw new TypeError("studioService is invalid");
+    }
+  }
+  if (credentialVault !== null && typeof credentialVault?.save !== "function") {
+    throw new TypeError("credentialVault is invalid");
+  }
+  if (typeof scheduleBackground !== "function") {
+    throw new TypeError("scheduleBackground is invalid");
+  }
   const context = Object.freeze({
+    credentialVault,
     eventBus,
     fixtureSessions: new Map(),
     healthCheck,
@@ -868,6 +1030,8 @@ export function createRouter({
     jobsRoot: resolve(jobsRoot),
     maxJsonBytes,
     publicRoot: resolve(publicRoot),
+    scheduleBackground,
+    studioService,
   });
 
   return async function route(request, response) {
@@ -894,6 +1058,78 @@ export function createRouter({
         const requestBody = validateJobRequest(await readJson(request, context.maxJsonBytes));
         const created = await context.jobStore.create(requestBody);
         sendJson(response, 201, created, { Location: `/api/jobs/${encodeURIComponent(created.id)}` });
+        if (context.studioService !== null) {
+          context.scheduleBackground((signal) =>
+            context.studioService.authenticateAndPlan(created.id, { signal }));
+        }
+        return;
+      }
+
+      const credentialMatch = /^\/api\/credentials\/([^/]+)$/u.exec(pathname);
+      if (credentialMatch) {
+        assertMethod(request, ["PUT"]);
+        if (context.credentialVault === null) throw new HttpError(503, "CREDENTIAL_VAULT_UNAVAILABLE");
+        const credentialId = decodeComponent(credentialMatch[1]);
+        if (!CREDENTIAL_ID.test(credentialId)) throw new HttpError(400, "INVALID_CREDENTIAL_REQUEST");
+        const credentials = credentialBody(await readJson(request, context.maxJsonBytes));
+        await context.credentialVault.save(credentialId, credentials);
+        setCommonHeaders(response);
+        response.statusCode = 204;
+        response.setHeader("Cache-Control", "no-store");
+        response.end();
+        return;
+      }
+
+      const workflowMatch = /^\/api\/jobs\/([^/]+)\/(login\/manual\/confirm|plan|plan\/approve|execute|cancel|media-plan|preview\/approve)$/u.exec(pathname);
+      if (workflowMatch) {
+        if (context.studioService === null) throw new HttpError(503, "WORKFLOW_UNAVAILABLE");
+        const jobId = decodeComponent(workflowMatch[1]);
+        if (!JOB_ID.test(jobId)) throw new HttpError(400, "INVALID_JOB_ID");
+        const action = workflowMatch[2];
+        if (action === "login/manual/confirm") {
+          assertMethod(request, ["POST"]);
+          await readOptionalEmptyJson(request, context.maxJsonBytes);
+          context.scheduleBackground(() => context.studioService.confirmManualLoginAndPlan(jobId));
+          accepted(response, jobId, "confirm_login");
+          return;
+        }
+        if (action === "plan") {
+          assertMethod(request, ["PUT"]);
+          const body = planUpdateBody(await readJson(request, context.maxJsonBytes));
+          sendJson(response, 200, await context.studioService.updatePlan(jobId, body.plan, body.planDigest));
+          return;
+        }
+        if (action === "plan/approve") {
+          assertMethod(request, ["POST"]);
+          const digest = digestBody(await readJson(request, context.maxJsonBytes), "planDigest", "INVALID_PLAN_REQUEST");
+          sendJson(response, 200, await context.studioService.approvePlan(jobId, digest));
+          return;
+        }
+        if (action === "execute") {
+          assertMethod(request, ["POST"]);
+          const digest = digestBody(await readJson(request, context.maxJsonBytes), "planDigest", "INVALID_EXECUTION_REQUEST");
+          context.scheduleBackground((signal) =>
+            context.studioService.execute(jobId, digest, { signal }));
+          accepted(response, jobId, "execute");
+          return;
+        }
+        if (action === "cancel") {
+          assertMethod(request, ["POST"]);
+          await readOptionalEmptyJson(request, context.maxJsonBytes);
+          sendJson(response, 200, await context.studioService.cancelJob(jobId));
+          return;
+        }
+        if (action === "media-plan") {
+          assertMethod(request, ["PUT"]);
+          const edit = mediaEditBody(await readJson(request, context.maxJsonBytes));
+          sendJson(response, 200, await context.studioService.updateMediaPlan(jobId, edit));
+          return;
+        }
+        assertMethod(request, ["POST"]);
+        const digest = digestBody(await readJson(request, context.maxJsonBytes), "previewDigest", "INVALID_PREVIEW_REQUEST");
+        context.scheduleBackground((signal) =>
+          context.studioService.approvePreview(jobId, digest, { signal }));
+        accepted(response, jobId, "render");
         return;
       }
 

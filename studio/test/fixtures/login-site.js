@@ -36,6 +36,9 @@ export async function startTestStudio(t, options = {}) {
       token: "must-not-leak",
     })),
     maxJsonBytes: options.maxJsonBytes,
+    credentialVault: options.credentialVault,
+    studioService: options.studioService,
+    scheduleBackground: options.scheduleBackground,
   });
 
   await new Promise((resolve, reject) => {
