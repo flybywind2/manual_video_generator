@@ -313,6 +313,7 @@ git commit -m "feat: secure local login credentials"
 - Create: `studio/src/adapters/opencode-client.js`
 - Create: `studio/src/adapters/opencode-server.js`
 - Create: `studio/src/adapters/browser-runtime.js`
+- Create: `studio/src/adapters/mcp-gateway.js`
 - Create: `studio/src/browser/browser-bootstrap-init.cjs`
 - Create: `studio/opencode.json`
 - Create: `studio/.opencode/agents/manual-video-planner.md`
@@ -321,6 +322,7 @@ git commit -m "feat: secure local login credentials"
 - Create: `studio/test/adapters/opencode-client.test.js`
 - Create: `studio/test/adapters/opencode-server.test.js`
 - Create: `studio/test/adapters/browser-runtime.test.js`
+- Create: `studio/test/adapters/mcp-gateway.test.js`
 - Create: `studio/test/adapters/opencode-config.test.js`
 
 **Step 1: Write the failing process-runner tests**
@@ -357,7 +359,7 @@ The client command must equal this shape and never contain `--model` or `--dange
 ]
 ```
 
-**Step 5: Write failing job-scoped Playwright MCP runtime tests**
+**Step 5: Write failing job-scoped Playwright MCP runtime and gateway tests**
 
 Test `BrowserRuntime.start(job)` before implementing it. It must:
 
@@ -365,7 +367,9 @@ Test `BrowserRuntime.start(job)` before implementing it. It must:
 - set `contextOptions.serviceWorkers` to `"block"` so service workers cannot bypass request routing;
 - pass the same canonical origin set to the service-owned browser bootstrap module, which installs one `BrowserContext.route("**/*")` handler before navigation and aborts every document, subresource, and redirect request whose parsed origin is not approved;
 - set `blockedOrigins` for known test attacker origins while treating MCP origin options as convenience guards rather than the security boundary;
-- bind the MCP server to `127.0.0.1:8931` with `sharedBrowserContext`, headed Edge, persistent profile, `1920x1080`, job output directory, session saving, `core` and `devtools` capabilities;
+- bind raw MCP to a fresh high job-scoped loopback port with `sharedBrowserContext`, headed Edge, persistent profile, `1920x1080`, job output directory, session saving, `core` and `devtools` capabilities;
+- expose only a coordinator-owned gateway at `127.0.0.1:8931`, require a fresh canonical 256-bit bearer capability on every request, and never forward that header upstream;
+- in planning, allow only bounded snapshot/wait/screenshot calls; after approval, accept only the immutable ordered queue of exact tool calls bound to the plan digest, quarantining on drift or uncertain completion;
 - launch the exact local `@playwright/mcp@0.0.78` JavaScript CLI through `process.execPath`;
 - pass automatic-login values only in the MCP child environment and to `browser-bootstrap-init.cjs`, never in OpenCode environment, arguments, or job artifacts;
 - use the ephemeral secrets file only for MCP response redaction, delete it immediately after MCP startup, and scavenge it after a simulated crash;
@@ -373,23 +377,24 @@ Test `BrowserRuntime.start(job)` before implementing it. It must:
 
 `browser-bootstrap-init.cjs` is service-owned code loaded with MCP `initPage` for manual and automatic jobs. Before any target navigation it installs the context route guard described above and verifies service workers are blocked. In automatic mode it additionally registers a one-shot DOM-content handler, confines itself to the approved login origin, uses validated username/password/submit selectors (with conservative defaults), reads credentials from its process environment, fills and submits through the provided Playwright `page`, clears its local references, and never prints values.
 
-Run: `node --test test/adapters/browser-runtime.test.js`
+Run: `node --test test/adapters/browser-runtime.test.js test/adapters/mcp-gateway.test.js`
 
 Expected RED: `BrowserRuntime` and the init-page module do not exist.
 
 **Step 6: Implement the standalone browser runtime and job-scoped OpenCode server**
 
-OpenCode connects to the standalone MCP endpoint `http://127.0.0.1:8931/mcp`; it does not spawn MCP and does not inherit login secrets. `OpenCodeServer.startJob()` launches `opencode serve --pure --hostname 127.0.0.1 --port 4096`, waits for readiness, remains alive for every phase of the active job, and stops before the next queued job. Add tests for readiness, port ownership, cancellation, and secret-free environment.
+OpenCode connects to the capability-authenticated coordinator gateway at `http://127.0.0.1:8931/mcp`; it cannot address the raw MCP listener, does not spawn MCP, and does not inherit login secrets. `OpenCodeServer.startJob()` requires the job capability, places it only in the isolated server environment used by the remote-MCP authorization header placeholder, launches `opencode serve --pure --hostname 127.0.0.1 --port 4096`, waits for readiness, remains alive for every phase of the active job, and stops before the next queued job. Add tests for readiness, port ownership, capability/config drift, cancellation, secret-free attached CLI environment, and restart isolation.
 
 Run: `node --test test/adapters/browser-runtime.test.js test/adapters/opencode-server.test.js`
 
-Expected: PASS, including direct-navigation, subresource, service-worker, and redirect probes whose attacker server receives zero requests. Disable the MCP `network.allowedOrigins` option in one test to prove the service-owned route guard is the enforcing layer.
+Expected: PASS, including direct-navigation, subresource, service-worker, WebSocket, and redirect probes whose attacker server receives zero HTTP requests. Disable the MCP `network.allowedOrigins` option in one test to prove the service-owned route guard is the enforcing layer. Document that speculative preconnect may still open a TCP connection, so this is not full process-level egress isolation.
 
 **Step 7: Write the failing config/agent tests**
 
 Parse `opencode.json` and Markdown front matter. Assert:
 
 - project-local MCP configuration points only to the coordinator-owned loopback Playwright endpoint;
+- the remote MCP entry uses exactly `Authorization: Bearer {env:MANUAL_STUDIO_MCP_TOKEN}` and never persists a real capability;
 - global permission is `"*": "deny"`, and only the exact required `playwright_*` tools are re-allowed;
 - `edit`, `bash`, `webfetch`, `websearch`, `task`, `external_directory`, `question`, unsafe browser code, and every non-required MCP tool remain denied;
 - planner and executor are primary agents and contain no `model` field;
@@ -410,7 +415,7 @@ Expected: all tests PASS.
 **Step 10: Commit**
 
 ```powershell
-git add studio/src/process studio/src/adapters/opencode-events.js studio/src/adapters/opencode-client.js studio/src/adapters/opencode-server.js studio/src/adapters/browser-runtime.js studio/src/browser studio/opencode.json studio/.opencode studio/test/process studio/test/adapters/opencode-client.test.js studio/test/adapters/opencode-server.test.js studio/test/adapters/browser-runtime.test.js studio/test/adapters/opencode-config.test.js
+git add studio/src/process studio/src/adapters/opencode-events.js studio/src/adapters/opencode-client.js studio/src/adapters/opencode-server.js studio/src/adapters/browser-runtime.js studio/src/adapters/mcp-gateway.js studio/src/browser studio/opencode.json studio/.opencode studio/test/process studio/test/adapters/opencode-client.test.js studio/test/adapters/opencode-server.test.js studio/test/adapters/browser-runtime.test.js studio/test/adapters/mcp-gateway.test.js studio/test/adapters/opencode-config.test.js
 git commit -m "feat: orchestrate restricted OpenCode browser agents"
 ```
 
@@ -939,7 +944,7 @@ scene drift <= 500 ms
 
 **Step 6: Exercise recovery**
 
-Force one page mismatch and kill one render. Verify `needs_review`, artifact preservation, re-approval, retry from the safe stage, and final completion without recapturing unaffected steps. Attempt a malicious redirect to an unapproved local origin and verify its server receives zero requests because the MCP network allowlist blocks it before navigation.
+Force one page mismatch and kill one render. Verify `needs_review`, artifact preservation, re-approval, retry from the safe stage, and final completion without recapturing unaffected steps. Attempt a malicious redirect to an unapproved local origin and verify its server receives zero HTTP requests because the service-owned request guard and MCP allowlist reject it. Report the observed speculative-preconnect TCP limitation separately.
 
 **Step 7: Perform desktop and mobile UI smoke**
 

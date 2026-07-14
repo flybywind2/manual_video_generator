@@ -41,7 +41,9 @@ OpenCode creates JSON and a Node client replays MCP calls mechanically. This is 
 flowchart LR
     UI["AI Center Manual Studio UI"] --> N["Node local coordinator"]
     N --> O["OpenCode server"]
-    O --> P["Playwright MCP"]
+    O --> G["Capability-authenticated MCP gateway"]
+    N --> G
+    G --> P["Job-scoped raw Playwright MCP"]
     P --> B["Dedicated headed Edge browser"]
     N --> S["Supertonic 3 loopback server"]
     N --> H["HyperFrames CLI"]
@@ -75,6 +77,8 @@ opencode run --pure --format json --attach http://127.0.0.1:4096 --agent manual-
 
 No `--model` flag is passed. Project-local agent configuration defaults every tool permission to deny and explicitly allows only the required Playwright MCP tools. `bash`, `edit`, `webfetch`, `websearch`, `external_directory`, `question`, and unsafe browser-code tools remain denied. OpenCode emits JSON events; the coordinator extracts the final structured result and stores the complete redacted event stream.
 
+OpenCode does not connect to the raw Playwright MCP listener. It connects to a coordinator-owned gateway at `127.0.0.1:8931` using a fresh canonical 256-bit bearer capability for the active job. The static config contains only an environment placeholder; the value exists only in the isolated OpenCode server environment, is stripped from attached CLI runs, and is never persisted. During planning the gateway permits only bounded observation calls. After approval it accepts one immutable, ordered queue of exact tool names and arguments bound to the approved plan digest. Any missing capability, stale generation, order/argument drift, concurrent ambiguity, partial upstream response, disconnect, or timeout quarantines the job before another action can pass.
+
 ### Playwright MCP
 
 Pin `@playwright/mcp` and run a headed Edge browser with:
@@ -84,10 +88,12 @@ Pin `@playwright/mcp` and run a headed Edge browser with:
 - a job-owned output directory;
 - session saving and the devtools capability;
 - a job-specific `network.allowedOrigins` list used as defense in depth;
-- blocked service workers plus a service-owned `BrowserContext.route()` guard that aborts unapproved document, subresource, and redirect origins before requests leave the browser;
+- blocked service workers plus a service-owned CDP/`BrowserContext.route()` guard that aborts unapproved HTTP/WebSocket documents, subresources, and redirects before an HTTP request reaches the destination in the verified probes;
 - a service-owned bootstrap init-page that receives automatic-login credentials only in the MCP child environment;
 - video recording, tracing, action overlays, chapter markers, snapshots, and screenshots;
 - unsafe arbitrary browser code disabled.
+
+The raw MCP listener uses a fresh high loopback port for each job and is verified to belong to the spawned process tree. Only the authenticated gateway has its address. The public gateway remains on `127.0.0.1:8931`; it removes the authorization header before proxying and never forwards credentials upstream.
 
 Accessibility snapshots and exact element references are the action evidence. Screenshots are artifacts and human review evidence, not the primary action-selection input.
 
@@ -185,10 +191,12 @@ The dedicated service profile is the default. Connecting to a user's normal brow
 ## Safety Boundary
 
 - The target origin plus explicitly approved authentication/resource origins become the canonical job allowlist and also populate Playwright MCP `network.allowedOrigins` as defense in depth.
+- This is an HTTP/WebSocket request boundary, not full process-level network egress isolation. Edge may make a speculative TCP preconnect before request interception; a strict zero-connection guarantee would additionally require an OS firewall or allowlist proxy (including a WebRTC policy).
 - A service-owned init-page blocks service workers and installs `BrowserContext.route()` before target navigation; it aborts unapproved document, subresource, and redirect requests. Any reported origin drift also pauses the job.
 - Plans containing delete, submit, send, publish, purchase, or equivalent irreversible actions are marked `blocked` until explicitly removed or separately approved.
 - Execution is limited to the approved plan length plus bounded recovery observations.
 - The approved plan digest must match before every execution or resume.
+- The gateway changes from bounded planning observation to the exact approved execution queue once, and any policy uncertainty is terminal for that runtime generation.
 - OpenCode cannot use shell, edit, or unsafe arbitrary browser-code tools.
 - The user can terminate the active OpenCode/MCP/render processes from the UI.
 - Playwright MCP is treated as an automation tool, not a security boundary.

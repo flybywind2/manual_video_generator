@@ -1,0 +1,1167 @@
+import assert from "node:assert/strict";
+import { createServer, request as httpRequest, ServerResponse } from "node:http";
+import test from "node:test";
+
+import { McpGateway } from "../../src/adapters/mcp-gateway.js";
+
+const JOB_ID = "job-0123456789abcdef";
+const CAPABILITY_TOKEN = Buffer.alloc(32, 0x5a).toString("base64url");
+const OTHER_CAPABILITY_TOKEN = Buffer.alloc(32, 0xa5).toString("base64url");
+
+function createGateway(options) {
+  return new McpGateway({ ...options, capabilityToken: CAPABILITY_TOKEN });
+}
+
+function sse(value) {
+  return `event: message\ndata: ${JSON.stringify(value)}\n\n`;
+}
+
+async function listen(server) {
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  return server.address().port;
+}
+
+async function readRequest(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function startUpstream(t, { getResponder, initializeResponder, toolResponder } = {}) {
+  const calls = [];
+  const requests = [];
+  let sessionSequence = 0;
+  const server = createServer(async (request, response) => {
+    const body = await readRequest(request);
+    requests.push({ method: request.method, url: request.url, headers: request.headers, body });
+    if (request.method === "POST") {
+      const message = JSON.parse(body);
+      if (message.method === "initialize") {
+        const sessionId = `raw-session-${++sessionSequence}-0123456789abcdef`;
+        if (initializeResponder) {
+          await initializeResponder({ message, request, response, sessionId });
+          return;
+        }
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "mcp-session-id": sessionId,
+          "cache-control": "no-cache",
+          "set-cookie": "unsafe=secret",
+          location: "http://attacker.invalid/redirect",
+          "x-upstream-secret": "must-not-cross",
+        });
+        response.end(sse({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", capabilities: {} } }));
+        return;
+      }
+      if (message.method === "notifications/initialized") {
+        response.writeHead(202);
+        response.end();
+        return;
+      }
+      if (message.method === "tools/list") {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(sse({ jsonrpc: "2.0", id: message.id, result: { tools: [] } }));
+        return;
+      }
+      if (message.method === "tools/call") {
+        calls.push({
+          sessionId: request.headers["mcp-session-id"],
+          name: message.params?.name,
+          arguments: message.params?.arguments,
+        });
+        if (toolResponder) {
+          await toolResponder({ message, request, response });
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(sse({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "ok" }] } }));
+        return;
+      }
+    }
+    if (request.method === "GET" && getResponder) {
+      await getResponder({ request, response });
+      return;
+    }
+    if (request.method === "DELETE") {
+      response.writeHead(200, { "content-type": "text/plain; charset=UTF-8" });
+      response.end();
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  const port = await listen(server);
+  t.after(async () => {
+    server.closeAllConnections?.();
+    if (server.listening) await new Promise((resolvePromise) => server.close(resolvePromise));
+  });
+  return { calls, port, requests, server };
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  assert.fail("Timed out waiting for condition.");
+}
+
+async function request(endpoint, {
+  method = "POST",
+  sessionId,
+  message,
+  body,
+  headers = {},
+  authorized = true,
+} = {}) {
+  const url = new URL(endpoint);
+  const source = body ?? (message === undefined ? undefined : JSON.stringify(message));
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const outgoing = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method,
+      headers: {
+        ...(authorized ? { authorization: `Bearer ${CAPABILITY_TOKEN}` } : {}),
+        ...(source === undefined ? {} : {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(source),
+        }),
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+        ...headers,
+      },
+    });
+    outgoing.once("error", rejectPromise);
+    outgoing.once("response", async (response) => {
+      try {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        resolvePromise({
+          status: response.statusCode,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString("utf8"),
+        });
+      } catch (error) {
+        rejectPromise(error);
+      }
+    });
+    if (source !== undefined) outgoing.end(source);
+    else outgoing.end();
+  });
+}
+
+async function initialize(endpoint) {
+  const response = await request(endpoint, {
+    message: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "gateway-test", version: "1" },
+      },
+    },
+    headers: {
+      authorization: `Bearer ${CAPABILITY_TOKEN}`,
+      cookie: "must-not-cross=1",
+      "x-forwarded-for": "203.0.113.10",
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.match(response.body, /"protocolVersion":"2025-03-26"/u);
+  assert.equal(typeof response.headers["mcp-session-id"], "string");
+  return { response, sessionId: response.headers["mcp-session-id"] };
+}
+
+test("a 256-bit capability blocks unauthenticated cross-origin reads and form posts without quarantine", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  assert.throws(
+    () => new McpGateway({
+      upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+      port: 0,
+      onFatal: async () => {},
+    }),
+    (error) => error.code === "INVALID_MCP_GATEWAY_OPTIONS",
+  );
+  assert.throws(
+    () => new McpGateway({
+      upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+      port: 0,
+      capabilityToken: "short",
+      onFatal: async () => {},
+    }),
+    (error) => error.code === "INVALID_MCP_GATEWAY_OPTIONS",
+  );
+  const gateway = new McpGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    capabilityToken: CAPABILITY_TOKEN,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 6 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  const upstreamCount = upstream.requests.length;
+
+  const unauthenticatedGet = await request(gateway.endpoint, {
+    method: "GET",
+    sessionId,
+    authorized: false,
+    headers: { origin: "https://attacker.invalid" },
+  });
+  assert.equal(unauthenticatedGet.status, 401);
+
+  const unauthenticatedForm = await request(gateway.endpoint, {
+    sessionId,
+    body: "method=tools%2Flist",
+    authorized: false,
+    headers: {
+      origin: "https://attacker.invalid",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+  });
+  assert.equal(unauthenticatedForm.status, 401);
+
+  const wrongToken = await request(gateway.endpoint, {
+    sessionId,
+    authorized: false,
+    message: { jsonrpc: "2.0", id: 601, method: "tools/list", params: {} },
+    headers: { authorization: `Bearer ${OTHER_CAPABILITY_TOKEN}` },
+  });
+  assert.equal(wrongToken.status, 401);
+
+  const duplicateToken = await request(gateway.endpoint, {
+    sessionId,
+    authorized: false,
+    message: { jsonrpc: "2.0", id: 602, method: "tools/list", params: {} },
+    headers: { authorization: [`Bearer ${CAPABILITY_TOKEN}`, `Bearer ${CAPABILITY_TOKEN}`] },
+  });
+  assert.equal(duplicateToken.status, 401);
+
+  assert.equal(upstream.requests.length, upstreamCount);
+  assert.equal(gateway.active.phase, "planning");
+  assert.deepEqual(fatals, []);
+
+  const authenticated = await request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 603, method: "tools/list", params: {} },
+  });
+  assert.equal(authenticated.status, 200);
+  assert.equal(upstream.requests.length, upstreamCount + 1);
+  assert.equal(gateway.active.phase, "planning");
+  assert.deepEqual(fatals, []);
+});
+
+test("planning proxies only the exact observation calls through a generation-bound MCP session", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+
+  const active = await gateway.start({ jobId: JOB_ID, generation: 7 });
+  assert.equal(gateway.endpoint, active.endpoint);
+  assert.deepEqual(gateway.active, {
+    endpoint: active.endpoint,
+    jobId: JOB_ID,
+    generation: 7,
+    phase: "planning",
+    remainingCalls: 0,
+  });
+
+  const initialized = await initialize(gateway.endpoint);
+  assert.equal(initialized.response.headers["set-cookie"], undefined);
+  assert.equal(initialized.response.headers.location, undefined);
+  assert.equal(initialized.response.headers["x-upstream-secret"], undefined);
+
+  const notification = await request(gateway.endpoint, {
+    sessionId: initialized.sessionId,
+    message: { jsonrpc: "2.0", method: "notifications/initialized" },
+  });
+  assert.equal(notification.status, 202);
+
+  const listed = await request(gateway.endpoint, {
+    sessionId: initialized.sessionId,
+    message: { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  });
+  assert.equal(listed.status, 200);
+
+  for (const [id, name, argumentsValue] of [
+    [3, "browser_snapshot", {}],
+    [4, "browser_wait_for", { time: 0.01 }],
+    [5, "browser_take_screenshot", { type: "png", scale: "css" }],
+  ]) {
+    const observed = await request(gateway.endpoint, {
+      sessionId: initialized.sessionId,
+      message: { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: argumentsValue } },
+    });
+    assert.equal(observed.status, 200);
+  }
+
+  assert.deepEqual(upstream.calls.map(({ name }) => name), [
+    "browser_snapshot",
+    "browser_wait_for",
+    "browser_take_screenshot",
+  ]);
+  assert.ok(upstream.calls.every(({ sessionId }) => sessionId === initialized.sessionId));
+  assert.equal(upstream.requests[0].headers.authorization, undefined);
+  assert.equal(upstream.requests[0].headers.cookie, undefined);
+  assert.equal(upstream.requests[0].headers["x-forwarded-for"], undefined);
+  assert.deepEqual(fatals, []);
+});
+
+test("the actual MCP empty text/plain DELETE response closes only its registered session", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 71 });
+  const { sessionId } = await initialize(gateway.endpoint);
+
+  const deleted = await request(gateway.endpoint, { method: "DELETE", sessionId });
+  assert.equal(deleted.status, 200);
+  assert.match(deleted.headers["content-type"], /^text\/plain/iu);
+  assert.equal(deleted.body, "");
+  assert.deepEqual(fatals, []);
+
+  const stale = await request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 72, method: "tools/list", params: {} },
+  });
+  assert.equal(stale.status, 403);
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "UNKNOWN_SESSION");
+});
+
+test("execution accepts only the installed ordered exact calls and freezes the approval contract", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 8 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  const firstArguments = { target: "button-submit", button: "left" };
+  const planDigest = "a".repeat(64);
+  const approval = {
+    jobId: JOB_ID,
+    generation: 8,
+    planDigest,
+    calls: [
+      { id: "call-001", tool: "browser_click", arguments: firstArguments },
+      { id: "call-002", tool: "browser_type", arguments: { target: "input-name", text: "approved text" } },
+    ],
+  };
+
+  assert.deepEqual(gateway.installApproval(approval), {
+    jobId: JOB_ID,
+    generation: 8,
+    planDigest,
+    callCount: 2,
+  });
+  firstArguments.target = "mutated-after-install";
+  approval.calls.push({ id: "call-003", tool: "browser_press_key", arguments: { key: "Enter" } });
+  assert.deepEqual(gateway.active, {
+    endpoint: gateway.endpoint,
+    jobId: JOB_ID,
+    generation: 8,
+    phase: "execution",
+    remainingCalls: 2,
+    planDigest,
+  });
+
+  const first = await request(gateway.endpoint, {
+    sessionId,
+    message: {
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: { name: "browser_click", arguments: { button: "left", target: "button-submit" } },
+    },
+  });
+  assert.equal(first.status, 200);
+  assert.equal(gateway.active.remainingCalls, 1);
+
+  const second = await request(gateway.endpoint, {
+    sessionId,
+    message: {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "browser_type", arguments: { text: "approved text", target: "input-name" } },
+    },
+  });
+  assert.equal(second.status, 200);
+  assert.equal(gateway.active.phase, "execution_complete");
+  assert.equal(gateway.active.remainingCalls, 0);
+  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_click", "browser_type"]);
+
+  const extra = await request(gateway.endpoint, {
+    sessionId,
+    message: {
+      jsonrpc: "2.0",
+      id: 12,
+      method: "tools/call",
+      params: { name: "browser_press_key", arguments: { key: "Enter" } },
+    },
+  });
+  assert.equal(extra.status, 403);
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(gateway.active.phase, "quarantined");
+  assert.equal(fatals.length, 1);
+  assert.equal(fatals[0].reason, "TOOL_NOT_ALLOWED_IN_PHASE");
+  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_click", "browser_type"]);
+});
+
+test("execution quarantines an argument or order mismatch before it reaches raw MCP", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 9 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 9,
+    planDigest: "b".repeat(64),
+    calls: [
+      { id: "call-001", tool: "browser_click", arguments: { target: "approved-button" } },
+    ],
+  });
+
+  const response = await request(gateway.endpoint, {
+    sessionId,
+    message: {
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: { name: "browser_click", arguments: { target: "different-button" } },
+    },
+  });
+  assert.equal(response.status, 403);
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.deepEqual(upstream.calls, []);
+  assert.equal(gateway.active.phase, "quarantined");
+  assert.equal(fatals.length, 1);
+  assert.equal(fatals[0].reason, "EXECUTION_CALL_MISMATCH");
+});
+
+test("planning validates bounded tool-specific arguments and quarantines before raw MCP", async (t) => {
+  const deepArguments = {};
+  let cursor = deepArguments;
+  for (let depth = 0; depth < 40; depth += 1) {
+    cursor.child = {};
+    cursor = cursor.child;
+  }
+  const cases = [
+    {
+      name: "snapshot unknown argument",
+      tool: "browser_snapshot",
+      arguments: { unknown: true },
+      reason: "INVALID_PLANNING_ARGUMENTS",
+    },
+    {
+      name: "wait beyond thirty seconds",
+      tool: "browser_wait_for",
+      arguments: { time: 31 },
+      reason: "INVALID_PLANNING_ARGUMENTS",
+    },
+    {
+      name: "unbounded wait text",
+      tool: "browser_wait_for",
+      arguments: { text: "x".repeat(513) },
+      reason: "INVALID_PLANNING_ARGUMENTS",
+    },
+    {
+      name: "full page screenshot",
+      tool: "browser_take_screenshot",
+      arguments: { type: "png", scale: "css", fullPage: true },
+      reason: "INVALID_PLANNING_ARGUMENTS",
+    },
+    {
+      name: "artifact filename",
+      tool: "browser_take_screenshot",
+      arguments: { type: "png", scale: "css", filename: "escape.png" },
+      reason: "FILENAME_NOT_ALLOWED",
+    },
+    {
+      name: "always forbidden navigation",
+      tool: "browser_navigate",
+      arguments: { url: "http://attacker.invalid" },
+      reason: "TOOL_ALWAYS_FORBIDDEN",
+    },
+    {
+      name: "deep argument object",
+      tool: "browser_snapshot",
+      arguments: deepArguments,
+      reason: "INVALID_TOOL_CALL",
+    },
+  ];
+
+  for (const [index, policyCase] of cases.entries()) {
+    await t.test(policyCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      await gateway.start({ jobId: JOB_ID, generation: 20 + index });
+      const { sessionId } = await initialize(gateway.endpoint);
+      upstream.calls.length = 0;
+
+      const response = await request(gateway.endpoint, {
+        sessionId,
+        message: {
+          jsonrpc: "2.0",
+          id: 30 + index,
+          method: "tools/call",
+          params: { name: policyCase.tool, arguments: policyCase.arguments },
+        },
+      });
+      assert.equal(response.status, 403);
+      await new Promise((resolvePromise) => setImmediate(resolvePromise));
+      assert.deepEqual(upstream.calls, []);
+      assert.equal(gateway.active.phase, "quarantined");
+      assert.equal(fatals.length, 1);
+      assert.equal(fatals[0].reason, policyCase.reason);
+    });
+  }
+});
+
+test("a queued call advances only after a complete successful MCP JSON-RPC result", async (t) => {
+  const cases = [
+    {
+      name: "JSON-RPC error",
+      responder: ({ message, response }) => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(sse({ jsonrpc: "2.0", id: message.id, error: { code: -32_000, message: "failed" } }));
+      },
+    },
+    {
+      name: "MCP isError result",
+      responder: ({ message, response }) => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(sse({ jsonrpc: "2.0", id: message.id, result: { isError: true, content: [] } }));
+      },
+    },
+    {
+      name: "truncated SSE result",
+      responder: ({ response }) => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end('event: message\ndata: {"jsonrpc":"2.0"');
+      },
+    },
+    {
+      name: "upstream disconnect",
+      responder: ({ response }) => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write('event: message\ndata: {"jsonrpc":"2.0"');
+        response.socket.destroy();
+      },
+    },
+  ];
+
+  for (const [index, failureCase] of cases.entries()) {
+    await t.test(failureCase.name, async (t) => {
+      const upstream = await startUpstream(t, { toolResponder: failureCase.responder });
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      await gateway.start({ jobId: JOB_ID, generation: 40 + index });
+      const { sessionId } = await initialize(gateway.endpoint);
+      gateway.installApproval({
+        jobId: JOB_ID,
+        generation: 40 + index,
+        planDigest: "c".repeat(64),
+        calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+      });
+
+      const outcome = await request(gateway.endpoint, {
+        sessionId,
+        message: {
+          jsonrpc: "2.0",
+          id: 50 + index,
+          method: "tools/call",
+          params: { name: "browser_click", arguments: { target: "approved" } },
+        },
+      }).catch((error) => error);
+      assert.ok(outcome instanceof Error || outcome.status === 200 || outcome.status === 403);
+      await waitFor(() => fatals.length === 1);
+      assert.equal(gateway.active.phase, "quarantined");
+      assert.equal(gateway.active.remainingCalls, 1);
+      if (failureCase.name === "upstream disconnect") {
+        assert.ok(["UPSTREAM_UNAVAILABLE", "UPSTREAM_RESPONSE_ABORTED"].includes(fatals[0].reason));
+      } else {
+        assert.equal(fatals[0].reason, "TOOL_CALL_FAILED");
+      }
+    });
+  }
+});
+
+test("concurrent execution calls quarantine and never forward the second call", async (t) => {
+  let releaseFirst;
+  const firstMayFinish = new Promise((resolvePromise) => { releaseFirst = resolvePromise; });
+  const upstream = await startUpstream(t, {
+    toolResponder: async ({ message, response }) => {
+      await firstMayFinish;
+      if (response.destroyed) return;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(sse({ jsonrpc: "2.0", id: message.id, result: { content: [] } }));
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releaseFirst();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 50 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 50,
+    planDigest: "d".repeat(64),
+    calls: [
+      { id: "call-001", tool: "browser_click", arguments: { target: "one" } },
+      { id: "call-002", tool: "browser_click", arguments: { target: "two" } },
+    ],
+  });
+
+  const first = request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "browser_click", arguments: { target: "one" } } },
+  }).catch((error) => error);
+  await waitFor(() => upstream.calls.length === 1);
+  const second = await request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 61, method: "tools/call", params: { name: "browser_click", arguments: { target: "two" } } },
+  });
+  assert.equal(second.status, 403);
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "CONCURRENT_TOOL_CALL");
+  assert.equal(upstream.calls.length, 1);
+  releaseFirst();
+  await first;
+});
+
+test("quarantine remains terminal when a deferred approved response completes", async (t) => {
+  let releaseResponse;
+  const responseMayFinish = new Promise((resolvePromise) => { releaseResponse = resolvePromise; });
+  const upstream = await startUpstream(t, {
+    toolResponder: async ({ message, response }) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(sse({ jsonrpc: "2.0", id: message.id, result: { content: [] } }));
+      await responseMayFinish;
+      response.end();
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releaseResponse();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 51 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 51,
+    planDigest: "f".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  });
+
+  const publicPort = Number(new URL(gateway.endpoint).port);
+  const originalEnd = ServerResponse.prototype.end;
+  let quarantineInjected = false;
+  ServerResponse.prototype.end = function patchedEnd(...args) {
+    if (!quarantineInjected && this.req?.socket?.localPort === publicPort) {
+      quarantineInjected = true;
+      void gateway.quarantine("COORDINATOR_QUARANTINE");
+    }
+    return Reflect.apply(originalEnd, this, args);
+  };
+  t.after(() => {
+    ServerResponse.prototype.end = originalEnd;
+  });
+
+  const call = request(gateway.endpoint, {
+    sessionId,
+    message: {
+      jsonrpc: "2.0",
+      id: 62,
+      method: "tools/call",
+      params: { name: "browser_click", arguments: { target: "approved" } },
+    },
+  }).catch((error) => error);
+  await waitFor(() => upstream.calls.length === 1);
+  assert.equal(gateway.active.phase, "execution");
+  assert.equal(gateway.active.remainingCalls, 1);
+
+  releaseResponse();
+  await call;
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  assert.equal(quarantineInjected, true);
+  assert.equal(gateway.active.phase, "quarantined");
+  assert.equal(gateway.active.remainingCalls, 1);
+  assert.equal(fatals.length, 1);
+  assert.equal(fatals[0].reason, "COORDINATOR_QUARANTINE");
+});
+
+test("an upstream POST timeout quarantines without advancing the approved queue", async (t) => {
+  const upstream = await startUpstream(t, {
+    toolResponder: async () => await new Promise(() => {}),
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    upstreamTimeoutMs: 100,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 60 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 60,
+    planDigest: "e".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  });
+
+  await request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 70, method: "tools/call", params: { name: "browser_click", arguments: { target: "approved" } } },
+  }).catch(() => undefined);
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "UPSTREAM_TIMEOUT");
+  assert.equal(gateway.active.phase, "quarantined");
+  assert.equal(gateway.active.remainingCalls, 1);
+});
+
+test("GET event streams are forwarded incrementally with only safe headers", async (t) => {
+  let releaseTail;
+  const tailReleased = new Promise((resolvePromise) => { releaseTail = resolvePromise; });
+  const upstream = await startUpstream(t, {
+    getResponder: async ({ response }) => {
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "set-cookie": "unsafe=1",
+        "x-upstream-secret": "unsafe",
+      });
+      response.write(": heartbeat\n\n");
+      await tailReleased;
+      response.end(sse({ jsonrpc: "2.0", method: "notifications/progress", params: { progress: 1 } }));
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    upstreamTimeoutMs: 50,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releaseTail();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 70 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  const url = new URL(gateway.endpoint);
+  let firstChunk;
+  let completed = false;
+  const streamResult = new Promise((resolvePromise, rejectPromise) => {
+    const outgoing = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${CAPABILITY_TOKEN}`,
+        "mcp-session-id": sessionId,
+        "last-event-id": "safe-event-1",
+      },
+    });
+    outgoing.once("error", rejectPromise);
+    outgoing.once("response", (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => {
+        chunks.push(chunk);
+        firstChunk ??= chunk.toString("utf8");
+      });
+      response.once("end", () => {
+        completed = true;
+        resolvePromise({ headers: response.headers, body: Buffer.concat(chunks).toString("utf8") });
+      });
+    });
+    outgoing.end();
+  });
+  await waitFor(() => firstChunk !== undefined);
+  assert.equal(firstChunk, ": heartbeat\n\n");
+  assert.equal(completed, false);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+  assert.deepEqual(fatals, []);
+  assert.equal(completed, false);
+  releaseTail();
+  const streamed = await streamResult;
+  assert.match(streamed.body, /notifications\/progress/u);
+  assert.equal(streamed.headers["set-cookie"], undefined);
+  assert.equal(streamed.headers["x-upstream-secret"], undefined);
+  assert.equal(upstream.requests.at(-1).headers["last-event-id"], "safe-event-1");
+});
+
+test("a downstream disconnect makes an in-flight call uncertain and quarantines it", async (t) => {
+  let releaseTool;
+  const released = new Promise((resolvePromise) => { releaseTool = resolvePromise; });
+  const upstream = await startUpstream(t, {
+    toolResponder: async ({ message, response }) => {
+      await released;
+      if (response.destroyed) return;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(sse({ jsonrpc: "2.0", id: message.id, result: { content: [] } }));
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releaseTool();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 80 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 80,
+    planDigest: "f".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  });
+  const url = new URL(gateway.endpoint);
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 81,
+    method: "tools/call",
+    params: { name: "browser_click", arguments: { target: "approved" } },
+  });
+  const outgoing = httpRequest({
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${CAPABILITY_TOKEN}`,
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      "mcp-session-id": sessionId,
+    },
+  });
+  outgoing.on("error", () => {});
+  outgoing.end(body);
+  await waitFor(() => upstream.calls.length === 1);
+  outgoing.destroy();
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "DOWNSTREAM_ABORTED");
+  assert.equal(gateway.active.phase, "quarantined");
+  assert.equal(gateway.active.remainingCalls, 1);
+});
+
+test("batch, oversized and stale-session requests quarantine without reaching raw MCP", async (t) => {
+  const cases = [
+    {
+      name: "JSON-RPC batch",
+      body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }]),
+      sessionId: undefined,
+      reason: "INVALID_JSON_RPC",
+    },
+    {
+      name: "oversized body",
+      body: `{"jsonrpc":"2.0","id":1,"method":"initialize","padding":"${"x".repeat(300_000)}"}`,
+      sessionId: undefined,
+      reason: "REQUEST_TOO_LARGE",
+    },
+    {
+      name: "unknown session",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      sessionId: "stale-session-0123456789abcdef",
+      reason: "UNKNOWN_SESSION",
+    },
+  ];
+  for (const [index, policyCase] of cases.entries()) {
+    await t.test(policyCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      await gateway.start({ jobId: JOB_ID, generation: 90 + index });
+      const result = await request(gateway.endpoint, {
+        body: policyCase.body,
+        sessionId: policyCase.sessionId,
+      }).catch((error) => error);
+      assert.ok(result instanceof Error || result.status === 403);
+      await waitFor(() => fatals.length === 1);
+      assert.equal(fatals[0].reason, policyCase.reason);
+      assert.equal(upstream.requests.length, 0);
+    });
+  }
+});
+
+test("installApproval is one-shot, generation-bound and forbidden while planning is in flight", async (t) => {
+  let releasePlanning;
+  const planningReleased = new Promise((resolvePromise) => { releasePlanning = resolvePromise; });
+  const upstream = await startUpstream(t, {
+    toolResponder: async ({ message, response }) => {
+      await planningReleased;
+      if (response.destroyed) return;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(sse({ jsonrpc: "2.0", id: message.id, result: { content: [] } }));
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releasePlanning();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 100 });
+  const { sessionId } = await initialize(gateway.endpoint);
+  const planning = request(gateway.endpoint, {
+    sessionId,
+    message: { jsonrpc: "2.0", id: 101, method: "tools/call", params: { name: "browser_snapshot", arguments: {} } },
+  }).catch((error) => error);
+  await waitFor(() => upstream.calls.length === 1);
+  assert.throws(() => gateway.installApproval({
+    jobId: JOB_ID,
+    generation: 100,
+    planDigest: "1".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  }), (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL");
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "STALE_APPROVAL");
+  releasePlanning();
+  await planning;
+});
+
+test("the generation-bound session registry is capped before another initialize reaches raw MCP", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 110 });
+  for (let index = 0; index < 16; index += 1) {
+    const initialized = await initialize(gateway.endpoint);
+    assert.equal(initialized.response.status, 200);
+  }
+  const overflow = await request(gateway.endpoint, {
+    message: { jsonrpc: "2.0", id: 200, method: "initialize", params: {} },
+  });
+  assert.equal(overflow.status, 403);
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "SESSION_LIMIT");
+  assert.equal(upstream.requests.filter(({ body }) => body.includes('"method":"initialize"')).length, 16);
+});
+
+test("concurrent initialize reservations cannot bypass the session cap", async (t) => {
+  let releaseInitializations;
+  const initializationsMayFinish = new Promise((resolvePromise) => { releaseInitializations = resolvePromise; });
+  let initializeCount = 0;
+  const upstream = await startUpstream(t, {
+    initializeResponder: async ({ message, response, sessionId }) => {
+      initializeCount += 1;
+      if (initializeCount <= 16) await initializationsMayFinish;
+      if (response.destroyed) return;
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "mcp-session-id": sessionId,
+      });
+      response.end(sse({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { protocolVersion: "2025-03-26", capabilities: {} },
+      }));
+    },
+  });
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(async () => {
+    releaseInitializations();
+    await gateway.stop();
+  });
+  await gateway.start({ jobId: JOB_ID, generation: 111 });
+
+  const pending = Array.from({ length: 16 }, (_, index) => request(gateway.endpoint, {
+    message: { jsonrpc: "2.0", id: 300 + index, method: "initialize", params: {} },
+  }).catch((error) => error));
+  await waitFor(() => initializeCount === 16);
+
+  const overflow = await request(gateway.endpoint, {
+    message: { jsonrpc: "2.0", id: 316, method: "initialize", params: {} },
+  });
+  assert.equal(overflow.status, 403);
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "SESSION_LIMIT");
+  assert.equal(initializeCount, 16);
+
+  releaseInitializations();
+  await Promise.all(pending);
+});
+
+test("approval contracts reject unsafe tools, duplicate ids, stale generations and oversized queues", async (t) => {
+  const base = {
+    jobId: JOB_ID,
+    generation: 120,
+    planDigest: "2".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  };
+  const cases = [
+    { name: "unsafe tool", patch: { calls: [{ id: "call-001", tool: "browser_evaluate", arguments: {} }] }, reason: "INVALID_APPROVAL" },
+    {
+      name: "duplicate call id",
+      patch: { calls: [
+        { id: "call-001", tool: "browser_click", arguments: { target: "one" } },
+        { id: "call-001", tool: "browser_click", arguments: { target: "two" } },
+      ] },
+      reason: "INVALID_APPROVAL",
+    },
+    { name: "stale generation", patch: { generation: 121 }, reason: "STALE_APPROVAL" },
+    {
+      name: "oversized queue",
+      patch: { calls: [{ id: "call-001", tool: "browser_type", arguments: { target: "field", text: "x".repeat(270_000) } }] },
+      reason: "INVALID_APPROVAL",
+    },
+  ];
+  for (const [index, approvalCase] of cases.entries()) {
+    await t.test(approvalCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      await gateway.start({ jobId: JOB_ID, generation: 120 + index * 10 });
+      const contract = {
+        ...base,
+        generation: 120 + index * 10,
+        ...approvalCase.patch,
+      };
+      if (approvalCase.name === "stale generation") contract.generation = 121 + index * 10;
+      assert.throws(
+        () => gateway.installApproval(contract),
+        (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL",
+      );
+      await waitFor(() => fatals.length === 1);
+      assert.equal(fatals[0].reason, approvalCase.reason);
+      assert.equal(gateway.active.phase, "quarantined");
+    });
+  }
+});
+
+test("start cannot overlap an unfinished stop or be clobbered by its continuation", async (t) => {
+  const upstream = await startUpstream(t);
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async () => {},
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 125 });
+
+  const stopping = gateway.stop();
+  await assert.rejects(
+    gateway.start({ jobId: JOB_ID, generation: 126 }),
+    (error) => error.code === "MCP_GATEWAY_BUSY",
+  );
+  await stopping;
+  assert.equal(gateway.active, null);
+  assert.equal(gateway.endpoint, null);
+
+  await gateway.start({ jobId: JOB_ID, generation: 126 });
+  assert.equal(gateway.active.generation, 126);
+  assert.equal(gateway.active.phase, "planning");
+});
+
+test("installApproval and coordinator quarantine are one-shot fail-closed transitions", async (t) => {
+  const upstream = await startUpstream(t);
+  const fatals = [];
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async (event) => fatals.push(event),
+  });
+  t.after(() => gateway.stop());
+  await gateway.start({ jobId: JOB_ID, generation: 130 });
+  const approval = {
+    jobId: JOB_ID,
+    generation: 130,
+    planDigest: "3".repeat(64),
+    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+  };
+  gateway.installApproval(approval);
+  assert.throws(
+    () => gateway.installApproval(approval),
+    (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL",
+  );
+  await gateway.quarantine("COORDINATOR_QUARANTINE");
+  await gateway.quarantine("COORDINATOR_QUARANTINE");
+  await waitFor(() => fatals.length === 1);
+  assert.equal(fatals[0].reason, "STALE_APPROVAL");
+  assert.equal(gateway.active.phase, "quarantined");
+});

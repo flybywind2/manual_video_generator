@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "playwright": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8931/mcp",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:MANUAL_STUDIO_MCP_TOKEN}"
+      }
+    }
+  },
+  "permission": {
+    "*": "deny",
+    "playwright_browser_navigate": "deny",
+    "playwright_browser_navigate_back": "deny",
+    "playwright_browser_snapshot": "deny",
+    "playwright_browser_click": "deny",
+    "playwright_browser_type": "deny",
+    "playwright_browser_fill_form": "deny",
+    "playwright_browser_press_key": "deny",
+    "playwright_browser_wait_for": "deny",
+    "playwright_browser_tabs": "deny",
+    "playwright_browser_take_screenshot": "deny",
+    "playwright_browser_start_video": "deny",
+    "playwright_browser_stop_video": "deny",
+    "playwright_browser_video_chapter": "deny",
+    "playwright_browser_video_show_actions": "deny",
+    "playwright_browser_video_hide_actions": "deny",
+    "bash": "deny",
+    "edit": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "external_directory": "deny",
+    "question": "deny",
+    "playwright_browser_run_code_unsafe": "deny",
+    "playwright_browser_evaluate": "deny",
+    "playwright_browser_file_upload": "deny",
+    "playwright_browser_network_state_set": "deny",
+    "playwright_browser_storage_state": "deny"
+  }
+}
