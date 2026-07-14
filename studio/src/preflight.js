@@ -122,20 +122,43 @@ async function resolvePackageBin(config, packageName) {
   };
 }
 
-async function locateCommand(command) {
-  const locator = process.platform === "win32" ? "where.exe" : "which";
+function firstLocatorResult(stdout) {
+  return String(stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? null;
+}
+
+async function locateCommand(
+  command,
+  { locatorExec = execFileAsync, platform = process.platform } = {},
+) {
+  const locator = platform === "win32" ? "where.exe" : "which";
   try {
-    const { stdout } = await execFileAsync(locator, [command], {
+    const { stdout } = await locatorExec(locator, [command], {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
     });
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean) ?? null;
-  } catch {
-    return null;
+    const result = firstLocatorResult(stdout);
+    if (!result) {
+      throw new RuntimeProbeError("lookup_failed");
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof RuntimeProbeError) {
+      throw error;
+    }
+
+    if (
+      error?.code === 1
+      && error?.killed !== true
+      && !error?.signal
+      && !firstLocatorResult(error?.stdout)
+    ) {
+      return null;
+    }
+    throw new RuntimeProbeError("lookup_failed");
   }
 }
 
@@ -285,7 +308,9 @@ async function inspectTool(spec, config, dependencies) {
 export async function inspectRuntime({
   config,
   nodeVersion = process.version,
-  findExecutable = locateCommand,
+  locatorExec = execFileAsync,
+  platform = process.platform,
+  findExecutable,
   locate = defaultLocate,
   runCommand = runVersionCommand,
   version = defaultVersion,
@@ -297,6 +322,8 @@ export async function inspectRuntime({
   const actualNode = normalizeVersion(nodeVersion);
   const nodeMajor = Number.parseInt(actualNode?.split(".")[0] ?? "", 10);
   const nodeReady = nodeMajor >= 22;
+  const commandLocator = findExecutable ?? ((command) =>
+    locateCommand(command, { locatorExec, platform }));
   const checks = {
     node: freezeCheck({
       status: nodeReady ? "ready" : "mismatch",
@@ -308,7 +335,7 @@ export async function inspectRuntime({
 
   for (const spec of TOOL_SPECS) {
     checks[spec.key] = await inspectTool(spec, config, {
-      findExecutable,
+      findExecutable: commandLocator,
       locate,
       runCommand,
       version,

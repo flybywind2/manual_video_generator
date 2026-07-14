@@ -277,3 +277,64 @@ test("default Python discovery reports mismatch when every located candidate has
   assert.equal(report.checks.python.expected, "3.13.14");
   assert.deepEqual(attemptedArguments, [["--version"], ["-3.13", "--version"]]);
 });
+
+test("production locator treats the standard empty exit 1 as command not found", async () => {
+  const secret = "not-found-stderr-must-not-leak";
+  const calls = [];
+  const report = await inspectRuntime({
+    config: buildConfig({ root, env: {} }),
+    platform: "win32",
+    locatorExec: async (locator, args, options) => {
+      calls.push({ locator, args: [...args], shell: options.shell });
+      const error = new Error(secret);
+      Object.assign(error, { code: 1, stdout: "", stderr: secret });
+      throw error;
+    },
+  });
+  const serialized = JSON.stringify(report);
+
+  assert.equal(report.checks.opencode.status, "missing");
+  assert.equal(report.checks.opencode.reason, "not_found");
+  assert.deepEqual(calls[0], {
+    locator: "where.exe",
+    args: ["opencode"],
+    shell: undefined,
+  });
+  assert.equal(serialized.includes(secret), false);
+});
+
+test("production locator sanitizes timeout, permission, spawn, and abnormal failures", async (t) => {
+  const failures = [
+    { name: "timeout", properties: { code: "ETIMEDOUT", killed: true } },
+    { name: "permission", properties: { code: "EACCES" } },
+    { name: "missing locator", properties: { code: "ENOENT" } },
+    { name: "abnormal exit", properties: { code: 2 } },
+  ];
+
+  for (const failure of failures) {
+    await t.test(failure.name, async () => {
+      const secret = `secret-${failure.name}`;
+      const report = await inspectRuntime({
+        config: buildConfig({ root, env: {} }),
+        platform: "win32",
+        locatorExec: async () => {
+          const error = new Error(secret);
+          Object.assign(error, {
+            ...failure.properties,
+            path: `C:\\private\\${secret}\\where.exe`,
+            stdout: failure.name === "timeout" ? "C:\\partial\\opencode.exe\r\n" : "",
+            stderr: secret,
+          });
+          throw error;
+        },
+      });
+      const serialized = JSON.stringify(report);
+
+      assert.equal(report.checks.opencode.status, "mismatch");
+      assert.equal(report.checks.opencode.reason, "lookup_failed");
+      assert.equal(report.checks.opencode.actual, null);
+      assert.equal(serialized.includes(secret), false);
+      assert.equal(serialized.includes("where.exe"), false);
+    });
+  }
+});
