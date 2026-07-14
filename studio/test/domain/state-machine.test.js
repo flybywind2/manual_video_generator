@@ -56,6 +56,7 @@ test("invalid transitions expose only safe workflow context", () => {
 });
 
 test("execution mismatch pauses and explicit reapproval resumes execution", () => {
+  assert.equal(transition("executing", "EXECUTION_PROGRESS"), "executing");
   assert.equal(transition("executing", "EXECUTION_MISMATCH"), "needs_review");
   assert.equal(transition("needs_review", "REAPPROVE_EXECUTION"), "executing");
 });

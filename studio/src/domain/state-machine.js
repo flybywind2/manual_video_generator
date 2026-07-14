@@ -41,6 +41,7 @@ export const TRANSITIONS = Object.freeze({
     EXECUTION_COMPLETED: "narrating",
     EXECUTION_FAILED: "failed",
     EXECUTION_MISMATCH: "needs_review",
+    EXECUTION_PROGRESS: "executing",
   }),
   needs_review: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",
