@@ -4,6 +4,7 @@ const DEFAULT_PORT = 4317;
 
 export const VERSION_PINS = Object.freeze({
   playwrightMcp: "0.0.78",
+  python: "3.13.14",
   supertonic: "1.3.1",
   hyperframes: "0.7.57",
 });

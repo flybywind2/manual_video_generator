@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -6,6 +8,27 @@ import { buildConfig } from "../src/config.js";
 import { inspectRuntime } from "../src/preflight.js";
 
 const root = path.resolve("test-fixtures", "studio-root");
+
+async function temporaryRoot(t) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "manual-studio-preflight-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+async function writePackageFixture(
+  fixtureRoot,
+  packageName,
+  { version, source = "", manifestText } = {},
+) {
+  const directory = path.join(fixtureRoot, "node_modules", ...packageName.split("/"));
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    path.join(directory, "package.json"),
+    manifestText ?? JSON.stringify({ name: packageName, version, bin: "./cli.js" }),
+    "utf8",
+  );
+  await writeFile(path.join(directory, "cli.js"), source, "utf8");
+}
 
 function readyRuntimeOverrides(overrides = {}) {
   const locations = {
@@ -35,11 +58,12 @@ function readyRuntimeOverrides(overrides = {}) {
   };
 }
 
-test("buildConfig pins the three package runtimes exactly", () => {
+test("buildConfig pins every version-sensitive runtime exactly", () => {
   const config = buildConfig({ root, env: {} });
 
   assert.deepEqual(config.versions, {
     playwrightMcp: "0.0.78",
+    python: "3.13.14",
     supertonic: "1.3.1",
     hyperframes: "0.7.57",
   });
@@ -152,5 +176,104 @@ test("inspectRuntime public status never serializes environment values or thrown
   assert.equal(serialized.includes("never-print-this-api-key"), false);
   assert.equal(serialized.includes("LOGIN_PASSWORD"), false);
   assert.equal(serialized.includes("OPENAI_API_KEY"), false);
-  assert.equal(report.checks.opencode.status, "missing");
+  assert.equal(report.checks.opencode.status, "mismatch");
+  assert.equal(report.checks.opencode.reason, "probe_failed");
+});
+
+test("default package probe executes pinned JS entries and rejects an unlaunchable entry", async (t) => {
+  const fixtureRoot = await temporaryRoot(t);
+  await writePackageFixture(fixtureRoot, "@playwright/mcp", {
+    version: "0.0.78",
+    source: "process.exitCode = 23;\n",
+  });
+  await writePackageFixture(fixtureRoot, "hyperframes", {
+    version: "0.7.57",
+    source: 'process.stdout.write("0.7.57\\n");\n',
+  });
+
+  const report = await inspectRuntime({
+    config: buildConfig({ root: fixtureRoot, env: {} }),
+    findExecutable: async () => null,
+  });
+
+  assert.equal(report.checks.playwrightMcp.status, "mismatch");
+  assert.equal(report.checks.playwrightMcp.reason, "probe_failed");
+  assert.equal(report.checks.hyperframes.status, "ready");
+});
+
+test("default package probe compares CLI output with the pinned manifest version", async (t) => {
+  const fixtureRoot = await temporaryRoot(t);
+  await writePackageFixture(fixtureRoot, "@playwright/mcp", {
+    version: "0.0.78",
+    source: 'process.stdout.write("0.0.77\\n");\n',
+  });
+
+  const report = await inspectRuntime({
+    config: buildConfig({ root: fixtureRoot, env: {} }),
+    findExecutable: async () => null,
+  });
+
+  assert.equal(report.checks.playwrightMcp.status, "mismatch");
+  assert.equal(report.checks.playwrightMcp.reason, "version_mismatch");
+  assert.equal(report.checks.playwrightMcp.actual, "0.0.77");
+});
+
+test("default package discovery classifies a corrupt located manifest without leaking its text", async (t) => {
+  const fixtureRoot = await temporaryRoot(t);
+  const secret = "manifest-secret-must-not-leak";
+  await writePackageFixture(fixtureRoot, "@playwright/mcp", {
+    manifestText: `{not-json:${secret}`,
+  });
+
+  const report = await inspectRuntime({
+    config: buildConfig({ root: fixtureRoot, env: {} }),
+    findExecutable: async () => null,
+  });
+  const serialized = JSON.stringify(report);
+
+  assert.equal(report.checks.playwrightMcp.status, "mismatch");
+  assert.equal(report.checks.playwrightMcp.reason, "manifest_invalid");
+  assert.equal(serialized.includes(secret), false);
+});
+
+test("default Python discovery continues from a wrong alias to py.exe with argument arrays", async () => {
+  const invocations = [];
+  const report = await inspectRuntime({
+    config: buildConfig({ root, env: {} }),
+    nodeVersion: "v24.13.1",
+    findExecutable: async (command) => {
+      if (command === "python3.13") return "C:\\Python314\\python.exe";
+      if (command === "py.exe") return "C:\\Windows\\py.exe";
+      return null;
+    },
+    runCommand: async (executable, args) => {
+      invocations.push({ executable, args });
+      return executable.endsWith("py.exe") ? "Python 3.13.14" : "Python 3.14.3";
+    },
+  });
+
+  assert.equal(report.checks.python.status, "ready");
+  assert.equal(report.checks.python.actual, "3.13.14");
+  assert.deepEqual(invocations, [
+    { executable: "C:\\Python314\\python.exe", args: ["--version"] },
+    { executable: "C:\\Windows\\py.exe", args: ["-3.13", "--version"] },
+  ]);
+});
+
+test("default Python discovery reports mismatch when every located candidate has the wrong version", async () => {
+  const attemptedArguments = [];
+  const report = await inspectRuntime({
+    config: buildConfig({ root, env: {} }),
+    findExecutable: async (command) =>
+      ["python3.13", "py.exe"].includes(command) ? `C:\\wrong\\${command}` : null,
+    runCommand: async (_executable, args) => {
+      attemptedArguments.push(args);
+      return "Python 3.14.3";
+    },
+  });
+
+  assert.equal(report.checks.python.status, "mismatch");
+  assert.equal(report.checks.python.reason, "version_mismatch");
+  assert.equal(report.checks.python.expected, "3.13.14");
+  assert.deepEqual(attemptedArguments, [["--version"], ["-3.13", "--version"]]);
 });
