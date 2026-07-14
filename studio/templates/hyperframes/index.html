@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Manual Studio composition</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080b18; }
+      #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #080b18; font-family: sans-serif; }
+      .browser-video { position: absolute; inset: 0; width: 1920px; height: 1080px; object-fit: contain; background: #080b18; }
+      .narration-audio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+      .chapter-card { position: absolute; top: 42px; left: 54px; z-index: 30; max-width: 760px; padding: 16px 24px; border: 1px solid rgba(181, 166, 255, 0.72); border-radius: 14px; color: #ffffff; background: rgba(22, 18, 55, 0.88); box-shadow: 0 12px 40px rgba(36, 26, 84, 0.28); font-size: 28px; font-weight: 700; line-height: 1.35; }
+      .caption { position: absolute; left: 240px; right: 240px; bottom: 54px; z-index: 40; padding: 22px 30px; border-radius: 18px; color: #ffffff; background: rgba(7, 9, 24, 0.88); box-shadow: 0 14px 48px rgba(0, 0, 0, 0.34); font-size: 36px; font-weight: 700; line-height: 1.45; text-align: center; word-break: keep-all; }
+      .action-highlight { position: absolute; z-index: 20; border: 5px solid #8f7cff; border-radius: 12px; box-shadow: 0 0 0 7px rgba(143, 124, 255, 0.24), 0 0 38px rgba(76, 111, 255, 0.44); pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <main id="root" data-composition-id="@@COMPOSITION_ID@@" data-width="1920" data-height="1080" data-fps="30" data-duration="@@DURATION_SECONDS@@" data-start="0" data-no-timeline>
+@@CLIPS@@
+    </main>
+  </body>
+</html>
