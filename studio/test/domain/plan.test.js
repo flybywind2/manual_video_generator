@@ -92,21 +92,21 @@ test("plan requires an HTTP(S) target URL and matching canonical origin", () => 
   );
 });
 
-test("plan requires at least one step and caps plans at 30 steps", () => {
+test("plan requires at least one step and caps plans at 12 executable steps", () => {
   assert.throws(() => validatePlan(validPlan({ steps: [] })), {
     code: "INVALID_PLAN",
   });
 
-  const thirtySteps = Array.from({ length: 30 }, (_, index) =>
+  const twelveSteps = Array.from({ length: 12 }, (_, index) =>
     validStep({ id: `step-${String(index + 1).padStart(2, "0")}` }),
   );
-  assert.equal(validatePlan(validPlan({ steps: thirtySteps })).steps.length, 30);
+  assert.equal(validatePlan(validPlan({ steps: twelveSteps })).steps.length, 12);
 
-  const thirtyOneSteps = [
-    ...thirtySteps,
-    validStep({ id: "step-31" }),
+  const thirteenSteps = [
+    ...twelveSteps,
+    validStep({ id: "step-13" }),
   ];
-  assert.throws(() => validatePlan(validPlan({ steps: thirtyOneSteps })), {
+  assert.throws(() => validatePlan(validPlan({ steps: thirteenSteps })), {
     code: "INVALID_PLAN",
   });
 });
@@ -222,6 +222,27 @@ test("call ids are globally unique and exact call arguments are approval-digeste
     })),
     { code: "INVALID_PLAN" },
   );
+});
+
+test("canonical plans are bounded to fit the Windows OpenCode execution command", () => {
+  const oversized = validPlan({
+    steps: [
+      validStep({ narration: "가".repeat(4_000) }),
+      validStep({
+        id: "step-02",
+        narration: "나".repeat(4_000),
+        calls: [
+          {
+            id: "step-02.click",
+            tool: "browser_click",
+            arguments: { element: "도움말 메뉴", target: "e12" },
+          },
+        ],
+      }),
+    ],
+  });
+
+  assert.throws(() => canonicalPlan(oversized), { code: "INVALID_PLAN" });
 });
 
 test("approved digest is required to match the exact canonical plan", () => {

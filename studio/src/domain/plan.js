@@ -50,6 +50,7 @@ const CLICK_BUTTONS = new Set(["left", "middle", "right"]);
 const CLICK_MODIFIERS = new Set(["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]);
 const FORM_FIELD_TYPES = new Set(["textbox", "checkbox", "radio", "combobox", "slider"]);
 const SENSITIVE_TARGET = /(?:password|passcode|credential|secret|비밀번호)/iu;
+const MAX_CANONICAL_PLAN_CODE_UNITS = 6_000;
 
 function invalidPlan(path, reason) {
   throw new StudioError("The plan does not match the approved plan contract.", {
@@ -442,8 +443,8 @@ function normalizedForbiddenActions(value) {
 }
 
 function normalizedSteps(value, targetOrigin, forbiddenActions) {
-  if (!isDenseArray(value) || value.length < 1 || value.length > 30) {
-    invalidPlan("plan.steps", "step_count_must_be_between_1_and_30");
+  if (!isDenseArray(value) || value.length < 1 || value.length > 12) {
+    invalidPlan("plan.steps", "step_count_must_be_between_1_and_12");
   }
 
   const ids = new Set();
@@ -518,6 +519,9 @@ function normalizePlan(candidate) {
     captureSettings: captureSettings(candidate.captureSettings),
     steps: normalizedSteps(candidate.steps, targetOrigin, forbiddenActions),
   };
+  if (JSON.stringify(normalized).length > MAX_CANONICAL_PLAN_CODE_UNITS) {
+    invalidPlan("plan", "canonical_plan_too_large");
+  }
 
   return Object.freeze(normalized);
 }
