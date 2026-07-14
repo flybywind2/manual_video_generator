@@ -130,7 +130,7 @@ function Get-SupertonicStatus {
             "onnx\vocoder.onnx",
             "voice_styles\M1.json"
         )
-        $modelReady = ($requiredModelFiles | Where-Object {
+        $modelReady = @($requiredModelFiles | Where-Object {
             -not (Test-Path -LiteralPath (Join-Path $CacheRoot $_) -PathType Leaf)
         }).Count -eq 0
         return [pscustomobject]@{
@@ -247,7 +247,7 @@ $checks = [ordered]@{
     ffmpeg = [ordered]@{ ready = [bool]$ffmpegVersion; expected = "installed"; actual = $ffmpegVersion }
     ffprobe = [ordered]@{ ready = [bool]$ffprobeVersion; expected = "installed"; actual = $ffprobeVersion }
 }
-$ready = ($checks.Values | Where-Object { -not $_.ready }).Count -eq 0
+$ready = @($checks.Values | Where-Object { -not $_.ready }).Count -eq 0
 [ordered]@{
     ready = $ready
     mode = if ($ReadOnly) { "check" } else { "prepare" }

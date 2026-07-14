@@ -72,6 +72,24 @@ test("bootstrap pins and checks every supported engine with a no-mutation check 
   assert.match(script, /data[\\/]cache[\\/]supertonic-3/iu);
 });
 
+test("bootstrap treats zero missing Supertonic model files as a ready array result", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(
+    script,
+    /\$modelReady\s*=\s*@\(\s*\$requiredModelFiles\s*\|\s*Where-Object[\s\S]*?\)\.Count\s*-eq\s*0/iu,
+  );
+});
+
+test("bootstrap treats zero failed engine checks as a ready array result", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(
+    script,
+    /\$ready\s*=\s*@\(\s*\$checks\.Values\s*\|\s*Where-Object[\s\S]*?\)\.Count\s*-eq\s*0/iu,
+  );
+});
+
 test("start is the loopback-only entrypoint and never launches the retired backend", async () => {
   const script = await source("scripts/start.ps1");
 
