@@ -66,14 +66,14 @@ There is no FastAPI, Express, React, database, Redis, or external queue.
 
 ### OpenCode
 
-A long-running loopback OpenCode server avoids restarting MCP for every phase. The coordinator invokes non-interactive runs in this shape:
+A job-scoped loopback OpenCode server stays alive across authentication, planning, and execution, then stops before the next queued job. The coordinator starts Playwright MCP as a separate loopback server so OpenCode never inherits automatic-login credentials, then invokes non-interactive runs in this shape:
 
 ```powershell
-opencode run --format json --attach http://127.0.0.1:4096 --agent manual-video-planner "<prompt>"
-opencode run --format json --attach http://127.0.0.1:4096 --agent manual-video-executor "<prompt>"
+opencode run --pure --format json --attach http://127.0.0.1:4096 --agent manual-video-planner "<prompt>"
+opencode run --pure --format json --attach http://127.0.0.1:4096 --agent manual-video-executor "<prompt>"
 ```
 
-No `--model` flag is passed. Project-local agent configuration denies shell, edit, and unsafe browser-code tools while allowing the required Playwright MCP tools. OpenCode emits JSON events; the coordinator extracts the final structured result and stores the complete redacted event stream.
+No `--model` flag is passed. Project-local agent configuration defaults every tool permission to deny and explicitly allows only the required Playwright MCP tools. `bash`, `edit`, `webfetch`, `websearch`, `external_directory`, `question`, and unsafe browser-code tools remain denied. OpenCode emits JSON events; the coordinator extracts the final structured result and stores the complete redacted event stream.
 
 ### Playwright MCP
 
@@ -83,6 +83,9 @@ Pin `@playwright/mcp` and run a headed Edge browser with:
 - `1920x1080` viewport;
 - a job-owned output directory;
 - session saving and the devtools capability;
+- a job-specific `network.allowedOrigins` list used as defense in depth;
+- blocked service workers plus a service-owned `BrowserContext.route()` guard that aborts unapproved document, subresource, and redirect origins before requests leave the browser;
+- a service-owned bootstrap init-page that receives automatic-login credentials only in the MCP child environment;
 - video recording, tracing, action overlays, chapter markers, snapshots, and screenshots;
 - unsafe arbitrary browser code disabled.
 
@@ -102,9 +105,12 @@ OpenCode creates structured scene and narration manifests, not unrestricted comp
 stateDiagram-v2
     [*] --> created
     created --> authenticating
-    authenticating --> planning
+    authenticating --> awaiting_manual_login
+    awaiting_manual_login --> planning: user confirms
+    authenticating --> planning: automatic login
     planning --> plan_review
-    plan_review --> executing: approved
+    plan_review --> approved: user approves
+    approved --> executing: user starts
     executing --> needs_review: unexpected page
     needs_review --> executing: re-approved
     executing --> narrating
@@ -169,17 +175,17 @@ The complete plan also includes the target origin, success criteria, forbidden a
 
 - Encrypt stored credentials with Windows DPAPI for the current user.
 - Never store plain credentials in `job.json`, plans, logs, HTML, or OpenCode prompts.
-- Decrypt into a job-private temporary secrets file immediately before authentication.
-- Pass that file through Playwright MCP's secrets mechanism.
-- Delete it in a `finally` cleanup path on success, failure, timeout, and cancellation.
+- Start Playwright MCP separately from OpenCode and pass credentials only in that MCP child process environment.
+- Use a service-owned init-page module with validated login selectors to fill and submit the login form; OpenCode never sees or types the values.
+- If a temporary MCP redaction file is needed, place it outside job artifacts under an ACL-restricted runtime directory, delete it immediately after startup and in every `finally` path, and scavenge stale files on the next service start.
 - Redact exact secret values and common credential keys from every captured process line.
 
 The dedicated service profile is the default. Connecting to a user's normal browser profile is not part of the first release.
 
 ## Safety Boundary
 
-- The target origin becomes the default domain allowlist.
-- Navigation to an unapproved origin pauses the job.
+- The target origin plus explicitly approved authentication/resource origins become the canonical job allowlist and also populate Playwright MCP `network.allowedOrigins` as defense in depth.
+- A service-owned init-page blocks service workers and installs `BrowserContext.route()` before target navigation; it aborts unapproved document, subresource, and redirect requests. Any reported origin drift also pauses the job.
 - Plans containing delete, submit, send, publish, purchase, or equivalent irreversible actions are marked `blocked` until explicitly removed or separately approved.
 - Execution is limited to the approved plan length plus bounded recovery observations.
 - The approved plan digest must match before every execution or resume.
