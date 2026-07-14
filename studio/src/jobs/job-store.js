@@ -9,7 +9,7 @@ import {
   rm,
   unlink,
 } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   basename,
   dirname,
@@ -63,6 +63,13 @@ const SNAPSHOT_FIELDS = Object.freeze([
   "eventSequence",
 ]);
 const OWNER_FIELDS = Object.freeze(["pid", "token", "createdAt"]);
+const COMPARE_TRANSITION_FIELDS = Object.freeze([
+  "expectedState",
+  "expectedEventSequence",
+  "expectedPlanDigest",
+  "eventName",
+  "data",
+]);
 const ROOT_LOCK_NAME = ".studio-owner.lock";
 const atomicWriteChains = new Map();
 const jobOperationChains = new Map();
@@ -93,6 +100,57 @@ function assertJobId(jobId) {
     );
   }
   return jobId;
+}
+
+function compareTransitionInput(value) {
+  try {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+      Reflect.ownKeys(value).length !== COMPARE_TRANSITION_FIELDS.length ||
+      !Reflect.ownKeys(value).every(
+        (key) => typeof key === "string" && COMPARE_TRANSITION_FIELDS.includes(key),
+      )
+    ) {
+      throw new Error("fields");
+    }
+    const values = Object.create(null);
+    for (const field of COMPARE_TRANSITION_FIELDS) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, field);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new Error("property");
+      }
+      values[field] = descriptor.value;
+    }
+    if (
+      typeof values.expectedState !== "string" ||
+      !Object.hasOwn(TRANSITIONS, values.expectedState) ||
+      !Number.isSafeInteger(values.expectedEventSequence) ||
+      values.expectedEventSequence < 1 ||
+      typeof values.expectedPlanDigest !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(values.expectedPlanDigest) ||
+      typeof values.eventName !== "string" ||
+      !EVENT_NAME.test(values.eventName)
+    ) {
+      throw new Error("value");
+    }
+    return Object.freeze({
+      expectedState: values.expectedState,
+      expectedEventSequence: values.expectedEventSequence,
+      expectedPlanDigest: values.expectedPlanDigest,
+      eventName: values.eventName,
+      data: clonePublicData(values.data),
+    });
+  } catch (error) {
+    if (error instanceof StudioError) throw error;
+    throw jobError(
+      "INVALID_COMPARE_TRANSITION",
+      "The compare-and-transition request is invalid.",
+      "invalid_compare_contract",
+    );
+  }
 }
 
 function isSensitiveKey(key) {
@@ -1249,37 +1307,83 @@ export class JobStore {
     });
   }
 
+  async #commitTransition(validId, current, eventName, safeData) {
+    const nextState = workflowTransition(current.state, eventName);
+    const timestamp = monotonicTimestamp(this.#now(), current.updatedAt);
+    const event = Object.freeze({
+      jobId: validId,
+      sequence: current.eventSequence + 1,
+      timestamp,
+      event: eventName,
+      state: nextState,
+      data: safeData,
+    });
+    const snapshot = Object.freeze({
+      id: validId,
+      state: nextState,
+      createdAt: current.createdAt,
+      updatedAt: timestamp,
+      eventSequence: event.sequence,
+    });
+    const paths = this.#paths(validId);
+    await durableAppend(paths.events, `${JSON.stringify(event)}\n`);
+    this.#notify(event);
+    try {
+      await writeJsonAtomically(paths.snapshot, snapshot);
+    } catch {
+      // The durable event is the commit record; job.json is a repairable cache.
+    }
+    return freezeSnapshot(snapshot, current.request);
+  }
+
   async transition(jobId, eventName, data = {}) {
     const validId = assertJobId(jobId);
     const safeData = clonePublicData(data);
     return this.#serialize(validId, async () => {
       const { job: current } = await this.#loadInternal(validId);
-      const nextState = workflowTransition(current.state, eventName);
-      const timestamp = monotonicTimestamp(this.#now(), current.updatedAt);
-      const event = Object.freeze({
-        jobId: validId,
-        sequence: current.eventSequence + 1,
-        timestamp,
-        event: eventName,
-        state: nextState,
-        data: safeData,
-      });
-      const snapshot = Object.freeze({
-        id: validId,
-        state: nextState,
-        createdAt: current.createdAt,
-        updatedAt: timestamp,
-        eventSequence: event.sequence,
-      });
-      const paths = this.#paths(validId);
-      await durableAppend(paths.events, `${JSON.stringify(event)}\n`);
-      this.#notify(event);
-      try {
-        await writeJsonAtomically(paths.snapshot, snapshot);
-      } catch {
-        // The durable event is the commit record; job.json is a repairable cache.
+      return this.#commitTransition(validId, current, eventName, safeData);
+    });
+  }
+
+  async compareAndTransition(jobId, input) {
+    const validId = assertJobId(jobId);
+    const comparison = compareTransitionInput(input);
+    return this.#serialize(validId, async () => {
+      const { job: current, events } = await this.#loadInternal(validId);
+      const latest = events.at(-1);
+      const digestProperty = latest === undefined
+        ? undefined
+        : Object.getOwnPropertyDescriptor(latest.data, "planDigest");
+      const actualDigest =
+        digestProperty && "value" in digestProperty
+          ? digestProperty.value
+          : undefined;
+      const digestMatches =
+        typeof actualDigest === "string" &&
+        /^[a-f0-9]{64}$/u.test(actualDigest) &&
+        timingSafeEqual(
+          Buffer.from(actualDigest, "hex"),
+          Buffer.from(comparison.expectedPlanDigest, "hex"),
+        );
+      if (
+        current.state !== comparison.expectedState ||
+        current.eventSequence !== comparison.expectedEventSequence ||
+        latest?.sequence !== comparison.expectedEventSequence ||
+        !digestMatches
+      ) {
+        throw jobError(
+          "JOB_COMPARE_FAILED",
+          "The job changed before the transition could be committed.",
+          "current_job_changed",
+          true,
+        );
       }
-      return freezeSnapshot(snapshot, current.request);
+      return this.#commitTransition(
+        validId,
+        current,
+        comparison.eventName,
+        comparison.data,
+      );
     });
   }
 

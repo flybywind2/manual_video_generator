@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { digestPlan } from "../../src/domain/plan.js";
+import { digestPlan, validatePlan } from "../../src/domain/plan.js";
 import { JobStore } from "../../src/jobs/job-store.js";
 import {
   createPlanningWorkflow,
@@ -171,6 +171,7 @@ test("PLAN_READY persistence failures are not masked as planner-output failures"
       transitions.push(event);
       throw persistenceError;
     },
+    async compareAndTransition() {},
   };
   const { workflow } = workflowHarness(store, JSON.stringify(validPlan()));
 
@@ -298,6 +299,90 @@ test("latest canonical plan is recoverable from durable events after restart", a
   await restarted.close();
 });
 
+test("restored plans are rebound to the immutable job target before approval", async (t) => {
+  const jobId = "job-planrestorebad1";
+  const { store } = await createPlanningStore(t, jobId);
+  const foreignPlan = validatePlan(validPlan({
+    targetUrl: "https://attacker.invalid/dashboard",
+    targetOrigin: "https://attacker.invalid",
+  }));
+  const foreignDigest = digestPlan(foreignPlan);
+  await store.transition(jobId, "PLAN_READY", {
+    plan: foreignPlan,
+    planDigest: foreignDigest,
+  });
+  const { workflow } = workflowHarness(store, JSON.stringify(validPlan()));
+
+  await assert.rejects(restoreLatestPlan(store, jobId), {
+    code: "PLANNING_AUTHORITY_MISMATCH",
+  });
+  await assert.rejects(workflow.approvePlan(jobId, foreignDigest), {
+    code: "PLANNING_AUTHORITY_MISMATCH",
+  });
+  assert.equal((await store.load(jobId)).state, "plan_review");
+  assert.equal(
+    (await store.readEvents(jobId)).some(({ event }) => event === "APPROVE_PLAN"),
+    false,
+  );
+});
+
+test("cross-instance plan edits use durable CAS so only one stale digest can commit", async (t) => {
+  const jobId = "job-plancrosscas01";
+  const { store } = await createPlanningStore(t, jobId);
+  const base = workflowHarness(store, JSON.stringify(validPlan()));
+  const planned = await base.workflow.createPlan(jobId);
+  let readCount = 0;
+  let releaseReads;
+  const readGate = new Promise((resolvePromise) => {
+    releaseReads = resolvePromise;
+  });
+  const sharedStore = {
+    load: (...args) => store.load(...args),
+    transition: (...args) => store.transition(...args),
+    compareAndTransition: (...args) => store.compareAndTransition(...args),
+    async readEvents(...args) {
+      const snapshot = await store.readEvents(...args);
+      readCount += 1;
+      if (readCount <= 2) {
+        if (readCount === 2) releaseReads();
+        await readGate;
+      }
+      return snapshot;
+    },
+  };
+  const firstWorkflow = workflowHarness(sharedStore, JSON.stringify(validPlan())).workflow;
+  const secondWorkflow = workflowHarness(sharedStore, JSON.stringify(validPlan())).workflow;
+  const auth = {
+    async startAuthentication() {},
+    async confirmManualLogin() {},
+    async cancelAuthentication() {},
+  };
+  const firstService = createStudioService({
+    authenticationWorkflow: auth,
+    planningWorkflow: firstWorkflow,
+  });
+  const secondService = createStudioService({
+    authenticationWorkflow: auth,
+    planningWorkflow: secondWorkflow,
+  });
+  const edits = await Promise.allSettled([
+    firstService.updatePlan(jobId, validPlan({
+      successCriteria: ["첫 번째 편집"],
+    }), planned.planDigest),
+    secondService.updatePlan(jobId, validPlan({
+      successCriteria: ["두 번째 편집"],
+    }), planned.planDigest),
+  ]);
+
+  assert.equal(edits.filter(({ status }) => status === "fulfilled").length, 1);
+  const rejected = edits.find(({ status }) => status === "rejected");
+  assert.equal(rejected.reason.code, "PLAN_DIGEST_MISMATCH");
+  assert.equal(
+    (await store.readEvents(jobId)).filter(({ event }) => event === "UPDATE_PLAN").length,
+    1,
+  );
+});
+
 test("planning is forbidden while manual login is still awaiting confirmation", async (t) => {
   const jobId = "job-planguarded001";
   const fixture = await createPlanningStore(t, jobId, { confirm: false });
@@ -323,6 +408,10 @@ test("StudioService is dependency-injected and serializes plan mutation with app
     async confirmManualLogin(jobId) {
       calls.push(["confirmManualLogin", jobId]);
       return "confirmed";
+    },
+    async cancelAuthentication(jobId) {
+      calls.push(["cancelAuthentication", jobId]);
+      return "cancelled";
     },
   };
   const planningWorkflow = {

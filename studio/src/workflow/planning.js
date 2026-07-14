@@ -31,6 +31,7 @@ function validateDependencies(options) {
     typeof jobStore?.load !== "function" ||
     typeof jobStore?.readEvents !== "function" ||
     typeof jobStore?.transition !== "function" ||
+    typeof jobStore?.compareAndTransition !== "function" ||
     typeof opencodePath !== "string" ||
     !isAbsolute(opencodePath) ||
     typeof openCodeServer?.withAttachOptions !== "function" ||
@@ -172,25 +173,58 @@ function exactPersistedPlanData(data) {
 }
 
 export async function restoreLatestPlan(jobStore, jobId) {
-  if (typeof jobStore?.readEvents !== "function") {
+  if (
+    typeof jobStore?.load !== "function" ||
+    typeof jobStore?.readEvents !== "function"
+  ) {
     throw planningError(
       "PLANNING_CONFIGURATION_INVALID",
       "The planning workflow is not configured safely.",
     );
   }
+  const current = await jobStore.load(jobId);
+  const authority = targetAuthority(current.request);
   const events = await jobStore.readEvents(jobId, 0);
   let latest = null;
   for (const event of events) {
     if (!PLAN_EVENTS.has(event.event)) continue;
     const restored = exactPersistedPlanData(event.data);
+    const plan = bindPlanToRequest(restored.plan, authority);
     latest = Object.freeze({
       ...restored,
+      plan,
       event: event.event,
       eventSequence: event.sequence,
       approved: event.event === "APPROVE_PLAN",
     });
   }
   return latest;
+}
+
+async function commitReviewedTransition(
+  settings,
+  jobId,
+  latest,
+  eventName,
+  data,
+) {
+  try {
+    return await settings.jobStore.compareAndTransition(jobId, {
+      expectedState: "plan_review",
+      expectedEventSequence: latest.eventSequence,
+      expectedPlanDigest: latest.planDigest,
+      eventName,
+      data,
+    });
+  } catch (error) {
+    if (error?.code === "JOB_COMPARE_FAILED") {
+      throw planningError(
+        "PLAN_DIGEST_MISMATCH",
+        "The reviewed plan is no longer current.",
+      );
+    }
+    throw error;
+  }
 }
 
 export function createPlanningWorkflow(options) {
@@ -259,10 +293,13 @@ export function createPlanningWorkflow(options) {
       assertCurrentDigest(latest.planDigest, expectedCurrentDigest);
       const plan = bindPlanToRequest(candidate, targetAuthority(current.request));
       const planDigest = digestPlan(plan);
-      const job = await settings.jobStore.transition(jobId, "UPDATE_PLAN", {
-        plan,
-        planDigest,
-      });
+      const job = await commitReviewedTransition(
+        settings,
+        jobId,
+        latest,
+        "UPDATE_PLAN",
+        { plan, planDigest },
+      );
       return planResult(job, plan, planDigest);
     },
 
@@ -282,10 +319,13 @@ export function createPlanningWorkflow(options) {
         );
       }
       const plan = assertApprovedPlan(latest.plan, expectedPlanDigest);
-      const job = await settings.jobStore.transition(jobId, "APPROVE_PLAN", {
-        plan,
-        planDigest: latest.planDigest,
-      });
+      const job = await commitReviewedTransition(
+        settings,
+        jobId,
+        latest,
+        "APPROVE_PLAN",
+        { plan, planDigest: latest.planDigest },
+      );
       return planResult(job, plan, latest.planDigest);
     },
 

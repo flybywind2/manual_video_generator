@@ -37,6 +37,35 @@ function validateDependencies(options) {
   return { browserRuntime, credentialVault, jobStore, openCodeServer, randomBytes };
 }
 
+function readStartOptions(options) {
+  if (options === undefined) return Object.freeze({ signal: undefined });
+  try {
+    if (
+      options === null ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(options)) ||
+      Reflect.ownKeys(options).some((key) => key !== "signal")
+    ) {
+      throw new Error("options");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(options, "signal");
+    const signal = descriptor === undefined ? undefined : descriptor.value;
+    if (
+      (descriptor !== undefined && !("value" in descriptor)) ||
+      (signal !== undefined && !(signal instanceof AbortSignal))
+    ) {
+      throw new Error("signal");
+    }
+    return Object.freeze({ signal });
+  } catch {
+    throw authenticationError(
+      "AUTHENTICATION_OPTIONS_INVALID",
+      "The authentication options are invalid.",
+    );
+  }
+}
+
 function assertCreatedJob(job) {
   if (job?.state !== "created") {
     throw authenticationError(
@@ -146,14 +175,98 @@ async function stopRuntimes(browserRuntime, openCodeServer) {
 
 export function createAuthenticationWorkflow(options) {
   const settings = validateDependencies(options);
+  const operations = new Map();
+
+  const releaseOperation = (jobId, operation) => {
+    if (operations.get(jobId) !== operation) return;
+    operation.externalSignal?.removeEventListener(
+      "abort",
+      operation.onExternalAbort,
+    );
+    operations.delete(jobId);
+  };
+
+  const cancelAuthentication = (jobId) => {
+    const operation = operations.get(jobId);
+    if (operation?.cancelPromise) return operation.cancelPromise;
+    const cancellation = Promise.resolve().then(async () => {
+      operation?.controller.abort(
+        authenticationError(
+          "AUTHENTICATION_CANCELLED",
+          "Authentication was cancelled.",
+        ),
+      );
+      const stopped = operation
+        ? await stopRuntimes(settings.browserRuntime, settings.openCodeServer)
+        : true;
+      if (!stopped) {
+        throw authenticationError(
+          "AUTHENTICATION_CLEANUP_FAILED",
+          "Authentication cleanup could not be completed safely.",
+        );
+      }
+      const current = await settings.jobStore.load(jobId);
+      if (current.state === "cancelled") return current;
+      return settings.jobStore.transition(jobId, "CANCEL_JOB", {
+        reason: "authentication_cancelled",
+      });
+    }).finally(() => {
+      if (operation) releaseOperation(jobId, operation);
+    });
+    if (operation) operation.cancelPromise = cancellation;
+    return cancellation;
+  };
 
   return Object.freeze({
-    async startAuthentication(jobId) {
+    async startAuthentication(jobId, options) {
+      const { signal: externalSignal } = readStartOptions(options);
       const job = await settings.jobStore.load(jobId);
       const request = assertCreatedJob(job);
-      await settings.jobStore.transition(jobId, "START_AUTHENTICATION", {
-        authMode: request.authMode,
+      if (externalSignal?.aborted) {
+        await cancelAuthentication(jobId);
+        throw authenticationError(
+          "AUTHENTICATION_CANCELLED",
+          "Authentication was cancelled.",
+        );
+      }
+      if (operations.has(jobId)) {
+        throw authenticationError(
+          "AUTHENTICATION_STATE_INVALID",
+          "Authentication is already active for this job.",
+        );
+      }
+      const controller = new AbortController();
+      const signal = externalSignal
+        ? AbortSignal.any([controller.signal, externalSignal])
+        : controller.signal;
+      const operation = {
+        controller,
+        externalSignal,
+        onExternalAbort: null,
+        cancelPromise: null,
+      };
+      operation.onExternalAbort = () => {
+        cancelAuthentication(jobId).catch(() => {});
+      };
+      operations.set(jobId, operation);
+      externalSignal?.addEventListener("abort", operation.onExternalAbort, {
+        once: true,
       });
+      try {
+        await settings.jobStore.transition(jobId, "START_AUTHENTICATION", {
+          authMode: request.authMode,
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          await cancelAuthentication(jobId).catch(() => {});
+          throw authenticationError(
+            "AUTHENTICATION_CANCELLED",
+            "Authentication was cancelled.",
+          );
+        }
+        releaseOperation(jobId, operation);
+        throw error;
+      }
 
       let capability;
       let credentials = null;
@@ -168,28 +281,32 @@ export function createAuthenticationWorkflow(options) {
         await settings.browserRuntime.start(runtimeJob, {
           expectedOriginPolicyDigest: runtimeJob.originPolicy.digest,
           mcpCapabilityToken: capability,
+          signal,
         });
         runtimeJob = null;
         credentials = null;
         await settings.openCodeServer.startJob({
           jobId,
           mcpCapabilityToken: capability,
+          signal,
         });
         capability = null;
-
-        return await settings.jobStore.transition(
-          jobId,
-          request.authMode === "manual" ? "AUTH_REQUIRED" : "AUTHENTICATED",
-          request.authMode === "manual" ? { reason: "manual_login" } : {},
-        );
       } catch {
         capability = null;
         credentials = null;
         runtimeJob = null;
+        if (signal.aborted) {
+          await cancelAuthentication(jobId).catch(() => {});
+          throw authenticationError(
+            "AUTHENTICATION_CANCELLED",
+            "Authentication was cancelled.",
+          );
+        }
         const stopped = await stopRuntimes(
           settings.browserRuntime,
           settings.openCodeServer,
         );
+        releaseOperation(jobId, operation);
         try {
           await settings.jobStore.transition(jobId, "AUTHENTICATION_FAILED", {
             reason: stopped ? "authentication_failed" : "cleanup_failed",
@@ -209,6 +326,24 @@ export function createAuthenticationWorkflow(options) {
         credentials = null;
         runtimeJob = null;
       }
+      try {
+        return await settings.jobStore.transition(
+          jobId,
+          request.authMode === "manual" ? "AUTH_REQUIRED" : "AUTHENTICATED",
+          request.authMode === "manual" ? { reason: "manual_login" } : {},
+        );
+      } catch (error) {
+        if (signal.aborted) {
+          await cancelAuthentication(jobId).catch(() => {});
+          throw authenticationError(
+            "AUTHENTICATION_CANCELLED",
+            "Authentication was cancelled.",
+          );
+        }
+        await stopRuntimes(settings.browserRuntime, settings.openCodeServer);
+        releaseOperation(jobId, operation);
+        throw error;
+      }
     },
 
     async confirmManualLogin(jobId) {
@@ -226,5 +361,7 @@ export function createAuthenticationWorkflow(options) {
         confirmed: true,
       });
     },
+
+    cancelAuthentication,
   });
 }

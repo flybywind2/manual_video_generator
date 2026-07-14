@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createAuthenticationWorkflow } from "../../src/workflow/authentication.js";
 import { JobStore } from "../../src/jobs/job-store.js";
+import { createStudioService } from "../../src/workflow/studio-service.js";
 
 const TARGET_URL = "http://127.0.0.1:4317/fixture/login";
 const CAPABILITY = Buffer.alloc(32, 7).toString("base64url");
@@ -38,8 +39,10 @@ function harness(store, overrides = {}) {
   const calls = {
     order: [],
     browserStarts: [],
+    browserSignals: [],
     browserStops: 0,
     openCodeStarts: [],
+    openCodeSignals: [],
     openCodeStops: 0,
     vaultLoads: [],
     randomBytes: 0,
@@ -47,7 +50,9 @@ function harness(store, overrides = {}) {
   const browserRuntime = {
     async start(job, options) {
       calls.order.push("browser");
-      calls.browserStarts.push({ job: structuredClone(job), options: structuredClone(options) });
+      const { signal, ...publicOptions } = options;
+      calls.browserSignals.push(signal);
+      calls.browserStarts.push({ job: structuredClone(job), options: structuredClone(publicOptions) });
       if (overrides.browserStartError) throw overrides.browserStartError;
       return Object.freeze({ endpoint: "http://127.0.0.1:8931/mcp", phase: "planning" });
     },
@@ -58,7 +63,9 @@ function harness(store, overrides = {}) {
   const openCodeServer = {
     async startJob(options) {
       calls.order.push("opencode");
-      calls.openCodeStarts.push(structuredClone(options));
+      const { signal, ...publicOptions } = options;
+      calls.openCodeSignals.push(signal);
+      calls.openCodeStarts.push(structuredClone(publicOptions));
       if (overrides.openCodeStartError) throw overrides.openCodeStartError;
       return Object.freeze({ baseUrl: "http://127.0.0.1:4096", jobId: options.jobId });
     },
@@ -180,4 +187,199 @@ test("manual login confirmation is rejected before the awaiting state", async (t
     (error) => error.code === "AUTHENTICATION_STATE_INVALID",
   );
   assert.equal((await store.load(jobId)).state, "created");
+});
+
+test("StudioService cancellation aborts authentication startup and stops both runtimes", async (t) => {
+  const jobId = "job-authcancel00001";
+  const { store } = await createStore(
+    t,
+    request({ authMode: "automatic", credentialId: "fixture-login" }),
+    jobId,
+  );
+  let browserEntered;
+  const entered = new Promise((resolvePromise) => {
+    browserEntered = resolvePromise;
+  });
+  const calls = { browserStops: 0, openCodeStops: 0, signals: [] };
+  const browserRuntime = {
+    async start(_job, options) {
+      calls.signals.push(options.signal);
+      browserEntered();
+      await new Promise((resolvePromise, rejectPromise) => {
+        options.signal.addEventListener(
+          "abort",
+          () => rejectPromise(options.signal.reason),
+          { once: true },
+        );
+      });
+    },
+    async stop() {
+      calls.browserStops += 1;
+    },
+  };
+  const openCodeServer = {
+    async startJob(options) {
+      calls.signals.push(options.signal);
+    },
+    async stop() {
+      calls.openCodeStops += 1;
+    },
+  };
+  const authenticationWorkflow = createAuthenticationWorkflow({
+    browserRuntime,
+    credentialVault: {
+      async load() {
+        return Object.freeze({ username: "fixture-user", password: "fixture-password" });
+      },
+    },
+    jobStore: store,
+    openCodeServer,
+    randomBytes: () => Buffer.alloc(32, 7),
+  });
+  const service = createStudioService({
+    authenticationWorkflow,
+    planningWorkflow: {
+      async createPlan() {},
+      async updatePlan() {},
+      async approvePlan() {},
+      async restoreLatestPlan() {},
+    },
+  });
+
+  const starting = service.startAuthentication(jobId);
+  await entered;
+  const cancelled = await service.cancelAuthentication(jobId);
+
+  assert.equal(cancelled.state, "cancelled");
+  await assert.rejects(starting, { code: "AUTHENTICATION_CANCELLED" });
+  assert.equal(calls.signals.length, 1);
+  assert.equal(calls.signals[0] instanceof AbortSignal, true);
+  assert.equal(calls.signals[0].aborted, true);
+  assert.ok(calls.browserStops >= 1);
+  assert.ok(calls.openCodeStops >= 1);
+  const events = await store.readEvents(jobId);
+  assert.equal(events.at(-1).event, "CANCEL_JOB");
+  assert.equal(events.some(({ event }) => event === "AUTHENTICATION_FAILED"), false);
+  assert.doesNotMatch(JSON.stringify(events), /fixture-user|fixture-password/);
+});
+
+test("final authentication persistence errors stop runtimes and propagate unchanged", async () => {
+  const persistenceError = Object.assign(new Error("disk unavailable"), {
+    code: "STORAGE_WRITE_FAILED",
+  });
+  const transitions = [];
+  const store = {
+    async load(jobId) {
+      return Object.freeze({
+        id: jobId,
+        state: "created",
+        request: Object.freeze({
+          targetUrl: TARGET_URL,
+          prompt: "프로젝트 메뉴를 여는 방법을 안내해 주세요.",
+          authMode: "manual",
+        }),
+      });
+    },
+    async transition(_jobId, event) {
+      transitions.push(event);
+      if (event === "AUTH_REQUIRED") throw persistenceError;
+      return Object.freeze({ state: "authenticating" });
+    },
+  };
+  const calls = { browserStops: 0, openCodeStops: 0 };
+  const workflow = createAuthenticationWorkflow({
+    browserRuntime: {
+      async start() {},
+      async stop() { calls.browserStops += 1; },
+    },
+    credentialVault: { async load() {} },
+    jobStore: store,
+    openCodeServer: {
+      async startJob() {},
+      async stop() { calls.openCodeStops += 1; },
+    },
+    randomBytes: () => Buffer.alloc(32, 7),
+  });
+
+  await assert.rejects(workflow.startAuthentication("job-authpersist001"), (error) =>
+    error === persistenceError,
+  );
+  assert.deepEqual(transitions, ["START_AUTHENTICATION", "AUTH_REQUIRED"]);
+  assert.equal(calls.browserStops, 1);
+  assert.equal(calls.openCodeStops, 1);
+});
+
+test("cancelling an unstarted job never stops singleton runtimes owned elsewhere", async () => {
+  let state = "created";
+  const calls = { browserStops: 0, openCodeStops: 0 };
+  const workflow = createAuthenticationWorkflow({
+    browserRuntime: {
+      async start() {},
+      async stop() { calls.browserStops += 1; },
+    },
+    credentialVault: { async load() {} },
+    jobStore: {
+      async load(jobId) {
+        return Object.freeze({ id: jobId, state, request: request() });
+      },
+      async transition(_jobId, event) {
+        if (event === "CANCEL_JOB") state = "cancelled";
+        return Object.freeze({ state });
+      },
+    },
+    openCodeServer: {
+      async startJob() {},
+      async stop() { calls.openCodeStops += 1; },
+    },
+    randomBytes: () => Buffer.alloc(32, 7),
+  });
+
+  const cancelled = await workflow.cancelAuthentication("job-notstarted0001");
+
+  assert.equal(cancelled.state, "cancelled");
+  assert.deepEqual(calls, { browserStops: 0, openCodeStops: 0 });
+});
+
+test("cancellation winning the final auth persistence race is reported as cancellation", async (t) => {
+  const jobId = "job-authfinalrace1";
+  const { store } = await createStore(t, request(), jobId);
+  let finalEntered;
+  let releaseFinal;
+  const entered = new Promise((resolvePromise) => { finalEntered = resolvePromise; });
+  const gate = new Promise((resolvePromise) => { releaseFinal = resolvePromise; });
+  const guardedStore = {
+    load: (...args) => store.load(...args),
+    async transition(id, event, data) {
+      if (event === "AUTH_REQUIRED") {
+        finalEntered();
+        await gate;
+      }
+      return store.transition(id, event, data);
+    },
+  };
+  const authenticationWorkflow = createAuthenticationWorkflow({
+    browserRuntime: { async start() {}, async stop() {} },
+    credentialVault: { async load() {} },
+    jobStore: guardedStore,
+    openCodeServer: { async startJob() {}, async stop() {} },
+    randomBytes: () => Buffer.alloc(32, 7),
+  });
+  const service = createStudioService({
+    authenticationWorkflow,
+    planningWorkflow: {
+      async createPlan() {},
+      async updatePlan() {},
+      async approvePlan() {},
+      async restoreLatestPlan() {},
+    },
+  });
+
+  const starting = service.startAuthentication(jobId);
+  await entered;
+  const cancelled = await service.cancelAuthentication(jobId);
+  releaseFinal();
+
+  assert.equal(cancelled.state, "cancelled");
+  await assert.rejects(starting, { code: "AUTHENTICATION_CANCELLED" });
+  assert.equal((await store.load(jobId)).state, "cancelled");
 });

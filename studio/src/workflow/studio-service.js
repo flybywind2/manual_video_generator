@@ -34,7 +34,7 @@ export class StudioService {
   constructor({ authenticationWorkflow, planningWorkflow } = {}) {
     this.#authentication = validateWorkflow(
       authenticationWorkflow,
-      ["startAuthentication", "confirmManualLogin"],
+      ["startAuthentication", "confirmManualLogin", "cancelAuthentication"],
       "authentication",
     );
     this.#planning = validateWorkflow(
@@ -65,9 +65,18 @@ export class StudioService {
     return result;
   }
 
-  startAuthentication(jobId) {
+  startAuthentication(jobId, options) {
     return this.#serialize(jobId, () =>
-      this.#authentication.startAuthentication(jobId));
+      this.#authentication.startAuthentication(jobId, options));
+  }
+
+  cancelAuthentication(jobId) {
+    if (typeof jobId !== "string" || !JOB_ID.test(jobId)) {
+      return Promise.reject(
+        serviceError("STUDIO_SERVICE_JOB_INVALID", "The job identifier is invalid."),
+      );
+    }
+    return this.#authentication.cancelAuthentication(jobId);
   }
 
   confirmManualLogin(jobId) {

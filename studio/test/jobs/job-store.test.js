@@ -218,6 +218,50 @@ test("transition reuses the state contract, serializes writers, and appends one 
   });
 });
 
+test("compareAndTransition atomically binds state, sequence, and latest plan digest", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    randomId: () => "job-compare-plan",
+  });
+  await store.create(request());
+  await store.transition("job-compare-plan", "START_AUTHENTICATION", {
+    authMode: "manual",
+  });
+  await store.transition("job-compare-plan", "AUTH_REQUIRED", {});
+  await store.transition("job-compare-plan", "CONFIRM_LOGIN", {});
+  const originalDigest = "a".repeat(64);
+  const ready = await store.transition("job-compare-plan", "PLAN_READY", {
+    planDigest: originalDigest,
+    revision: 0,
+  });
+
+  const attempts = await Promise.allSettled([
+    store.compareAndTransition("job-compare-plan", {
+      expectedState: "plan_review",
+      expectedEventSequence: ready.eventSequence,
+      expectedPlanDigest: originalDigest,
+      eventName: "UPDATE_PLAN",
+      data: { planDigest: "b".repeat(64), revision: 1 },
+    }),
+    store.compareAndTransition("job-compare-plan", {
+      expectedState: "plan_review",
+      expectedEventSequence: ready.eventSequence,
+      expectedPlanDigest: originalDigest,
+      eventName: "UPDATE_PLAN",
+      data: { planDigest: "c".repeat(64), revision: 2 },
+    }),
+  ]);
+
+  assert.equal(attempts.filter(({ status }) => status === "fulfilled").length, 1);
+  const rejected = attempts.find(({ status }) => status === "rejected");
+  assert.equal(rejected.reason.code, "JOB_COMPARE_FAILED");
+  assert.equal(rejected.reason.retryable, true);
+  const events = await store.readEvents("job-compare-plan");
+  assert.equal(events.filter(({ event }) => event === "UPDATE_PLAN").length, 1);
+  assert.equal(events.at(-1).sequence, ready.eventSequence + 1);
+});
+
 test("atomic JSON replacement never exposes a partial document and uses unique temporaries", async (t) => {
   const root = await temporaryRoot(t);
   const target = join(root, "atomic.json");
