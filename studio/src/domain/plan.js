@@ -6,10 +6,14 @@ import {
   evaluateStepPolicy,
 } from "./policy.js";
 
+export const MAX_STEP_NARRATION_CODE_UNITS = 60;
+
 const TOP_LEVEL_FIELDS = Object.freeze([
   "schemaVersion",
   "targetUrl",
   "targetOrigin",
+  "authOrigins",
+  "resourceOrigins",
   "successCriteria",
   "forbiddenActions",
   "captureSettings",
@@ -49,8 +53,30 @@ const SAFE_PRESS_KEYS = new Set([
 const CLICK_BUTTONS = new Set(["left", "middle", "right"]);
 const CLICK_MODIFIERS = new Set(["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]);
 const FORM_FIELD_TYPES = new Set(["textbox", "checkbox", "radio", "combobox", "slider"]);
+const INTERACTIVE_ARIA_ROLES = new Set([
+  "button",
+  "checkbox",
+  "combobox",
+  "gridcell",
+  "link",
+  "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "tab",
+  "textbox",
+  "treeitem",
+]);
 const SENSITIVE_TARGET = /(?:password|passcode|credential|secret|비밀번호)/iu;
+const STABLE_ROLE_LOCATOR = /^getByRole\("([a-z][a-z0-9-]{0,63})", \{ name: ("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")(, exact: true)? \}\)$/u;
 const MAX_CANONICAL_PLAN_CODE_UNITS = 6_000;
+const MAX_APPROVED_ORIGINS = 16;
 
 function invalidPlan(path, reason) {
   throw new StudioError("The plan does not match the approved plan contract.", {
@@ -144,6 +170,28 @@ function exactCallString(value, path, maximum, { preserve = false } = {}) {
     invalidPlan(path, "invalid_call_string");
   }
   return normalized;
+}
+
+export function parseStableAccessibilityLocator(value) {
+  if (typeof value !== "string") return null;
+  const match = STABLE_ROLE_LOCATOR.exec(value);
+  if (match === null || !INTERACTIVE_ARIA_ROLES.has(match[1])) return null;
+  let name;
+  try {
+    name = JSON.parse(match[2]);
+  } catch {
+    return null;
+  }
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name.length > 512 ||
+    name.trim() !== name ||
+    /[\u0000-\u001f\u007f]/u.test(name)
+  ) {
+    return null;
+  }
+  return Object.freeze({ role: match[1], name, exact: match[3] !== undefined });
 }
 
 function optionalBoolean(value, path) {
@@ -288,7 +336,13 @@ function normalizedCalls(value, stepId, path, callIds) {
   if (!isDenseArray(value) || value.length < 1 || value.length > 10) {
     invalidPlan(path, "call_count_must_be_between_1_and_10");
   }
-  const reservedSuffixes = new Set(["chapter", "evidence-snapshot", "evidence-screenshot"]);
+  const reservedSuffixes = new Set([
+    "chapter",
+    "narration-dwell",
+    "result-dwell",
+    "evidence-snapshot",
+    "evidence-screenshot",
+  ]);
   return Object.freeze(value.map((call, index) => {
     const callPath = `${path}[${index}]`;
     assertExactFields(call, CALL_FIELDS, callPath);
@@ -316,9 +370,10 @@ function normalizedCalls(value, stepId, path, callIds) {
 
 function callPolicyText(calls) {
   const values = [];
-  const visit = (value) => {
+  const visit = (value, key = null) => {
     if (typeof value === "string") {
-      values.push(value);
+      const locator = key === "target" ? parseStableAccessibilityLocator(value) : null;
+      values.push(locator?.name ?? value);
       return;
     }
     if (Array.isArray(value)) {
@@ -326,7 +381,7 @@ function callPolicyText(calls) {
       return;
     }
     if (value !== null && typeof value === "object") {
-      for (const key of Object.keys(value)) visit(value[key]);
+      for (const childKey of Object.keys(value)) visit(value[childKey], childKey);
     }
   };
   for (const call of calls) visit(call.arguments);
@@ -380,25 +435,53 @@ function parseTargetOrigin(value, targetUrl) {
   return parsed.origin;
 }
 
-function captureSettings(value) {
-  assertExactFields(value, CAPTURE_FIELDS, "plan.captureSettings");
-  const ranges = {
-    width: [320, 3_840],
-    height: [240, 2_160],
-    fps: [1, 60],
-  };
-  const normalized = {};
-
-  for (const field of CAPTURE_FIELDS) {
-    const setting = value[field];
-    const [minimum, maximum] = ranges[field];
-    if (!Number.isInteger(setting) || setting < minimum || setting > maximum) {
-      invalidPlan(`plan.captureSettings.${field}`, "integer_out_of_range");
-    }
-    normalized[field] = setting;
+function normalizedApprovedOrigins(value, path, targetOrigin, approvedOrigins) {
+  if (!isDenseArray(value) || value.length > MAX_APPROVED_ORIGINS) {
+    invalidPlan(path, "invalid_array_length");
   }
 
-  return Object.freeze(normalized);
+  const origins = value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    const origin = normalizedString(item, itemPath, 2_048);
+    let parsed;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      invalidPlan(itemPath, "http_origin_required");
+    }
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      invalidPlan(itemPath, "canonical_http_origin_required");
+    }
+    const canonical = parsed.origin;
+    if (canonical === targetOrigin) {
+      invalidPlan(itemPath, "target_origin_must_not_be_duplicated");
+    }
+    if (approvedOrigins.has(canonical)) {
+      invalidPlan(itemPath, "duplicate_approved_origin");
+    }
+    approvedOrigins.add(canonical);
+    return canonical;
+  });
+
+  return Object.freeze(origins.sort());
+}
+
+function captureSettings(value) {
+  assertExactFields(value, CAPTURE_FIELDS, "plan.captureSettings");
+  const required = { width: 1920, height: 1080, fps: 30 };
+  for (const field of CAPTURE_FIELDS) {
+    if (value[field] !== required[field]) {
+      invalidPlan(`plan.captureSettings.${field}`, "fixed_capture_format_required");
+    }
+  }
+  return Object.freeze(required);
 }
 
 function normalizedNavigationTarget(value, path) {
@@ -476,7 +559,11 @@ function normalizedSteps(value, targetOrigin, forbiddenActions) {
         id,
         action: normalizedString(candidate.action, `${path}.action`, 2_000),
         expected: normalizedString(candidate.expected, `${path}.expected`, 2_000),
-        narration: normalizedString(candidate.narration, `${path}.narration`, 4_000),
+        narration: normalizedString(
+          candidate.narration,
+          `${path}.narration`,
+          MAX_STEP_NARRATION_CODE_UNITS,
+        ),
         risk: candidate.risk,
         calls: normalizedCalls(candidate.calls, id, `${path}.calls`, callIds),
       };
@@ -504,11 +591,26 @@ function normalizePlan(candidate) {
 
   const targetUrl = parseTargetUrl(candidate.targetUrl);
   const targetOrigin = parseTargetOrigin(candidate.targetOrigin, targetUrl);
+  const approvedOrigins = new Set();
+  const authOrigins = normalizedApprovedOrigins(
+    candidate.authOrigins,
+    "plan.authOrigins",
+    targetOrigin,
+    approvedOrigins,
+  );
+  const resourceOrigins = normalizedApprovedOrigins(
+    candidate.resourceOrigins,
+    "plan.resourceOrigins",
+    targetOrigin,
+    approvedOrigins,
+  );
   const forbiddenActions = normalizedForbiddenActions(candidate.forbiddenActions);
   const normalized = {
     schemaVersion: "1.1",
     targetUrl: targetUrl.href,
     targetOrigin,
+    authOrigins,
+    resourceOrigins,
     successCriteria: Object.freeze(
       normalizedStringArray(candidate.successCriteria, "plan.successCriteria", {
         minimum: 1,

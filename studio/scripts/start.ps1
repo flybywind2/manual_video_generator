@@ -14,6 +14,40 @@ $RuntimeRoot = Join-Path $StudioRoot ".runtime\supertonic"
 $CacheRoot = Join-Path $StudioRoot "data\cache\supertonic-3"
 $SupertonicExecutable = Join-Path $RuntimeRoot "venv\Scripts\supertonic.exe"
 
+function Get-SupertonicListenerPid {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 7788 -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $listener) {
+        return $null
+    }
+    return [int]$listener.OwningProcess
+}
+
+function Test-ProcessDescendant {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][int]$AncestorId
+    )
+
+    $currentId = $ProcessId
+    $visited = @{}
+    for ($depth = 0; $depth -lt 32; $depth += 1) {
+        if ($currentId -eq $AncestorId) {
+            return $true
+        }
+        if ($currentId -le 0 -or $visited.ContainsKey($currentId)) {
+            return $false
+        }
+        $visited[$currentId] = $true
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        if ($null -eq $process) {
+            return $false
+        }
+        $currentId = [int]$process.ParentProcessId
+    }
+    return $false
+}
+
 if ($Check) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BootstrapScript -Check -RuntimeRoot $RuntimeRoot -CacheRoot $CacheRoot
     exit $LASTEXITCODE
@@ -38,6 +72,12 @@ if (
 $env:MANUAL_STUDIO_PORT = [string]$Port
 $env:SUPERTONIC_CACHE_DIR = $CacheRoot
 $sidecar = $null
+$sidecarListenerPid = $null
+
+$existingListenerPid = Get-SupertonicListenerPid
+if ($null -ne $existingListenerPid) {
+    throw "Supertonic port 7788 is already in use. Stop the existing listener before starting the studio."
+}
 
 try {
     if ($PSCmdlet.ShouldProcess("127.0.0.1:7788", "Start the pinned Supertonic sidecar")) {
@@ -58,16 +98,28 @@ try {
         }
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:7788/v1/health" -TimeoutSec 2
-            $healthy =
+            $healthMatches =
                 $health.status -eq "ok" -and
                 $health.model -eq "supertonic-3" -and
                 $health.version -eq "1.3.1" -and
                 [int]$health.sample_rate -eq 44100 -and
                 [int]$health.voices_loaded -ge 10
-            if ($healthy) {
-                break
-            }
         } catch {
+            $healthMatches = $false
+        }
+
+        $candidateListenerPid = Get-SupertonicListenerPid
+        if ($null -ne $candidateListenerPid) {
+            if (-not (Test-ProcessDescendant -ProcessId $candidateListenerPid -AncestorId $sidecar.Id)) {
+                throw "The Supertonic listener is not owned by the sidecar process tree."
+            }
+            $sidecarListenerPid = $candidateListenerPid
+        }
+        if ($healthMatches -and $null -ne $sidecarListenerPid) {
+            $healthy = $true
+            break
+        }
+        if (-not $healthy) {
             Start-Sleep -Milliseconds 500
         }
     }
@@ -88,8 +140,30 @@ try {
         }
     }
 } finally {
-    if ($sidecar -and -not $sidecar.HasExited) {
-        Stop-Process -Id $sidecar.Id -Force -ErrorAction SilentlyContinue
-        $sidecar.WaitForExit(5000) | Out-Null
+    if ($sidecar) {
+        $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+        $ownedProcessIds = @($sidecar.Id, $sidecarListenerPid) |
+            Where-Object { $null -ne $_ } |
+            Sort-Object -Unique
+        foreach ($ownedPid in $ownedProcessIds) {
+            try {
+                & $taskkill /PID ([string]$ownedPid) /T /F 2>$null | Out-Null
+            } catch {
+                # A parent may already have exited after its owned tree was terminated.
+            }
+        }
+
+        $shutdownDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        do {
+            $remainingListenerPid = Get-SupertonicListenerPid
+            if ($null -eq $remainingListenerPid -or $remainingListenerPid -ne $sidecarListenerPid) {
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        } while ([DateTimeOffset]::UtcNow -lt $shutdownDeadline)
+
+        if ($null -ne $sidecarListenerPid -and (Get-SupertonicListenerPid) -eq $sidecarListenerPid) {
+            throw "The owned Supertonic listener remained open after shutdown."
+        }
     }
 }

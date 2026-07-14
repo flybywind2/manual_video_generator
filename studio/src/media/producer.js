@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -19,8 +19,15 @@ import {
 
 import { SupertonicClient } from "../adapters/supertonic-client.js";
 import { StudioError } from "../domain/errors.js";
+import { compileExecutionCalls } from "../domain/execution-calls.js";
+import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 import { mediaPlanDigest as defaultMediaPlanDigest, writeComposition as defaultWriteComposition } from "./composition.js";
-import { createMediaPlan as defaultCreateMediaPlan } from "./media-plan.js";
+import {
+  createMediaPlan as defaultCreateMediaPlan,
+  MAX_MEDIA_DRIFT_MS,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
+} from "./media-plan.js";
 import { generateNarration as defaultGenerateNarration } from "../workflow/narration.js";
 import { restoreLatestPlan as defaultRestoreLatestPlan } from "../workflow/planning.js";
 
@@ -28,9 +35,11 @@ const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
+const PREVIEW_INTEGRITY_FILE = "preview-integrity.json";
 const PREVIEW_FILES = Object.freeze([
   "captions.vtt",
   "media-plan.json",
+  PREVIEW_INTEGRITY_FILE,
   "preview.json",
   "preview.mp4",
 ]);
@@ -222,6 +231,67 @@ async function requireRegular(root, pathValue, options) {
   return Object.freeze({ path: inspected.path, entry: inspected.entry });
 }
 
+function sameBigIntSnapshot(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs &&
+    left.nlink === 1n &&
+    right.nlink === 1n
+  );
+}
+
+async function fingerprintRegular(root, pathValue, logicalPath) {
+  const inspected = await inspectRegular(root, pathValue, { minimumBytes: 1 });
+  try {
+    const before = await inspected.handle.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size < 1n ||
+      before.size > BigInt(Number.MAX_SAFE_INTEGER)
+    ) {
+      throw invalidPath("unsafe_integrity_input");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1_024);
+    const size = Number(before.size);
+    let position = 0;
+    while (position < size) {
+      const { bytesRead } = await inspected.handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, size - position),
+        position,
+      );
+      if (bytesRead < 1) throw invalidPath("integrity_input_truncated");
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    const [after, named] = await Promise.all([
+      inspected.handle.stat({ bigint: true }),
+      lstat(inspected.path, { bigint: true }).catch(() => null),
+    ]);
+    if (
+      named === null ||
+      !sameBigIntSnapshot(before, after) ||
+      !sameBigIntSnapshot(after, named) ||
+      !strictChild(root, await realpath(inspected.path))
+    ) {
+      throw invalidPath("integrity_input_changed");
+    }
+    return Object.freeze({
+      path: logicalPath,
+      sha256: hash.digest("hex"),
+      bytes: size,
+    });
+  } finally {
+    await inspected.handle.close().catch(() => undefined);
+  }
+}
+
 async function atomicWrite(root, targetPath, bytes) {
   const target = resolve(targetPath);
   const parent = await safeDirectory(root, dirname(target));
@@ -340,6 +410,60 @@ async function readJson(root, target) {
   }
 }
 
+async function readJsonFingerprint(root, target, logicalPath) {
+  const file = await inspectRegular(root, target, { minimumBytes: 2 });
+  try {
+    const before = await file.handle.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size < 2n ||
+      before.size > BigInt(MAX_JSON_BYTES)
+    ) {
+      throw producerError(
+        "PRODUCER_DATA_INVALID",
+        "Media production metadata is invalid.",
+        "json_too_large",
+      );
+    }
+    const bytes = await file.handle.readFile();
+    const [after, named] = await Promise.all([
+      file.handle.stat({ bigint: true }),
+      lstat(file.path, { bigint: true }).catch(() => null),
+    ]);
+    if (
+      named === null ||
+      bytes.length !== Number(before.size) ||
+      !sameBigIntSnapshot(before, after) ||
+      !sameBigIntSnapshot(after, named) ||
+      !strictChild(root, await realpath(file.path))
+    ) {
+      throw invalidPath("metadata_changed");
+    }
+    const value = JSON.parse(bytes.toString("utf8"));
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("record required");
+    }
+    return Object.freeze({
+      value,
+      fingerprint: Object.freeze({
+        path: logicalPath,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.length,
+      }),
+    });
+  } catch (error) {
+    if (error instanceof StudioError) throw error;
+    throw producerError(
+      "PRODUCER_DATA_INVALID",
+      "Media production metadata is invalid.",
+      "invalid_json",
+    );
+  } finally {
+    await file.handle.close().catch(() => undefined);
+  }
+}
+
 function safeTimestamp(value, reason) {
   if (typeof value !== "string") {
     throw producerError("PRODUCER_REPORT_INVALID", "The browser report is invalid.", reason);
@@ -372,6 +496,33 @@ function reportBinding(report, plan, planDigest) {
     throw producerError("PRODUCER_REPORT_INVALID", "The browser report is invalid.", "report_range");
   }
   safeRelative(report.recordingPath, { prefix: "browser", extension: ".webm" });
+  let narrationDwell = Object.freeze(plan.steps.map(() => false));
+  if (report.toolCalls !== undefined) {
+    const expectedCalls = compileExecutionCalls(plan);
+    if (
+      !Array.isArray(report.toolCalls) ||
+      report.toolCalls.length !== expectedCalls.length ||
+      report.toolCalls.some(
+        (call, index) =>
+          call?.id !== expectedCalls[index].id ||
+          call?.tool !== expectedCalls[index].tool,
+      )
+    ) {
+      throw producerError(
+        "PRODUCER_REPORT_INVALID",
+        "The browser report is invalid.",
+        "tool_call_binding",
+      );
+    }
+    narrationDwell = Object.freeze(
+      plan.steps.map((step) =>
+        expectedCalls.some(
+          (call) =>
+            call.id === `${step.id}.narration-dwell` &&
+            call.tool === "browser_wait_for",
+        )),
+    );
+  }
   const scenes = report.steps.map((step, index) => {
     const approved = plan.steps[index];
     const startedAt = safeTimestamp(step?.startedAt, "step_start");
@@ -398,7 +549,13 @@ function reportBinding(report, plan, planDigest) {
       highlight: null,
     });
   });
-  return Object.freeze({ reportStart, reportEnd, recordingPath: report.recordingPath, scenes });
+  return Object.freeze({
+    reportStart,
+    reportEnd,
+    recordingPath: report.recordingPath,
+    narrationDwell,
+    scenes,
+  });
 }
 
 function validateNarration(manifest, plan, voice) {
@@ -490,41 +647,163 @@ function captionsVtt(mediaPlan) {
   return Buffer.from(`WEBVTT\n\n${cues.join("\n\n")}\n`, "utf8");
 }
 
-function manifestFiles(value) {
+function integrityPaths(mediaPlan) {
   if (
-    value === null ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Reflect.ownKeys(value).length !== 1 ||
-    !Array.isArray(value.files) ||
-    value.files.length > 100
+    mediaPlan === null ||
+    typeof mediaPlan !== "object" ||
+    mediaPlan.recordingPath !== "composition/media/normalized.mp4" ||
+    !Array.isArray(mediaPlan.scenes) ||
+    mediaPlan.scenes.length < 1 ||
+    mediaPlan.scenes.length > 100
   ) {
     throw producerError(
       "PRODUCER_PREVIEW_INVALID",
       "The persisted preview is invalid.",
-      "artifact_manifest",
+      "integrity_media_plan",
     );
   }
-  const files = new Set();
-  for (const file of value.files) {
-    safeRelative(file);
-    if (files.has(file)) {
+  const paths = [
+    "artifacts/captions.vtt",
+    "artifacts/preview.mp4",
+    "composition/index.html",
+    mediaPlan.recordingPath,
+  ];
+  for (const scene of mediaPlan.scenes) {
+    const path = scene?.narration?.path;
+    const segments = safeRelative(path, {
+      prefix: "composition",
+      extension: ".wav",
+    });
+    if (segments.length !== 3 || segments[1] !== "narration") {
       throw producerError(
         "PRODUCER_PREVIEW_INVALID",
         "The persisted preview is invalid.",
-        "duplicate_artifact",
+        "integrity_narration_path",
       );
     }
-    files.add(file);
+    paths.push(path);
   }
-  return files;
+  const sorted = [...paths].sort((left, right) => left.localeCompare(right, "en"));
+  if (new Set(sorted).size !== sorted.length) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The persisted preview is invalid.",
+      "integrity_duplicate_path",
+    );
+  }
+  return Object.freeze(sorted);
 }
 
-function previewMetadata(planDigest, digest) {
+function exactObjectFields(value, fields) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    Reflect.ownKeys(value).length === fields.length &&
+    Reflect.ownKeys(value).every(
+      (key) => typeof key === "string" && fields.includes(key),
+    )
+  );
+}
+
+function parsePreviewIntegrity(value, mediaPlan, planDigest, previewDigest) {
+  const fields = ["schemaVersion", "planDigest", "previewDigest", "files"];
+  const recordFields = ["path", "sha256", "bytes"];
+  const expectedPaths = integrityPaths(mediaPlan);
+  if (
+    !exactObjectFields(value, fields) ||
+    value.schemaVersion !== "1.0" ||
+    !DIGEST.test(value.planDigest ?? "") ||
+    !DIGEST.test(value.previewDigest ?? "") ||
+    !Array.isArray(value.files) ||
+    Object.getPrototypeOf(value.files) !== Array.prototype ||
+    Reflect.ownKeys(value.files).length !== value.files.length + 1 ||
+    value.files.length !== expectedPaths.length
+  ) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The persisted preview is invalid.",
+      "integrity_manifest",
+    );
+  }
+  if (
+    !equalDigest(value.planDigest, planDigest) ||
+    !equalDigest(value.previewDigest, previewDigest)
+  ) {
+    throw producerError(
+      "PRODUCER_PREVIEW_STALE",
+      "The persisted preview inputs changed after review.",
+      "integrity_binding",
+    );
+  }
+  const records = value.files.map((record, index) => {
+    if (
+      !exactObjectFields(record, recordFields) ||
+      record.path !== expectedPaths[index] ||
+      !DIGEST.test(record.sha256 ?? "") ||
+      !Number.isSafeInteger(record.bytes) ||
+      record.bytes < 1
+    ) {
+      throw producerError(
+        "PRODUCER_PREVIEW_INVALID",
+        "The persisted preview is invalid.",
+        "integrity_record",
+      );
+    }
+    safeRelative(record.path);
+    return Object.freeze({
+      path: record.path,
+      sha256: record.sha256,
+      bytes: record.bytes,
+    });
+  });
+  return Object.freeze(records);
+}
+
+async function fingerprintPaths(layout, mediaPlan) {
+  const records = [];
+  for (const logicalPath of integrityPaths(mediaPlan)) {
+    records.push(await fingerprintRegular(
+      layout.jobRoot,
+      join(layout.jobRoot, ...logicalPath.split("/")),
+      logicalPath,
+    ));
+  }
+  return Object.freeze(records);
+}
+
+async function verifyIntegrity(layout, mediaPlan, manifest, planDigest, previewDigest) {
+  const expected = parsePreviewIntegrity(
+    manifest,
+    mediaPlan,
+    planDigest,
+    previewDigest,
+  );
+  const actual = await fingerprintPaths(layout, mediaPlan);
+  for (let index = 0; index < expected.length; index += 1) {
+    if (
+      expected[index].path !== actual[index].path ||
+      expected[index].bytes !== actual[index].bytes ||
+      !equalDigest(expected[index].sha256, actual[index].sha256)
+    ) {
+      throw producerError(
+        "PRODUCER_PREVIEW_STALE",
+        "The persisted preview inputs changed after review.",
+        "integrity_mismatch",
+      );
+    }
+  }
+  return Object.freeze(expected);
+}
+
+function previewMetadata(planDigest, digest, integrity) {
   return Object.freeze({
     schemaVersion: "1.0",
     planDigest,
     mediaPlanDigest: digest,
+    previewIntegritySha256: integrity.sha256,
+    previewIntegrityBytes: integrity.bytes,
     previewArtifact: "preview.mp4",
     captionsArtifact: "captions.vtt",
   });
@@ -535,6 +814,8 @@ function exactPreviewMetadata(value) {
     "schemaVersion",
     "planDigest",
     "mediaPlanDigest",
+    "previewIntegritySha256",
+    "previewIntegrityBytes",
     "previewArtifact",
     "captionsArtifact",
   ];
@@ -562,6 +843,8 @@ function exactPreview(value) {
     "planDigest",
     "previewDigest",
     "mediaPlan",
+    "previewIntegritySha256",
+    "previewIntegrityBytes",
     "previewArtifact",
     "captionsArtifact",
   ];
@@ -584,11 +867,11 @@ function exactPreview(value) {
   return value;
 }
 
-function validText(value, reason) {
+function validText(value, reason, maximum = 4_000) {
   if (
     typeof value !== "string" ||
     value.trim().length < 1 ||
-    value.length > 4_000 ||
+    value.length > maximum ||
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
   ) {
     throw producerError(
@@ -817,10 +1100,84 @@ export class MediaProducer {
     });
   }
 
-  #rawPlan(binding, narrationScenes) {
+  #rawPlan(binding, narrationScenes, plan) {
+    const waitOnly = plan.steps.map(
+      (step) =>
+        step.calls.length > 0 &&
+        step.calls.every((call) => call.tool === "browser_wait_for"),
+    );
+    const scenes = binding.scenes.map((scene, index) => {
+      const narration = narrationScenes[index];
+      if (
+        (!waitOnly[index] && !binding.narrationDwell[index]) ||
+        plan.steps[index].id !== scene.id ||
+        narration.sceneId !== scene.id
+      ) {
+        return { ...scene };
+      }
+
+      const maximumSourceDurationMs = Math.floor(
+        (narration.durationMs + MAX_MEDIA_DRIFT_MS) * MAX_PLAYBACK_RATE,
+      );
+      const sourceDurationMs = scene.sourceEndMs - scene.sourceStartMs;
+      if (sourceDurationMs <= maximumSourceDurationMs) return { ...scene };
+      return {
+        ...scene,
+        sourceStartMs: scene.sourceEndMs - maximumSourceDurationMs,
+      };
+    });
+
+    let actionRunStart = 0;
+    for (let waitIndex = 0; waitIndex < scenes.length; waitIndex += 1) {
+      if (!waitOnly[waitIndex]) continue;
+      if (actionRunStart < waitIndex) {
+        const needsRebalance = scenes
+          .slice(actionRunStart, waitIndex)
+          .some(
+            (scene, offset) =>
+              scene.sourceEndMs - scene.sourceStartMs <
+              Math.ceil(
+                narrationScenes[actionRunStart + offset].durationMs * MIN_PLAYBACK_RATE,
+              ),
+          );
+        if (!needsRebalance) {
+          actionRunStart = waitIndex + 1;
+          continue;
+        }
+        const rebalanced = [];
+        let cursor = scenes[actionRunStart].sourceStartMs;
+        let fitsBeforeWait = true;
+        for (let index = actionRunStart; index < waitIndex; index += 1) {
+          const current = scenes[index];
+          const original = binding.scenes[index];
+          const sourceStartMs = Math.max(current.sourceStartMs, cursor);
+          const requiredSourceDurationMs = Math.ceil(
+            narrationScenes[index].durationMs * MIN_PLAYBACK_RATE,
+          );
+          const sourceEndMs = Math.max(
+            current.sourceEndMs,
+            sourceStartMs + requiredSourceDurationMs,
+          );
+          if (
+            sourceStartMs >= original.sourceEndMs ||
+            sourceEndMs > scenes[waitIndex].sourceStartMs
+          ) {
+            fitsBeforeWait = false;
+            break;
+          }
+          rebalanced.push({ ...current, sourceStartMs, sourceEndMs });
+          cursor = sourceEndMs;
+        }
+        if (fitsBeforeWait) {
+          scenes.splice(actionRunStart, rebalanced.length, ...rebalanced);
+        }
+      }
+      actionRunStart = waitIndex + 1;
+    }
+
     return {
       recordingPath: "composition/media/normalized.mp4",
-      scenes: binding.scenes.map((scene) => ({ ...scene })),
+      scenes,
       narrations: narrationScenes.map((scene) => ({
         sceneId: scene.sceneId,
         path: `composition/narration/${scene.file}`,
@@ -909,21 +1266,46 @@ export class MediaProducer {
     if (!sameIdentity(renderedFile.entry, beforeMetadata.entry)) {
       throw invalidPath("preview_file_changed_before_publication");
     }
-    const metadata = previewMetadata(planDigest, digest);
     await atomicJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json"), mediaPlan);
     await atomicWrite(layout.jobRoot, join(layout.artifactsPath, "captions.vtt"), captionsVtt(mediaPlan));
-    await atomicJson(layout.jobRoot, join(layout.artifactsPath, "preview.json"), metadata);
-    const beforeManifest = await requireRegular(layout.jobRoot, previewPath, {
+    const beforeIntegrity = await requireRegular(layout.jobRoot, previewPath, {
       minimumBytes: 1,
     });
-    if (!sameIdentity(renderedFile.entry, beforeManifest.entry)) {
-      throw invalidPath("preview_file_changed_before_manifest");
+    if (!sameIdentity(renderedFile.entry, beforeIntegrity.entry)) {
+      throw invalidPath("preview_file_changed_before_integrity_manifest");
     }
+    const integrity = Object.freeze({
+      schemaVersion: "1.0",
+      planDigest,
+      previewDigest: digest,
+      files: await fingerprintPaths(layout, mediaPlan),
+    });
+    const afterFingerprint = await requireRegular(layout.jobRoot, previewPath, {
+      minimumBytes: 1,
+    });
+    if (!sameIdentity(renderedFile.entry, afterFingerprint.entry)) {
+      throw invalidPath("preview_file_changed_during_integrity_manifest");
+    }
+    const integrityPath = join(layout.artifactsPath, PREVIEW_INTEGRITY_FILE);
+    await atomicWrite(
+      layout.jobRoot,
+      integrityPath,
+      jsonBytes(integrity),
+    );
+    const integrityFingerprint = await fingerprintRegular(
+      layout.jobRoot,
+      integrityPath,
+      `artifacts/${PREVIEW_INTEGRITY_FILE}`,
+    );
+    const metadata = previewMetadata(planDigest, digest, integrityFingerprint);
+    await atomicJson(layout.jobRoot, join(layout.artifactsPath, "preview.json"), metadata);
     await atomicJson(layout.jobRoot, join(layout.artifactsPath, "manifest.json"), { files: [...PREVIEW_FILES] });
     return deepFreeze({
       planDigest,
       previewDigest: digest,
       mediaPlan: cloneFrozen(mediaPlan),
+      previewIntegritySha256: integrityFingerprint.sha256,
+      previewIntegrityBytes: integrityFingerprint.bytes,
       previewArtifact: "preview.mp4",
       captionsArtifact: "captions.vtt",
     });
@@ -976,7 +1358,9 @@ export class MediaProducer {
       signal,
     });
     await requireRegular(layout.jobRoot, normalizedPath, { minimumBytes: 1 });
-    const mediaPlan = this.#createMediaPlan(this.#rawPlan(binding, narrationScenes));
+    const mediaPlan = this.#createMediaPlan(
+      this.#rawPlan(binding, narrationScenes, approved.plan),
+    );
     return this.#composePlan(layout, approved.planDigest, mediaPlan, signal);
   }
 
@@ -989,7 +1373,10 @@ export class MediaProducer {
       preview.previewArtifact !== "preview.mp4" ||
       preview.captionsArtifact !== "captions.vtt" ||
       !DIGEST.test(preview.planDigest ?? "") ||
-      !DIGEST.test(preview.previewDigest ?? "")
+      !DIGEST.test(preview.previewDigest ?? "") ||
+      !DIGEST.test(preview.previewIntegritySha256 ?? "") ||
+      !Number.isSafeInteger(preview.previewIntegrityBytes) ||
+      preview.previewIntegrityBytes < 1
     ) {
       throw producerError(
         "PRODUCER_PREVIEW_INVALID",
@@ -1007,23 +1394,11 @@ export class MediaProducer {
         "event_media_plan",
       );
     }
-    const [mediaPlan, metadata, manifest] = await Promise.all([
+    const [mediaPlan, metadata] = await Promise.all([
       readJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json")),
       readJson(layout.jobRoot, join(layout.artifactsPath, "preview.json")),
-      readJson(layout.jobRoot, join(layout.artifactsPath, "manifest.json")),
     ]);
     exactPreviewMetadata(metadata);
-    const files = manifestFiles(manifest);
-    if (
-      files.size !== PREVIEW_FILES.length ||
-      PREVIEW_FILES.some((file) => !files.has(file))
-    ) {
-      throw producerError(
-        "PRODUCER_PREVIEW_INVALID",
-        "The persisted preview is invalid.",
-        "missing_artifact",
-      );
-    }
     const digest = this.#mediaPlanDigest(mediaPlan);
     if (
       metadata.schemaVersion !== "1.0" ||
@@ -1031,6 +1406,11 @@ export class MediaProducer {
       metadata.captionsArtifact !== "captions.vtt" ||
       !equalDigest(metadata.planDigest, preview.planDigest) ||
       !equalDigest(metadata.mediaPlanDigest, digest) ||
+      !equalDigest(
+        metadata.previewIntegritySha256,
+        preview.previewIntegritySha256,
+      ) ||
+      metadata.previewIntegrityBytes !== preview.previewIntegrityBytes ||
       !equalDigest(preview.previewDigest, digest) ||
       !equalDigest(eventMediaPlanDigest, digest)
     ) {
@@ -1040,16 +1420,66 @@ export class MediaProducer {
         "digest_mismatch",
       );
     }
-    await Promise.all([
-      requireRegular(layout.jobRoot, join(layout.artifactsPath, "preview.mp4"), { minimumBytes: 1 }),
-      requireRegular(layout.jobRoot, join(layout.artifactsPath, "captions.vtt"), { minimumBytes: 1 }),
-    ]);
-    return deepFreeze({ mediaPlan: cloneFrozen(mediaPlan), metadata: cloneFrozen(metadata) });
+    const integrityRead = await readJsonFingerprint(
+      layout.jobRoot,
+      join(layout.artifactsPath, PREVIEW_INTEGRITY_FILE),
+      `artifacts/${PREVIEW_INTEGRITY_FILE}`,
+    );
+    const records = await verifyIntegrity(
+      layout,
+      mediaPlan,
+      integrityRead.value,
+      preview.planDigest,
+      preview.previewDigest,
+    );
+    if (
+      !equalDigest(
+        integrityRead.fingerprint.sha256,
+        preview.previewIntegritySha256,
+      ) ||
+      integrityRead.fingerprint.bytes !== preview.previewIntegrityBytes
+    ) {
+      throw producerError(
+        "PRODUCER_PREVIEW_STALE",
+        "The persisted preview integrity record changed after review.",
+        "integrity_manifest_changed",
+      );
+    }
+    return deepFreeze({
+      mediaPlan: cloneFrozen(mediaPlan),
+      metadata: cloneFrozen(metadata),
+      integrity: cloneFrozen(integrityRead.value),
+      records,
+    });
   }
 
   async render({ jobId, preview, signal } = {}) {
     const layout = await this.#layout(jobId);
     const verified = await this.verifyPreview({ jobId: layout.jobId, preview, signal });
+    await this.#writeComposition({
+      jobRoot: layout.jobRoot,
+      templatePath: this.#templatePath,
+      outputPath: join(layout.compositionPath, "index.html"),
+      mediaPlan: verified.mediaPlan,
+    });
+    const verifyApprovedInputs = () => verifyIntegrity(
+      layout,
+      verified.mediaPlan,
+      verified.integrity,
+      preview.planDigest,
+      preview.previewDigest,
+    );
+    await verifyApprovedInputs();
+    await this.#hyperframes.lint({
+      jobRoot: layout.jobRoot,
+      projectPath: layout.compositionPath,
+      signal,
+    });
+    await this.#hyperframes.check({
+      jobRoot: layout.jobRoot,
+      projectPath: layout.compositionPath,
+      signal,
+    });
     const outputPath = join(layout.artifactsPath, "final.mp4");
     await this.#hyperframes.render({
       jobRoot: layout.jobRoot,
@@ -1067,6 +1497,7 @@ export class MediaProducer {
         "post_render_digest",
       );
     }
+    await verifyApprovedInputs();
     const quality = await this.#qualityGate.probe({
       jobRoot: layout.jobRoot,
       filePath: outputPath,
@@ -1084,6 +1515,7 @@ export class MediaProducer {
         "post_quality_digest",
       );
     }
+    await verifyApprovedInputs();
     const verifiedFile = await requireRegular(layout.jobRoot, outputPath, { minimumBytes: 1 });
     if (!sameIdentity(renderedFile.entry, verifiedFile.entry)) {
       throw invalidPath("final_file_changed_during_quality_gate");
@@ -1131,7 +1563,11 @@ export class MediaProducer {
       caption.text = text;
     }
     if (hasNarration) {
-      const text = validText(request.narrationText, "narration_text");
+      const text = validText(
+        request.narrationText,
+        "narration_text",
+        MAX_STEP_NARRATION_CODE_UNITS,
+      );
       if (!scene.narration) {
         throw producerError("PRODUCER_EDIT_INVALID", "The media edit is invalid.", "narration_missing");
       }

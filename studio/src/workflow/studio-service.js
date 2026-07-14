@@ -34,6 +34,8 @@ export class StudioService {
   #planning;
   #production;
   #jobTails = new Map();
+  #closed = false;
+  #closing = null;
 
   constructor({
     authenticationWorkflow,
@@ -54,12 +56,16 @@ export class StudioService {
     );
     this.#execution = executionWorkflow === null
       ? null
-      : validateWorkflow(executionWorkflow, ["execute", "cancel"], "execution");
+      : validateWorkflow(
+          executionWorkflow,
+          ["execute", "reapprove", "cancel"],
+          "execution",
+        );
     this.#production = productionWorkflow === null
       ? null
       : validateWorkflow(
           productionWorkflow,
-          ["preparePreview", "updateMediaPlan", "approvePreview", "cancel"],
+          ["preparePreview", "updateMediaPlan", "approvePreview", "retryRender", "cancel"],
           "production",
         );
     if (jobStore !== null && typeof jobStore?.load !== "function") {
@@ -82,6 +88,11 @@ export class StudioService {
   }
 
   #serialize(jobId, operation) {
+    if (this.#closed) {
+      return Promise.reject(
+        serviceError("STUDIO_SERVICE_CLOSED", "The studio workflow service is closed."),
+      );
+    }
     if (typeof jobId !== "string" || !JOB_ID.test(jobId)) {
       return Promise.reject(
         serviceError("STUDIO_SERVICE_JOB_INVALID", "The job identifier is invalid."),
@@ -109,10 +120,15 @@ export class StudioService {
 
   authenticateAndPlan(jobId, options) {
     return this.#serialize(jobId, async () => {
-      const authenticated = await this.#authentication.startAuthentication(jobId, options);
-      return authenticated?.state === "planning"
-        ? this.#planning.createPlan(jobId)
-        : authenticated;
+      try {
+        const authenticated = await this.#authentication.startAuthentication(jobId, options);
+        return authenticated?.state === "planning"
+          ? await this.#planning.createPlan(jobId, options)
+          : authenticated;
+      } catch (error) {
+        await this.#authentication.cleanupAuthentication?.(jobId);
+        throw error;
+      }
     });
   }
 
@@ -130,17 +146,56 @@ export class StudioService {
       this.#authentication.confirmManualLogin(jobId));
   }
 
-  confirmManualLoginAndPlan(jobId) {
+  confirmManualLoginAndPlan(jobId, options) {
     return this.#serialize(jobId, async () => {
-      const authenticated = await this.#authentication.confirmManualLogin(jobId);
-      return authenticated?.state === "planning"
-        ? this.#planning.createPlan(jobId)
-        : authenticated;
+      try {
+        const authenticated = await this.#authentication.confirmManualLogin(jobId);
+        if (authenticated?.state === "planning") {
+          return await this.#planning.createPlan(jobId, options);
+        }
+        if (authenticated?.state !== "needs_review") return authenticated;
+        if (typeof this.#jobStore?.readEvents !== "function") {
+          throw serviceError(
+            "STUDIO_SERVICE_CONFIGURATION_INVALID",
+            "The reexecution job store is not configured safely.",
+          );
+        }
+        const latest = (await this.#jobStore.readEvents(jobId, 0)).at(-1);
+        if (
+          latest?.event !== "CONFIRM_REEXECUTION_LOGIN" ||
+          latest?.state !== "needs_review" ||
+          latest?.data?.confirmed !== true ||
+          typeof latest?.data?.planDigest !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(latest.data.planDigest) ||
+          !Number.isSafeInteger(latest?.data?.mismatchSequence) ||
+          latest.data.mismatchSequence < 1
+        ) {
+          throw serviceError(
+            "STUDIO_SERVICE_REEXECUTION_BINDING_INVALID",
+            "The confirmed login is not bound to a reexecution request.",
+          );
+        }
+        const execution = this.#required(this.#execution, "execution");
+        const result = await execution.reapprove(
+          jobId,
+          latest.data.planDigest,
+          options,
+        );
+        this.#authentication.releaseAuthentication?.(jobId);
+        if (result?.report?.status !== "completed") return result;
+        return this.#required(this.#production, "production").preparePreview(jobId, {
+          report: result.report,
+          signal: options?.signal,
+        });
+      } catch (error) {
+        await this.#authentication.cleanupAuthentication?.(jobId);
+        throw error;
+      }
     });
   }
 
-  createPlan(jobId) {
-    return this.#serialize(jobId, () => this.#planning.createPlan(jobId));
+  createPlan(jobId, options) {
+    return this.#serialize(jobId, () => this.#planning.createPlan(jobId, options));
   }
 
   updatePlan(jobId, plan, expectedCurrentDigest) {
@@ -163,9 +218,11 @@ export class StudioService {
       let result;
       try {
         result = await execution.execute(jobId, expectedPlanDigest, options);
-      } finally {
-        this.#authentication.releaseAuthentication?.(jobId);
+      } catch (error) {
+        await this.#authentication.cleanupAuthentication?.(jobId);
+        throw error;
       }
+      this.#authentication.releaseAuthentication?.(jobId);
       if (result?.report?.status !== "completed") {
         return result;
       }
@@ -177,9 +234,42 @@ export class StudioService {
     });
   }
 
-  updateMediaPlan(jobId, edit) {
+  reapproveExecution(jobId, recovery, options = {}) {
+    return this.#serialize(jobId, async () => {
+      const execution = this.#required(this.#execution, "execution");
+      let result;
+      try {
+        if (typeof this.#authentication.prepareReexecution !== "function") {
+          throw serviceError(
+            "STUDIO_SERVICE_CONFIGURATION_INVALID",
+            "The reexecution authentication workflow is not configured safely.",
+          );
+        }
+        const prepared = await this.#authentication.prepareReexecution(jobId, {
+          planDigest: recovery?.planDigest,
+          mismatchSequence: recovery?.mismatchSequence,
+          signal: options?.signal,
+        });
+        if (prepared?.state === "awaiting_manual_login") return prepared;
+        result = await execution.reapprove(jobId, recovery?.planDigest, options);
+      } catch (error) {
+        await this.#authentication.cleanupAuthentication?.(jobId);
+        throw error;
+      }
+      this.#authentication.releaseAuthentication?.(jobId);
+      if (result?.report?.status !== "completed") {
+        return result;
+      }
+      return this.#required(this.#production, "production").preparePreview(jobId, {
+        report: result.report,
+        signal: options?.signal,
+      });
+    });
+  }
+
+  updateMediaPlan(jobId, edit, options = {}) {
     return this.#serialize(jobId, () =>
-      this.#required(this.#production, "production").updateMediaPlan(jobId, edit));
+      this.#required(this.#production, "production").updateMediaPlan(jobId, edit, options));
   }
 
   approvePreview(jobId, expectedPreviewDigest, options = {}) {
@@ -189,6 +279,30 @@ export class StudioService {
         expectedPreviewDigest,
         options,
       ));
+  }
+
+  retryJob(jobId, recovery, options = {}) {
+    return this.#serialize(jobId, async () => {
+      if (this.#jobStore === null) {
+        throw serviceError(
+          "STUDIO_SERVICE_CONFIGURATION_INVALID",
+          "The job store is not configured safely.",
+        );
+      }
+      const current = await this.#jobStore.load(jobId);
+      if (current.state !== "failed") {
+        throw serviceError(
+          "STUDIO_SERVICE_RETRY_INVALID",
+          "The job cannot be retried from the current state.",
+        );
+      }
+      return this.#required(this.#production, "production").retryRender(
+        jobId,
+        recovery?.planDigest,
+        recovery?.previewDigest,
+        options,
+      );
+    });
   }
 
   async cancelJob(jobId) {
@@ -210,6 +324,24 @@ export class StudioService {
       return this.#required(this.#production, "production").cancel(jobId);
     }
     return this.#authentication.cancelAuthentication(jobId);
+  }
+
+  close() {
+    if (this.#closing !== null) return this.#closing;
+    this.#closed = true;
+    const tails = [...this.#jobTails.values()];
+    const authenticationClose = typeof this.#authentication.close === "function"
+      ? Promise.resolve().then(() => this.#authentication.close())
+      : Promise.resolve();
+    this.#closing = Promise.allSettled([...tails, authenticationClose]).then((results) => {
+      if (results.some(({ status }) => status === "rejected")) {
+        throw serviceError(
+          "STUDIO_SERVICE_CLOSE_FAILED",
+          "The studio workflow service could not close safely.",
+        );
+      }
+    });
+    return this.#closing;
   }
 }
 

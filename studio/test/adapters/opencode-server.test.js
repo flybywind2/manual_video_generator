@@ -854,10 +854,16 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
           spawnedEnvironment = options.env;
           resolvedAgents = agentNames.map((name) => {
             if (name === "manual-video-planner") {
-              return planner.resolvedForDataHome(spawnedEnvironment.XDG_DATA_HOME);
+              const { tools: _debugOnlyTools, ...liveAgent } = planner.resolvedForDataHome(
+                spawnedEnvironment.XDG_DATA_HOME,
+              );
+              return liveAgent;
             }
             if (name === "manual-video-executor") {
-              return executor.resolvedForDataHome(spawnedEnvironment.XDG_DATA_HOME);
+              const { tools: _debugOnlyTools, ...liveAgent } = executor.resolvedForDataHome(
+                spawnedEnvironment.XDG_DATA_HOME,
+              );
+              return liveAgent;
             }
             return { name };
           });
@@ -943,6 +949,23 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
           !String(error).includes(OTHER_MCP_CAPABILITY_TOKEN),
       );
       liveCapabilityToken = MCP_CAPABILITY_TOKEN;
+
+      const plannerIndex = resolvedAgents.findIndex(({ name }) => name === "manual-video-planner");
+      const livePlanner = resolvedAgents[plannerIndex];
+      resolvedAgents[plannerIndex] = {
+        ...livePlanner,
+        tools: planner.resolvedForDataHome(spawnedEnvironment.XDG_DATA_HOME).tools,
+      };
+      await assert.rejects(
+        server.withAttachOptions("manual-video-planner", async (options) =>
+          options.validateServerContract({
+            agent: "manual-video-planner",
+            baseUrl: options.baseUrl,
+            studioRoot: options.studioRoot,
+          })),
+        (error) => error instanceof Error,
+      );
+      resolvedAgents[plannerIndex] = livePlanner;
 
       const outside = path.join(studioRoot, `outside-canary-${index}`);
       const cleanupCanary = path.join(outside, "canary.txt");

@@ -82,17 +82,50 @@ test("fixture login page has deterministic accessible controls", async (t) => {
   assert.match(html, /<input\b[^>]*id="fixture-username"[^>]*name="username"[^>]*autocomplete="username"/u);
   assert.match(html, /<label\b[^>]*for="fixture-password"[^>]*>비밀번호<\/label>/u);
   assert.match(html, /<input\b[^>]*id="fixture-password"[^>]*name="password"[^>]*type="password"/u);
+  assert.match(html, /<input\b[^>]*type="hidden"[^>]*name="_csrf"[^>]*value="[A-Za-z0-9_-]{43}"/u);
   assert.match(html, /<button\b[^>]*type="submit"[^>]*>로그인<\/button>/u);
 });
 
 async function login(baseUrl, username = FIXTURE_USERNAME, password = FIXTURE_PASSWORD) {
+  const loginPage = await fetch(`${baseUrl}/fixture/login`);
+  const html = await loginPage.text();
+  const csrfToken = /<input\b[^>]*name="_csrf"[^>]*value="([A-Za-z0-9_-]{43})"/u.exec(html)?.[1];
+  assert.equal(typeof csrfToken, "string");
   return fetch(`${baseUrl}/fixture/login`, {
     method: "POST",
     redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ username, password }),
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: "null",
+    },
+    body: new URLSearchParams({ _csrf: csrfToken, username, password }),
   });
 }
+
+test("fixture opaque-origin login requires a fresh same-page CSRF token", async (t) => {
+  const { baseUrl } = await startTestStudio(t);
+  for (const token of [undefined, "A".repeat(43)]) {
+    const body = new URLSearchParams({
+      ...(token ? { _csrf: token } : {}),
+      username: FIXTURE_USERNAME,
+      password: FIXTURE_PASSWORD,
+    });
+    const response = await fetch(`${baseUrl}/fixture/login`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: "null",
+      },
+      body,
+    });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).error.code, "CROSS_ORIGIN_REQUEST");
+  }
+
+  const accepted = await login(baseUrl);
+  assert.equal(accepted.status, 303);
+});
 
 test("fixture rejects incorrect credentials without creating a session", async (t) => {
   const { baseUrl } = await startTestStudio(t);

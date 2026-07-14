@@ -6,6 +6,7 @@
     <meta name="color-scheme" content="light">
     <meta name="theme-color" content="#F7F9FC">
     <title>Manual Video Studio · AI Center</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='24' y='6' width='16' height='45' rx='8' fill='%23245BFF'/%3E%3Ccircle cx='32' cy='54' r='6' fill='%237C3AED'/%3E%3Ccircle cx='32' cy='13' r='5' fill='%2321D4FD'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -91,6 +92,23 @@
                 <p class="field-hint">영상 녹화를 멈출 화면이나 문구를 지정하세요.</p>
               </div>
 
+              <details class="origin-allowlist">
+                <summary>추가 출처 승인 <span>SSO · CDN/API</span></summary>
+                <p>대상 주소 외에 로그인 전환이나 화면 리소스에 꼭 필요한 출처만 입력하세요. 대상 출처는 자동 포함됩니다.</p>
+                <div class="origin-allowlist-grid">
+                  <div class="field">
+                    <label for="auth-origins">로그인 출처</label>
+                    <textarea id="auth-origins" name="authOrigins" rows="3" maxlength="32768" spellcheck="false" placeholder="https://login.example.com"></textarea>
+                    <p class="field-hint">SSO·인증 전환 출처를 한 줄에 하나씩, 최대 16개</p>
+                  </div>
+                  <div class="field">
+                    <label for="resource-origins">리소스 출처</label>
+                    <textarea id="resource-origins" name="resourceOrigins" rows="3" maxlength="32768" spellcheck="false" placeholder="https://cdn.example.com"></textarea>
+                    <p class="field-hint">CDN·API 등 하위 리소스 출처를 한 줄에 하나씩, 최대 16개</p>
+                  </div>
+                </div>
+              </details>
+
               <fieldset class="auth-fieldset">
                 <legend>로그인 방식</legend>
                 <div class="auth-options">
@@ -112,6 +130,7 @@
                   <option value="fixture-login">로컬 데모 로그인</option>
                 </select>
                 <p class="field-hint">실제 값은 이 화면에 노출되지 않습니다.</p>
+                <p id="automatic-auth-target-help" class="field-hint">자동 로그인에서는 대상 웹 주소에 로그인 후 도착할 화면을 입력하세요. 로그인 폼과 대상 주소가 같다면 성공을 안전하게 확인할 수 없으므로 직접 로그인을 사용하세요.</p>
                 <details class="credential-save">
                   <summary>새 로그인 안전하게 저장</summary>
                   <div class="credential-save-grid">
@@ -204,6 +223,10 @@
               <span id="plan-digest" class="digest-tag">계획 확인 중</span>
             </div>
             <p>브라우저 동작, 예상 화면, 내레이션을 확인하세요. 수정하면 새 계획으로 다시 고정됩니다.</p>
+            <div class="plan-origin-review" aria-label="승인할 브라우저 출처">
+              <div><span>로그인 출처</span><code id="plan-auth-origins">추가 로그인 출처 없음</code></div>
+              <div><span>리소스 출처</span><code id="plan-resource-origins">추가 리소스 출처 없음</code></div>
+            </div>
             <label class="sr-only" for="plan-editor">실행 계획 JSON</label>
             <textarea id="plan-editor" class="plan-editor" rows="16" spellcheck="false" aria-describedby="plan-help"></textarea>
             <p id="plan-help" class="field-hint">민감한 로그인 값은 계획에 입력하지 마세요.</p>
@@ -258,7 +281,7 @@
                 </div>
                 <div class="field">
                   <label for="media-narration-text">새 내레이션</label>
-                  <textarea id="media-narration-text" rows="3" maxlength="4000" placeholder="변경하지 않으면 비워 두세요."></textarea>
+                  <textarea id="media-narration-text" rows="3" maxlength="60" placeholder="변경하지 않으면 비워 두세요."></textarea>
                 </div>
                 <div class="field">
                   <label for="media-caption-text">새 자막</label>
@@ -277,6 +300,18 @@
           </div>
         </section>
 
+        <section id="recovery-panel" class="review-panel" aria-labelledby="recovery-title" hidden>
+          <div class="panel-number">05</div>
+          <div class="panel-content">
+            <p class="panel-kicker">안전한 렌더 복구</p>
+            <h3 id="recovery-title">승인한 미리보기로 렌더를 다시 시작할 수 있습니다.</h3>
+            <p>브라우저를 다시 조작하거나 녹화하지 않고, 저장된 미리보기와 무결성 정보를 검증한 뒤 최종 영상만 다시 만듭니다.</p>
+            <div class="panel-actions">
+              <button id="retry-render-button" class="button button-primary" type="button">최종 렌더 다시 시도</button>
+            </div>
+          </div>
+        </section>
+
         <section id="completed-panel" class="review-panel completed-panel" aria-labelledby="completed-title" hidden>
           <div class="completion-mark" aria-hidden="true"><span></span><i></i></div>
           <div class="panel-content">
@@ -285,7 +320,7 @@
             <p>최종 품질 검사를 통과한 영상과 제작 산출물을 확인할 수 있습니다.</p>
             <div class="panel-actions">
               <a id="download-video-link" class="button button-primary" href="#" download>최종 영상 열기</a>
-              <a id="download-plan-link" class="button button-secondary" href="#" download>실행 계획 받기</a>
+              <a id="download-plan-link" class="button button-secondary" href="#" download>미디어 계획 받기</a>
               <button id="new-job-button" class="button button-ghost" type="button">새 영상 만들기</button>
             </div>
           </div>

@@ -1,6 +1,9 @@
 import { StudioError } from "./errors.js";
 import { canonicalPlan } from "./plan.js";
 
+export const ACTION_NARRATION_DWELL_SECONDS = 6;
+export const ACTION_RESULT_DWELL_SECONDS = 2;
+
 function blockedPlan() {
   throw new StudioError("The plan contains a blocked step.", {
     code: "BLOCKED_PLAN",
@@ -39,13 +42,22 @@ export function compileExecutionCalls(input) {
   ];
 
   for (const step of plan.steps) {
+    const waitOnly = step.calls.every((call) => call.tool === "browser_wait_for");
     calls.push(
       freezeCall(`${step.id}.chapter`, "browser_video_chapter", {
         description: step.expected,
         duration: 800,
         title: step.action,
       }),
+      freezeCall(`${step.id}.narration-dwell`, "browser_wait_for", {
+        time: ACTION_NARRATION_DWELL_SECONDS,
+      }),
       ...step.calls,
+      ...(waitOnly
+        ? []
+        : [freezeCall(`${step.id}.result-dwell`, "browser_wait_for", {
+            time: ACTION_RESULT_DWELL_SECONDS,
+          })]),
       freezeCall(`${step.id}.evidence-snapshot`, "browser_snapshot", {}),
       freezeCall(`${step.id}.evidence-screenshot`, "browser_take_screenshot", {
         fullPage: false,

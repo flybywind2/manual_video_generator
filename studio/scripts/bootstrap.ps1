@@ -17,10 +17,12 @@ if (-not $CacheRoot) {
 }
 
 $ExpectedNodeMajor = 22
+$ExpectedOpenCode = "1.4.1"
 $ExpectedPython = "3.13.14"
 $ExpectedSupertonic = "1.3.1"
 $ExpectedPlaywrightMcp = "0.0.78" # @playwright/mcp
 $ExpectedHyperFrames = "0.7.57"
+$ExpectedFFmpeg = "8.1.1"
 $SupertonicScript = Join-Path $PSScriptRoot "supertonic.ps1"
 $ReadOnly = $Check -or [bool]$WhatIfPreference
 $env:SUPERTONIC_CACHE_DIR = $CacheRoot
@@ -69,6 +71,18 @@ function Get-VersionOutput {
     } catch {
         return $null
     }
+}
+
+function Get-SemanticVersion {
+    param([string]$Output)
+    if (-not $Output) {
+        return $null
+    }
+    $match = [regex]::Match($Output, "(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
+    if (-not $match.Success) {
+        return $null
+    }
+    return $match.Groups[1].Value
 }
 
 function Get-NodeStatus {
@@ -186,10 +200,17 @@ function Prepare-Runtime {
     }
 
     $opencodePath = Get-CommandPath "opencode.exe"
-    $opencodeVersion = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
-    if (-not $opencodeVersion) {
+    $opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
+    $opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
+    if ($opencodeVersion -ne $ExpectedOpenCode) {
         if ($PSCmdlet.ShouldProcess("opencode-ai", "Install OpenCode CLI")) {
-            Invoke-Checked -FilePath $npm -Arguments @("install", "--global", "opencode-ai")
+            Invoke-Checked -FilePath $npm -Arguments @("install", "--global", "opencode-ai@1.4.1")
+        }
+        $opencodePath = Get-CommandPath "opencode.exe"
+        $opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
+        $opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
+        if ($opencodeVersion -ne $ExpectedOpenCode) {
+            throw "OpenCode 1.4.1 is required. Reopen the terminal and run start.ps1 again."
         }
     }
 
@@ -203,14 +224,19 @@ function Prepare-Runtime {
     }
 
     $ffmpegPath = Get-CommandPath "ffmpeg.exe"
-    $ffmpegVersion = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
-    if (-not $ffmpegVersion) {
-        Install-WingetPackage -Id "Gyan.FFmpeg"
+    $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
+    $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
+    if ($ffmpegVersion -ne $ExpectedFFmpeg) {
+        Install-WingetPackage -Id "Gyan.FFmpeg" -Version $ExpectedFFmpeg
+        $ffmpegPath = Get-CommandPath "ffmpeg.exe"
     }
     $ffprobePath = Get-CommandPath "ffprobe.exe"
-    $ffprobeVersion = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
-    if (-not $ffprobeVersion) {
-        throw "FFprobe was not found after FFmpeg preparation. Reopen the terminal and run start.ps1 again."
+    $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
+    $ffprobeOutput = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
+    $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
+    $ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
+    if ($ffmpegVersion -ne $ExpectedFFmpeg -or $ffprobeVersion -ne $ExpectedFFmpeg) {
+        throw "FFmpeg and FFprobe 8.1.1 are required. Reopen the terminal and run start.ps1 again."
     }
 
     if ($PSCmdlet.ShouldProcess($RuntimeRoot, "Prepare Supertonic 1.3.1 and download supertonic-3")) {
@@ -231,21 +257,24 @@ $supertonic = Get-SupertonicStatus
 $opencodePath = Get-CommandPath "opencode.exe"
 $ffmpegPath = Get-CommandPath "ffmpeg.exe"
 $ffprobePath = Get-CommandPath "ffprobe.exe"
-$opencodeVersion = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
-$ffmpegVersion = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
-$ffprobeVersion = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
+$opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
+$ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
+$ffprobeOutput = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
+$opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
+$ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
+$ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
 $playwrightVersion = Get-InstalledPackageVersion "@playwright/mcp"
 $hyperframesVersion = Get-InstalledPackageVersion "hyperframes"
 
 $checks = [ordered]@{
     node = [ordered]@{ ready = $node.ready; expected = ">=22"; actual = $node.actual }
-    opencode = [ordered]@{ ready = [bool]$opencodeVersion; expected = "installed"; actual = $opencodeVersion }
+    opencode = [ordered]@{ ready = $opencodeVersion -eq $ExpectedOpenCode; expected = $ExpectedOpenCode; actual = $opencodeVersion }
     python = [ordered]@{ ready = $python.ready; expected = $ExpectedPython; actual = $python.actual }
     supertonic = [ordered]@{ ready = $supertonic.ready; expected = $ExpectedSupertonic; actual = $supertonic.actual; modelReady = $supertonic.modelReady }
     playwrightMcp = [ordered]@{ ready = $playwrightVersion -eq $ExpectedPlaywrightMcp; expected = $ExpectedPlaywrightMcp; actual = $playwrightVersion }
     hyperframes = [ordered]@{ ready = $hyperframesVersion -eq $ExpectedHyperFrames; expected = $ExpectedHyperFrames; actual = $hyperframesVersion }
-    ffmpeg = [ordered]@{ ready = [bool]$ffmpegVersion; expected = "installed"; actual = $ffmpegVersion }
-    ffprobe = [ordered]@{ ready = [bool]$ffprobeVersion; expected = "installed"; actual = $ffprobeVersion }
+    ffmpeg = [ordered]@{ ready = $ffmpegVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffmpegVersion }
+    ffprobe = [ordered]@{ ready = $ffprobeVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffprobeVersion }
 }
 $ready = @($checks.Values | Where-Object { -not $_.ready }).Count -eq 0
 [ordered]@{

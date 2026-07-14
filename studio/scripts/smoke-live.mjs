@@ -147,9 +147,15 @@ async function requestJson(baseUrl, path, { method = "GET", body, signal } = {})
   return value;
 }
 
-async function waitForEvent(baseUrl, jobId, accepted, timeoutMs) {
+async function waitForEvent(baseUrl, jobId, accepted, timeoutMs, externalSignal) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  }
   try {
     const response = await fetch(`${baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events`, {
       headers: { Accept: "text/event-stream" },
@@ -180,11 +186,15 @@ async function waitForEvent(baseUrl, jobId, accepted, timeoutMs) {
     }
   } catch (error) {
     if (error?.name === "AbortError") {
+      if (externalSignal?.aborted) {
+        smokeError("SMOKE_INTERRUPTED", "The live smoke was interrupted.");
+      }
       smokeError("SMOKE_TIMEOUT", "The live workflow did not reach the expected review gate in time.");
     }
     throw error;
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
     controller.abort();
   }
 }
@@ -197,15 +207,31 @@ function digestFrom(event, key) {
   return value;
 }
 
-async function waitForManualConfirmation() {
+async function waitForManualConfirmation(signal) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     smokeError("SMOKE_MANUAL_LOGIN_REQUIRED", "Manual login requires an interactive terminal.");
   }
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    await terminal.question("브라우저에서 로그인을 마친 뒤 Enter를 누르세요: ");
+    await terminal.question("브라우저에서 로그인을 마친 뒤 Enter를 누르세요: ", { signal });
   } finally {
     terminal.close();
+  }
+}
+
+export async function cancelSmokeJob(baseUrl, jobId) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: {},
+      signal: controller.signal,
+    });
+  } catch {
+    // Preserve the original smoke failure; cancellation is deliberately best-effort.
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -218,7 +244,7 @@ export function buildSmokeRequest(env = process.env, baseUrl = DEFAULT_BASE_URL)
   if (authMode === "automatic" && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(credentialId ?? "")) {
     smokeError("SMOKE_CREDENTIAL_REQUIRED", "Automatic smoke requires MANUAL_STUDIO_SMOKE_CREDENTIAL_ID.");
   }
-  const targetUrl = env.MANUAL_STUDIO_SMOKE_TARGET_URL ?? `${baseUrl}/fixture/login`;
+  const targetUrl = env.MANUAL_STUDIO_SMOKE_TARGET_URL ?? `${baseUrl}/fixture/dashboard`;
   let parsedTarget;
   try {
     parsedTarget = new URL(targetUrl);
@@ -231,6 +257,7 @@ export function buildSmokeRequest(env = process.env, baseUrl = DEFAULT_BASE_URL)
   return Object.freeze({
     targetUrl: parsedTarget.href,
     prompt: env.MANUAL_STUDIO_SMOKE_PROMPT ?? "프로젝트 메뉴에서 Manual Video 프로젝트를 열고 완료 화면을 보여 주세요.",
+    completionCondition: env.MANUAL_STUDIO_SMOKE_COMPLETION_CONDITION ?? "완료: Manual Video 프로젝트가 열렸습니다.",
     authMode,
     ...(authMode === "automatic" ? { credentialId } : {}),
   });
@@ -243,43 +270,89 @@ export async function runLiveSmoke({ env = process.env } = {}) {
     smokeError("SMOKE_TIMEOUT_INVALID", "MANUAL_STUDIO_SMOKE_TIMEOUT_MS is invalid.");
   }
 
-  const health = await requestJson(baseUrl, "/api/health");
-  if (health?.ready !== true) smokeError("SMOKE_RUNTIME_NOT_READY", "The studio doctor is not ready.");
-  const request = buildSmokeRequest(env, baseUrl);
-  const created = await requestJson(baseUrl, "/api/jobs", { method: "POST", body: request });
-  const jobId = safeJobId(created.id);
-  process.stdout.write(`Live smoke job created: ${jobId}\n`);
-
-  let planEvent = await waitForEvent(baseUrl, jobId, new Set(["AUTH_REQUIRED", "PLAN_READY"]), timeoutMs);
-  if (planEvent.event === "AUTH_REQUIRED") {
-    process.stdout.write("Manual login is awaiting confirmation in the controlled browser.\n");
-    await waitForManualConfirmation();
-    await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/login/manual/confirm`, {
+  const operation = new AbortController();
+  const interrupt = () => operation.abort();
+  process.once("SIGINT", interrupt);
+  let jobId = null;
+  try {
+    const health = await requestJson(baseUrl, "/api/health", { signal: operation.signal });
+    if (health?.ready !== true) smokeError("SMOKE_RUNTIME_NOT_READY", "The studio doctor is not ready.");
+    const request = buildSmokeRequest(env, baseUrl);
+    const created = await requestJson(baseUrl, "/api/jobs", {
       method: "POST",
-      body: {},
+      body: request,
+      signal: operation.signal,
     });
-    planEvent = await waitForEvent(baseUrl, jobId, new Set(["PLAN_READY"]), timeoutMs);
+    jobId = safeJobId(created.id);
+    process.stdout.write(`Live smoke job created: ${jobId}\n`);
+
+    let planEvent = await waitForEvent(
+      baseUrl,
+      jobId,
+      new Set(["AUTH_REQUIRED", "PLAN_READY"]),
+      timeoutMs,
+      operation.signal,
+    );
+    if (planEvent.event === "AUTH_REQUIRED") {
+      process.stdout.write("Manual login is awaiting confirmation in the controlled browser.\n");
+      await waitForManualConfirmation(operation.signal);
+      await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/login/manual/confirm`, {
+        method: "POST",
+        body: {},
+        signal: operation.signal,
+      });
+      planEvent = await waitForEvent(
+        baseUrl,
+        jobId,
+        new Set(["PLAN_READY"]),
+        timeoutMs,
+        operation.signal,
+      );
+    }
+
+    const planDigest = digestFrom(planEvent, "planDigest");
+    await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/plan/approve`, {
+      method: "POST",
+      body: { planDigest },
+      signal: operation.signal,
+    });
+    await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/execute`, {
+      method: "POST",
+      body: { planDigest },
+      signal: operation.signal,
+    });
+
+    const previewEvent = await waitForEvent(
+      baseUrl,
+      jobId,
+      new Set(["COMPOSITION_COMPLETED"]),
+      timeoutMs,
+      operation.signal,
+    );
+    const previewDigest = digestFrom(previewEvent, "previewDigest");
+    await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/preview/approve`, {
+      method: "POST",
+      body: { previewDigest },
+      signal: operation.signal,
+    });
+    const completed = await waitForEvent(
+      baseUrl,
+      jobId,
+      new Set(["RENDER_COMPLETED"]),
+      timeoutMs,
+      operation.signal,
+    );
+    process.stdout.write(`Live smoke completed: ${jobId}\n`);
+    return Object.freeze({ jobId, event: completed.event, state: completed.state });
+  } catch (error) {
+    if (jobId !== null) await cancelSmokeJob(baseUrl, jobId);
+    if (operation.signal.aborted && error?.code !== "SMOKE_INTERRUPTED") {
+      smokeError("SMOKE_INTERRUPTED", "The live smoke was interrupted.");
+    }
+    throw error;
+  } finally {
+    process.removeListener("SIGINT", interrupt);
   }
-
-  const planDigest = digestFrom(planEvent, "planDigest");
-  await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/plan/approve`, {
-    method: "POST",
-    body: { planDigest },
-  });
-  await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/execute`, {
-    method: "POST",
-    body: { planDigest },
-  });
-
-  const previewEvent = await waitForEvent(baseUrl, jobId, new Set(["COMPOSITION_COMPLETED"]), timeoutMs);
-  const previewDigest = digestFrom(previewEvent, "previewDigest");
-  await requestJson(baseUrl, `/api/jobs/${encodeURIComponent(jobId)}/preview/approve`, {
-    method: "POST",
-    body: { previewDigest },
-  });
-  const completed = await waitForEvent(baseUrl, jobId, new Set(["RENDER_COMPLETED"]), timeoutMs);
-  process.stdout.write(`Live smoke completed: ${jobId}\n`);
-  return Object.freeze({ jobId, event: completed.event, state: completed.state });
 }
 
 const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;

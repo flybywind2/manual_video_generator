@@ -146,8 +146,13 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(planner.body, /omit the `filename` argument/iu);
   assert.match(planner.body, /never navigate by URL or browser history/iu);
   assert.match(planner.body, /schemaVersion.*1\.1/isu);
+  assert.match(planner.body, /authOrigins.*resourceOrigins/isu);
+  assert.match(planner.body, /1920.*1080.*30/isu);
+  assert.match(planner.body, /must exactly equal.*coordinator-supplied/iu);
   assert.match(planner.body, /exact ordered `calls`/iu);
   assert.match(planner.body, /browser_(?:click|fill_form|press_key|type|wait_for)/iu);
+  assert.match(planner.body, /getByRole.*exact: true/isu);
+  assert.match(planner.body, /never put ephemeral `eN` or `fNeN`/iu);
 
   const executor = parseFrontMatter(await readFile(executorPath, "utf8"));
   assert.match(executor.body, /approved plan digest/iu);

@@ -24,24 +24,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 
 | 엔진 | 고정/요구 버전 | 역할 |
 |---|---:|---|
-| OpenCode | 설치된 로컬 CLI | 프롬프트 해석, 계획 생성, 실행 보고서 판정 |
+| OpenCode | `1.4.1` | 프롬프트 해석, 계획 생성, 실행 보고서 판정 |
 | Playwright MCP | `0.0.78` | 허용된 origin과 정확히 승인된 호출만 수행하는 브라우저 조작·녹화 |
 | Supertonic | `1.3.1` / Python `3.13.14` | 로컬 한국어 44.1 kHz 내레이션 합성 |
 | HyperFrames | `0.7.57` | 캡션·챕터·하이라이트 타임라인 구성과 렌더링 |
-| FFmpeg / FFprobe | 설치된 로컬 CLI | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
+| FFmpeg / FFprobe | `8.1.1` | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
 
-Node.js는 22 이상이어야 합니다. 시작 스크립트는 `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비하며, 누락된 OpenCode·Python·FFmpeg는 Windows 패키지 도구를 통해 준비를 시도합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
+Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 정확한 npm 버전으로 준비하며 Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
 
 ## 사용 흐름
 
-1. 화면에서 대상 URL과 “어떤 과정을 설명할지”를 입력합니다.
+1. 화면에서 대상 URL, “어떤 과정을 설명할지”, 필요한 인증·리소스 origin 허용 목록을 입력합니다.
 2. 로그인 방식을 고르고 작업을 만듭니다.
 3. OpenCode가 제안한 정확한 Playwright MCP 호출 목록을 검토·수정한 뒤 승인합니다.
 4. 실행 승인을 누르면 브라우저 조작과 녹화가 시작됩니다. 계획과 실제 호출이 다르면 자동으로 중단됩니다.
 5. Supertonic 내레이션과 HyperFrames 미리보기를 확인하고 캡션 또는 내레이션을 수정합니다.
 6. 미리보기를 승인하면 FFmpeg/FFprobe 품질 게이트를 통과한 `final.mp4`만 완료 파일로 제공합니다.
 
-각 승인 화면에 표시된 digest는 현재 계획 또는 미리보기에 결합됩니다. 다른 탭이나 이전 화면의 오래된 승인 값은 거부됩니다.
+각 승인 화면에 표시된 digest는 현재 계획 또는 미리보기에 결합됩니다. 인증·리소스 origin 허용 목록도 계획에 포함되어 함께 고정되며, 다른 탭이나 이전 화면의 오래된 승인 값은 거부됩니다.
 
 ## 로그인과 DPAPI
 
@@ -51,9 +51,11 @@ Node.js는 22 이상이어야 합니다. 시작 스크립트는 `@playwright/mcp
 
 ### 자동 로그인
 
-`저장된 로그인`은 미리 등록한 credential ID만 작업에 기록합니다. 원문 자격 증명은 Windows 현재 사용자 범위 DPAPI로 암호화되어 `data/credentials` 아래에 저장되고, 인증 순간에만 브라우저 런타임으로 전달됩니다. 다른 Windows 사용자나 다른 PC에서는 복호화할 수 없습니다.
+`저장된 로그인`은 미리 등록한 credential ID만 작업에 기록합니다. 원문 자격 증명은 Windows 현재 사용자 범위 DPAPI로 암호화되어 `data/credentials` 아래에 저장되고, 인증 순간에만 브라우저 런타임으로 전달됩니다. 다른 Windows 사용자나 다른 PC에서는 복호화할 수 없습니다. 각 저장 항목은 하나의 정규화된 HTTP(S) 로그인 origin에 결합되며, 작업의 로그인 origin과 정확히 일치하지 않으면 브라우저를 시작하지 않습니다.
 
-등록은 실행 중인 loopback API의 `PUT /api/credentials/{credential-id}`가 담당합니다. 응답은 `204`이며 입력 값을 되돌려 주지 않습니다. PowerShell에서는 `Get-Credential`로 값을 대화형 입력해 JSON을 메모리에서 만든 뒤 요청하고, 사용한 변수를 즉시 제거하세요. credential ID에는 영문자·숫자·`_`·`-`만 사용합니다. 자격 증명을 명령행 인자, 환경 변수, 소스 파일 또는 작업 프롬프트에 넣지 마세요.
+자동 로그인에서는 대상 URL을 로그인 후 도착할 화면으로 지정하세요. 로그인 폼 URL과 대상 URL이 같으면 안전한 자동 인증 성공을 확인할 수 없으므로 수동 로그인을 사용하세요.
+
+등록은 실행 중인 loopback API의 `PUT /api/credentials/{credential-id}`가 담당하며, JSON 본문은 `origin`, `username`, `password`를 포함해야 합니다. 응답은 `204`이며 입력 값을 되돌려 주지 않습니다. origin 결합 정보가 없던 이전 v1 저장 파일은 자동 변환하지 않고 안전하게 거부하므로, 이 버전의 화면 또는 API에서 올바른 로그인 origin으로 다시 저장해야 합니다. PowerShell에서는 `Get-Credential`로 값을 대화형 입력해 JSON을 메모리에서 만든 뒤 요청하고, 사용한 변수를 즉시 제거하세요. credential ID에는 영문자·숫자·`_`·`-`만 사용합니다. 자격 증명을 명령행 인자, 환경 변수, 소스 파일 또는 작업 프롬프트에 넣지 마세요.
 
 ## 데이터와 모델 다운로드
 
@@ -61,21 +63,42 @@ Node.js는 22 이상이어야 합니다. 시작 스크립트는 `@playwright/mcp
 - DPAPI 암호문: `data/credentials/`
 - Supertonic 모델 캐시: `data/cache/supertonic-3/`
 - 격리 Python 환경과 일시 런타임: `.runtime/supertonic/`
-- Playwright 브라우저 프로필: `data/browser-profile/`
+- 수동 로그인 Playwright 브라우저 프로필: `data/browser-profile/`
+- 자동 로그인 일회용 프로필: `.runtime/browser/<job-id>/profile/` (작업 종료 시 폐기)
 
 첫 실행 시 Supertonic 모델 다운로드가 발생합니다. 공식 Python SDK 안내는 현재 모델 다운로드를 약 400 MB로 설명하지만, 실제 용량은 모델·패키지 버전에 따라 달라질 수 있으므로 충분한 여유 공간을 확보하세요. 이 서비스는 `SUPERTONIC_CACHE_DIR`을 위의 프로젝트 로컬 캐시로 고정합니다. 다운로드에는 네트워크가 필요하지만 합성은 준비 완료 후 loopback에서 로컬로 처리됩니다.
 
 ## 실패와 재시도
 
-브라우저 실행, 내레이션, 합성, 렌더링은 단계별로 실패 상태와 안전한 오류 코드만 기록합니다. 재시도 가능한 실패에서는 이미 검증된 녹화·장면별 WAV 같은 선행 산출물을 유지하고 실패한 단계부터 재시도합니다. 내레이션 일부만 실패하면 실패 장면만 다시 합성할 수 있습니다. 계획 digest 또는 미리보기 digest가 바뀌면 하위 산출물을 폐기하고 다시 승인을 받아야 합니다. 반복 실패 전에 대상 사이트의 화면 변경, 로그인 만료, Supertonic health, 디스크 여유 공간을 확인하세요.
+브라우저 실행, 내레이션, 합성, 렌더링은 단계별로 실패 상태와 안전한 오류 코드만 기록합니다. 페이지 불일치가 발생한 자동 로그인 작업은 현재 mismatch 이벤트와 계획 digest를 다시 승인한 뒤 새 인증 세션에서 정확한 호출 전체를 재실행합니다. 렌더 실패는 계획·미리보기 digest가 모두 일치할 때 기존 녹화·음성·구성을 그대로 검증하고 렌더 단계만 다시 실행합니다. 계획 digest 또는 미리보기 digest가 바뀌면 재승인이 거부됩니다. 수동 로그인 작업의 페이지 불일치 재실행은 새 사용자 로그인이 필요하다는 안전한 오류로 중단됩니다. 반복 실패 전에 대상 사이트의 화면 변경, 로그인 만료, Supertonic health, 디스크 여유 공간을 확인하세요.
 
 작업을 취소하면 현재 브라우저·OpenCode·Supertonic·렌더 프로세스에 중단 신호를 보내고 더 이상 다음 장면을 시작하지 않습니다. 비밀 값은 상태 응답이나 로그에 출력되지 않습니다.
 
 ## 검증과 라이브 스모크
 
-`scripts/verify.mjs`는 전체 테스트와 doctor를 먼저 통과시킨 뒤 선택된 `final.mp4`를 검사합니다. FFprobe 계약은 MP4/H.264/yuv420p/1920×1080/30 fps/AAC/44.1 또는 48 kHz와 영상·음성 길이를 확인합니다. FFmpeg 분석은 무음, 거의 전 구간의 정지/검정 placeholder를 거부하고, 결합된 media plan에 유효한 캡션이 없으면 실패합니다.
+`scripts/verify.mjs`는 전체 테스트와 doctor를 먼저 통과시킨 뒤 선택된 `final.mp4`를 검사합니다. FFprobe 계약은 MP4/H.264/yuv420p/1920×1080/30 fps/AAC/44.1 또는 48 kHz와 영상·음성 길이를 확인합니다. FFmpeg 분석은 무음이나 단일 연속 정지·검정 구간이 거의 전 구간을 차지하는 placeholder를 거부하고, 결합된 media plan에 유효한 캡션이 없으면 실패합니다. 여러 실제 장면 사이의 의도된 정적 설명 구간은 합산해 placeholder로 오인하지 않습니다.
+
+검증할 작업을 명시하려면 다음처럼 최종 영상과 그 영상에 결합된 media plan을 함께 전달합니다. 인자를 생략하면 가장 최근 `final.mp4`를 선택합니다. `npm run verify -- --artifact ... --plan ...`도 같은 검증기를 실행합니다.
+
+```powershell
+node scripts/verify.mjs --artifact "data/jobs/<job-id>/artifacts/final.mp4" --plan "data/jobs/<job-id>/artifacts/media-plan.json"
+```
 
 실제 API 전체 흐름 스모크는 의도하지 않은 브라우저 조작을 막기 위해 기본적으로 건너뜁니다. 실행하려면 서비스가 켜진 별도 터미널에서 `MANUAL_STUDIO_LIVE_SMOKE=1`을 설정한 뒤 `node scripts/smoke-live.mjs`를 실행합니다. 수동 로그인은 터미널 안내 후 사용자가 완료하고, 자동 로그인은 `MANUAL_STUDIO_SMOKE_AUTH_MODE=automatic`과 기존 credential ID가 추가로 필요합니다. 스모크는 계획 승인, 실행, 미리보기 승인, 최종 렌더 이벤트까지 실제 API를 통과합니다.
+
+스모크 입력은 아래 환경 변수로만 덮어씁니다. 값을 지정하지 않으면 로컬 fixture와 기본 프롬프트를 사용합니다.
+
+| 환경 변수 | 의미 |
+|---|---|
+| `MANUAL_STUDIO_BASE_URL` | Studio loopback 주소. 기본값은 `http://127.0.0.1:4317` |
+| `MANUAL_STUDIO_SMOKE_TIMEOUT_MS` | 각 review gate의 제한 시간. 10초~1시간 |
+| `MANUAL_STUDIO_SMOKE_TARGET_URL` | 실제로 조작할 HTTP(S) 대상 URL |
+| `MANUAL_STUDIO_SMOKE_PROMPT` | OpenCode가 계획할 사용자 요청 |
+| `MANUAL_STUDIO_SMOKE_COMPLETION_CONDITION` | 마지막 화면에서 확인할 명시적 완료 조건 |
+| `MANUAL_STUDIO_SMOKE_AUTH_MODE` | `manual` 또는 `automatic` |
+| `MANUAL_STUDIO_SMOKE_CREDENTIAL_ID` | 자동 로그인일 때 사용할 origin-bound credential ID |
+
+스모크가 timeout, API 오류 또는 `Ctrl+C`로 중단되면 이미 생성한 작업에 취소를 최선 노력으로 요청한 뒤 원래 오류를 반환합니다.
 
 ## 생성물 고지와 라이선스
 

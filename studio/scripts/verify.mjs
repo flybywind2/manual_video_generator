@@ -75,9 +75,15 @@ export function validateArtifactEvidence({ probe, analysis, mediaPlan } = {}) {
     !finiteNumber(analysis.meanVolumeDb) ||
     !finiteNumber(analysis.maxVolumeDb) ||
     !finiteNumber(analysis.frozenMs) ||
+    !finiteNumber(analysis.longestFrozenMs) ||
     !finiteNumber(analysis.blackMs) ||
+    !finiteNumber(analysis.longestBlackMs) ||
     analysis.frozenMs < 0 ||
-    analysis.blackMs < 0
+    analysis.longestFrozenMs < 0 ||
+    analysis.blackMs < 0 ||
+    analysis.longestBlackMs < 0 ||
+    analysis.longestFrozenMs > analysis.frozenMs ||
+    analysis.longestBlackMs > analysis.blackMs
   ) {
     verificationError("VERIFY_MEDIA_ANALYSIS", "FFmpeg did not produce complete final-artifact evidence.");
   }
@@ -85,8 +91,8 @@ export function validateArtifactEvidence({ probe, analysis, mediaPlan } = {}) {
     verificationError("VERIFY_SILENT_AUDIO", "The selected final artifact contains silent narration.");
   }
   if (
-    analysis.frozenMs / quality.durationMs >= PLACEHOLDER_RATIO ||
-    analysis.blackMs / quality.durationMs >= PLACEHOLDER_RATIO
+    analysis.longestFrozenMs / quality.durationMs >= PLACEHOLDER_RATIO ||
+    analysis.longestBlackMs / quality.durationMs >= PLACEHOLDER_RATIO
   ) {
     verificationError("VERIFY_PLACEHOLDER_VIDEO", "The selected final artifact appears to be a placeholder.");
   }
@@ -97,7 +103,9 @@ export function validateArtifactEvidence({ probe, analysis, mediaPlan } = {}) {
     meanVolumeDb: analysis.meanVolumeDb,
     maxVolumeDb: analysis.maxVolumeDb,
     frozenMs: analysis.frozenMs,
+    longestFrozenMs: analysis.longestFrozenMs,
     blackMs: analysis.blackMs,
+    longestBlackMs: analysis.longestBlackMs,
   });
 }
 
@@ -119,13 +127,24 @@ function sumSeconds(source, pattern) {
   return Math.round(seconds * 1_000);
 }
 
+function longestSeconds(source, pattern) {
+  let match;
+  let seconds = 0;
+  while ((match = pattern.exec(source)) !== null) {
+    seconds = Math.max(seconds, Number(match[1]));
+  }
+  return Math.round(seconds * 1_000);
+}
+
 export function parseFfmpegAnalysis(source) {
   const text = typeof source === "string" ? source : "";
   return Object.freeze({
     meanVolumeDb: lastNumber(text, /mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/giu),
     maxVolumeDb: lastNumber(text, /max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/giu),
     frozenMs: sumSeconds(text, /freeze_duration:\s*(\d+(?:\.\d+)?)/giu),
+    longestFrozenMs: longestSeconds(text, /freeze_duration:\s*(\d+(?:\.\d+)?)/giu),
     blackMs: sumSeconds(text, /black_duration:\s*(\d+(?:\.\d+)?)/giu),
+    longestBlackMs: longestSeconds(text, /black_duration:\s*(\d+(?:\.\d+)?)/giu),
   });
 }
 
@@ -236,7 +255,9 @@ function run(file, args, { cwd = defaultStudioRoot, capture = false } = {}) {
       child.stdout.on("data", (chunk) => stdout.push(chunk));
       child.stderr.on("data", (chunk) => stderr.push(chunk));
     }
-    child.once("error", reject);
+    child.once("error", () => {
+      reject(new VerificationError("VERIFY_COMMAND_FAILED", "A verification command failed."));
+    });
     child.once("exit", (code, signal) => {
       if (code !== 0 || signal) {
         reject(new VerificationError("VERIFY_COMMAND_FAILED", "A verification command failed."));
@@ -289,8 +310,7 @@ function parseArguments(argv) {
 }
 
 export async function runVerification({ studioRoot = defaultStudioRoot, artifactPath, planPath } = {}) {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  await run(npm, ["test"], { cwd: studioRoot });
+  await run(process.execPath, ["--test"], { cwd: studioRoot });
   await run(process.execPath, ["scripts/doctor.mjs"], { cwd: studioRoot });
   const artifact = await selectFinalArtifact({ studioRoot, artifactPath });
   const mediaPlan = await loadMediaPlan({ studioRoot, artifactPath: artifact, planPath });

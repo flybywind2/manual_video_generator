@@ -6,6 +6,7 @@ const WORKFLOW_EVENT_NAMES = Object.freeze([
   "AUTHENTICATION_EXPIRED",
   "AUTHENTICATION_FAILED",
   "CONFIRM_LOGIN",
+  "CONFIRM_REEXECUTION_LOGIN",
   "PLAN_READY",
   "PLANNING_FAILED",
   "UPDATE_PLAN",
@@ -23,6 +24,8 @@ const WORKFLOW_EVENT_NAMES = Object.freeze([
   "APPROVE_PREVIEW",
   "RENDER_COMPLETED",
   "RENDER_FAILED",
+  "RETRY_RENDER",
+  "OPERATION_REJECTED",
   "CANCEL_JOB",
 ]);
 
@@ -43,6 +46,7 @@ const EVENT_LABELS = Object.freeze({
   AUTH_REQUIRED: "직접 로그인을 기다리고 있습니다.",
   AUTHENTICATED: "로그인을 확인했습니다.",
   CONFIRM_LOGIN: "로그인 완료를 전달했습니다.",
+  CONFIRM_REEXECUTION_LOGIN: "새 로그인을 확인하고 승인된 실행을 다시 시작합니다.",
   PLAN_READY: "검토할 실행 계획이 준비되었습니다.",
   UPDATE_PLAN: "수정한 실행 계획을 고정했습니다.",
   APPROVE_PLAN: "실행 계획을 승인했습니다.",
@@ -61,6 +65,8 @@ const EVENT_LABELS = Object.freeze({
   NARRATION_FAILED: "내레이션 생성 단계에서 멈췄습니다.",
   COMPOSITION_FAILED: "미리보기 구성 단계에서 멈췄습니다.",
   RENDER_FAILED: "최종 렌더 단계에서 멈췄습니다.",
+  RETRY_RENDER: "승인한 미리보기로 최종 렌더를 다시 시작했습니다.",
+  OPERATION_REJECTED: "요청을 처리하지 못했습니다. 최신 상태를 확인해 주세요.",
 });
 
 const STATE_VIEW = Object.freeze({
@@ -90,8 +96,10 @@ const API_PATHS = Object.freeze({
   plan: (id) => `/api/jobs/${encodeURIComponent(id)}/plan`,
   approvePlan: (id) => `/api/jobs/${encodeURIComponent(id)}/plan/approve`,
   execute: (id) => `/api/jobs/${encodeURIComponent(id)}/execute`,
+  reapproveExecution: (id) => `/api/jobs/${encodeURIComponent(id)}/execution/reapprove`,
   mediaPlan: (id) => `/api/jobs/${encodeURIComponent(id)}/media-plan`,
   approvePreview: (id) => `/api/jobs/${encodeURIComponent(id)}/preview/approve`,
+  retry: (id) => `/api/jobs/${encodeURIComponent(id)}/retry`,
   cancel: (id) => `/api/jobs/${encodeURIComponent(id)}/cancel`,
   credential: (id) => `/api/credentials/${encodeURIComponent(id)}`,
 });
@@ -99,6 +107,7 @@ const API_PATHS = Object.freeze({
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const SCENE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const MAX_APPROVED_ORIGINS = 16;
 
 function isPlainRecord(value) {
   try {
@@ -109,6 +118,84 @@ function isPlainRecord(value) {
   } catch {
     return false;
   }
+}
+
+export function approvedOriginRequest({
+  targetUrl,
+  authText,
+  resourceText,
+  authMode,
+} = {}) {
+  if (
+    typeof targetUrl !== "string" ||
+    typeof authText !== "string" ||
+    typeof resourceText !== "string" ||
+    !["manual", "automatic"].includes(authMode)
+  ) {
+    return null;
+  }
+  let target;
+  try {
+    target = new URL(targetUrl);
+  } catch {
+    return null;
+  }
+  if (
+    !["http:", "https:"].includes(target.protocol) ||
+    target.username !== "" ||
+    target.password !== ""
+  ) {
+    return null;
+  }
+  const approved = new Set();
+  const parse = (text) => {
+    const lines = text.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    if (lines.length > MAX_APPROVED_ORIGINS) return null;
+    const origins = [];
+    for (const line of lines) {
+      if (line.length > 2_048 || /[\u0000-\u001f\u007f]/u.test(line)) return null;
+      let parsed;
+      try {
+        parsed = new URL(line);
+      } catch {
+        return null;
+      }
+      if (
+        !["http:", "https:"].includes(parsed.protocol) ||
+        parsed.username !== "" ||
+        parsed.password !== "" ||
+        parsed.pathname !== "/" ||
+        parsed.search !== "" ||
+        parsed.hash !== "" ||
+        parsed.origin === target.origin ||
+        approved.has(parsed.origin)
+      ) {
+        return null;
+      }
+      approved.add(parsed.origin);
+      origins.push(parsed.origin);
+    }
+    return Object.freeze(origins.sort());
+  };
+  const authOrigins = parse(authText);
+  const resourceOrigins = parse(resourceText);
+  if (
+    authOrigins === null ||
+    resourceOrigins === null ||
+    (authMode === "automatic" && authOrigins.length > 1)
+  ) return null;
+  return Object.freeze({ authOrigins, resourceOrigins });
+}
+
+export function credentialOriginRequest({ targetUrl, authText, resourceText } = {}) {
+  const approved = approvedOriginRequest({
+    targetUrl,
+    authText,
+    resourceText,
+    authMode: "automatic",
+  });
+  if (approved === null) return null;
+  return approved.authOrigins[0] ?? new URL(targetUrl).origin;
 }
 
 function safeArtifactName(name) {
@@ -128,6 +215,19 @@ export function readWorkflowEvent(value) {
       return { plan: data.plan, planDigest: data.planDigest };
     }
     return {};
+  }
+  if (
+    value.event === "EXECUTION_MISMATCH" &&
+    DIGEST.test(data.planDigest ?? "") &&
+    Number.isSafeInteger(value.sequence) &&
+    value.sequence > 0
+  ) {
+    return {
+      executionMismatch: {
+        planDigest: data.planDigest,
+        mismatchSequence: value.sequence,
+      },
+    };
   }
   if (value.event === "COMPOSITION_COMPLETED") {
     const preview = data.preview;
@@ -150,7 +250,34 @@ export function readWorkflowEvent(value) {
     const outputArtifact = safeArtifactName(data.outputArtifact);
     return outputArtifact === null ? {} : { outputArtifact };
   }
+  if (
+    value.event === "RENDER_FAILED" &&
+    DIGEST.test(data.planDigest ?? "") &&
+    DIGEST.test(data.previewDigest ?? "")
+  ) {
+    return {
+      renderRecovery: {
+        planDigest: data.planDigest,
+        previewDigest: data.previewDigest,
+      },
+    };
+  }
   return {};
+}
+
+export function executionReviewView(authMode, recovery) {
+  const manual = authMode === "manual";
+  const validRecovery = isPlainRecord(recovery) &&
+    DIGEST.test(recovery.planDigest ?? "") &&
+    Number.isSafeInteger(recovery.mismatchSequence) &&
+    recovery.mismatchSequence > 0;
+  return Object.freeze({
+    disabled: !validRecovery,
+    label: manual ? "새 수동 로그인 · 다시 실행" : "증거 불일치 승인 · 다시 녹화",
+    copy: manual
+      ? "새 브라우저에서 다시 로그인한 뒤 승인된 전체 실행을 다시 녹화합니다."
+      : "저장된 로그인 참조로 새 브라우저를 시작해 승인된 전체 실행을 다시 녹화합니다.",
+  });
 }
 
 export function jobIdFromLocation(locationValue) {
@@ -218,6 +345,7 @@ export function sendTransientCredential(api, fields) {
   if (
     typeof api?.saveCredential !== "function" ||
     typeof fields?.id?.value !== "string" ||
+    typeof fields?.origin?.value !== "string" ||
     typeof fields?.username?.value !== "string" ||
     typeof fields?.secret?.value !== "string"
   ) {
@@ -226,6 +354,7 @@ export function sendTransientCredential(api, fields) {
   let operation;
   try {
     operation = api.saveCredential(fields.id.value, {
+      origin: fields.origin.value,
       username: fields.username.value,
       password: fields.secret.value,
     });
@@ -248,12 +377,12 @@ export function mediaEditRequest(fields, previewDigest) {
   const sceneId = fields.sceneId.value.trim();
   const narrationText = fields.narration.value.trim();
   const captionText = fields.caption.value.trim();
-  const validText = (value) => value.length <= 4_000 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+  const validText = (value, maximum) => value.length <= maximum && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
   if (
     !SCENE_ID.test(sceneId) ||
     (narrationText.length === 0 && captionText.length === 0) ||
-    !validText(narrationText) ||
-    !validText(captionText)
+    !validText(narrationText, 60) ||
+    !validText(captionText, 4_000)
   ) {
     return null;
   }
@@ -341,6 +470,10 @@ export function createStudioApi({
       method: "POST",
       body: { planDigest },
     }),
+    reapproveExecution: (jobId, planDigest, mismatchSequence) => request(API_PATHS.reapproveExecution(jobId), {
+      method: "POST",
+      body: { planDigest, mismatchSequence },
+    }),
     editMedia: (jobId, edit, previewDigest) => request(API_PATHS.mediaPlan(jobId), {
       method: "PUT",
       body: { ...edit, previewDigest },
@@ -348,6 +481,10 @@ export function createStudioApi({
     approvePreview: (jobId, previewDigest) => request(API_PATHS.approvePreview(jobId), {
       method: "POST",
       body: { previewDigest },
+    }),
+    retryRender: (jobId, planDigest, previewDigest) => request(API_PATHS.retry(jobId), {
+      method: "POST",
+      body: { planDigest, previewDigest },
     }),
     cancel: (jobId) => request(API_PATHS.cancel(jobId), { method: "POST" }),
     saveCredential: (credentialId, values) => request(API_PATHS.credential(credentialId), {
@@ -387,6 +524,8 @@ function initStudio(documentValue) {
     targetUrl: byId("target-url"),
     prompt: byId("prompt"),
     completion: byId("completion-condition"),
+    authOrigins: byId("auth-origins"),
+    resourceOrigins: byId("resource-origins"),
     promptCount: byId("prompt-count"),
     credentialField: byId("credential-field"),
     credentialId: byId("credential-id"),
@@ -412,6 +551,8 @@ function initStudio(documentValue) {
     planPanel: byId("plan-panel"),
     planEditor: byId("plan-editor"),
     planDigest: byId("plan-digest"),
+    planAuthOrigins: byId("plan-auth-origins"),
+    planResourceOrigins: byId("plan-resource-origins"),
     savePlan: byId("save-plan-button"),
     approvePlan: byId("approve-plan-button"),
     executionPanel: byId("execution-panel"),
@@ -430,6 +571,8 @@ function initStudio(documentValue) {
     mediaCaption: byId("media-caption-text"),
     saveMediaEdit: byId("save-media-edit-button"),
     mediaEditStatus: byId("media-edit-status"),
+    recoveryPanel: byId("recovery-panel"),
+    retryRender: byId("retry-render-button"),
     completedPanel: byId("completed-panel"),
     videoLink: byId("download-video-link"),
     planLink: byId("download-plan-link"),
@@ -439,9 +582,12 @@ function initStudio(documentValue) {
   const memory = {
     jobId: null,
     state: null,
+    authMode: null,
     plan: null,
     planDigest: null,
+    executionMismatch: null,
     previewDigest: null,
+    renderRecovery: null,
     subscription: null,
     cursor: createWorkflowCursor(),
   };
@@ -515,6 +661,7 @@ function initStudio(documentValue) {
     elements.planPanel.hidden = state !== "plan_review";
     elements.executionPanel.hidden = !["approved", "executing", "needs_review", "narrating", "composing"].includes(state);
     elements.previewPanel.hidden = !["preview_review", "rendering"].includes(state);
+    elements.recoveryPanel.hidden = state !== "failed" || memory.renderRecovery === null;
     elements.completedPanel.hidden = state !== "completed";
   };
 
@@ -543,7 +690,14 @@ function initStudio(documentValue) {
     setPanelVisibility(state);
     renderSteps(view[0]);
     elements.cancel.disabled = ["completed", "cancelled", "failed"].includes(state);
-    elements.execute.disabled = state !== "approved";
+    const executionReview = executionReviewView(memory.authMode, memory.executionMismatch);
+    elements.execute.disabled = state === "needs_review"
+      ? executionReview.disabled
+      : state !== "approved";
+    elements.execute.textContent = state === "needs_review"
+      ? executionReview.label
+      : "브라우저 녹화 시작";
+    elements.retryRender.disabled = state !== "failed" || memory.renderRecovery === null;
     elements.approvePreview.disabled = state !== "preview_review";
     syncMediaEditAvailability();
 
@@ -558,13 +712,19 @@ function initStudio(documentValue) {
     if (state === "executing") elements.executionCopy.textContent = "AI가 승인된 호출을 실행하며 장면별 증거와 화면을 기록하고 있습니다.";
     if (state === "narrating") elements.executionCopy.textContent = "브라우저 녹화를 마치고 장면별 한국어 내레이션을 생성하고 있습니다.";
     if (state === "composing") elements.executionCopy.textContent = "녹화, 내레이션, 캡션을 미리보기 영상으로 구성하고 있습니다.";
-    if (state === "needs_review") elements.executionCopy.textContent = "실행 증거가 계획과 일치하지 않습니다. 자동 진행을 멈췄습니다.";
+    if (state === "needs_review") elements.executionCopy.textContent = executionReview.copy;
   }
 
   function setPlan(plan, digest) {
     memory.plan = plan;
     if (typeof digest === "string") memory.planDigest = digest;
     elements.planEditor.value = JSON.stringify(plan, null, 2);
+    elements.planAuthOrigins.textContent = Array.isArray(plan?.authOrigins) && plan.authOrigins.length > 0
+      ? plan.authOrigins.join("\n")
+      : "추가 로그인 출처 없음";
+    elements.planResourceOrigins.textContent = Array.isArray(plan?.resourceOrigins) && plan.resourceOrigins.length > 0
+      ? plan.resourceOrigins.join("\n")
+      : "추가 리소스 출처 없음";
     elements.planDigest.textContent = memory.planDigest ? `SHA · ${memory.planDigest.slice(0, 12)}` : "계획 확인 필요";
   }
 
@@ -577,7 +737,7 @@ function initStudio(documentValue) {
 
   const setCompletedArtifacts = (videoName = "video/final.mp4") => {
     const videoUrl = artifactPath(memory.jobId, videoName) ?? artifactPath(memory.jobId, "video/final.mp4");
-    const planUrl = artifactPath(memory.jobId, "plan.json");
+    const planUrl = artifactPath(memory.jobId, "media-plan.json");
     if (videoUrl) elements.videoLink.href = videoUrl;
     if (planUrl) elements.planLink.href = planUrl;
   };
@@ -601,8 +761,15 @@ function initStudio(documentValue) {
     const decision = memory.cursor.accept(event);
     if (!decision.processPayload) return;
     appendEvent(event);
+    if (event.event === "OPERATION_REJECTED") {
+      const code = isPlainRecord(event.data) && /^[A-Z][A-Z0-9_]{0,63}$/u.test(event.data.code ?? "")
+        ? event.data.code
+        : "WORKFLOW_OPERATION_REJECTED";
+      showError(new StudioApiError(code));
+    }
     const payload = readWorkflowEvent(event);
     if (payload.plan && payload.planDigest) setPlan(payload.plan, payload.planDigest);
+    if (payload.executionMismatch) memory.executionMismatch = payload.executionMismatch;
     if (payload.previewDigest && payload.previewArtifact) {
       memory.previewDigest = payload.previewDigest;
       elements.previewDigest.textContent = memory.previewDigest
@@ -617,6 +784,7 @@ function initStudio(documentValue) {
       syncMediaEditAvailability();
     }
     if (payload.outputArtifact) setCompletedArtifacts(payload.outputArtifact);
+    if (payload.renderRecovery) memory.renderRecovery = payload.renderRecovery;
     if (decision.renderState && Object.hasOwn(STATE_VIEW, event.state ?? "")) renderState(event.state);
   };
 
@@ -648,9 +816,15 @@ function initStudio(documentValue) {
   elements.saveCredential.addEventListener("click", async () => {
     elements.credentialSaveStatus.classList.remove("is-success", "is-error");
     const credentialId = elements.newCredentialId.value.trim();
+    const credentialOrigin = credentialOriginRequest({
+      targetUrl: elements.targetUrl.value,
+      authText: elements.authOrigins.value,
+      resourceText: elements.resourceOrigins.value,
+    });
     elements.newCredentialId.value = credentialId;
     if (
       !JOB_ID.test(credentialId) ||
+      credentialOrigin === null ||
       elements.credentialUsername.value.length === 0 ||
       elements.credentialSecret.value.length === 0
     ) {
@@ -665,6 +839,7 @@ function initStudio(documentValue) {
     try {
       const saving = sendTransientCredential(api, {
         id: elements.newCredentialId,
+        origin: { value: credentialOrigin },
         username: elements.credentialUsername,
         secret: elements.credentialSecret,
       });
@@ -699,11 +874,19 @@ function initStudio(documentValue) {
     try {
       const condition = elements.completion.value.trim() || "요청한 최종 화면이 보이면 완료";
       const mode = authMode();
+      const origins = approvedOriginRequest({
+        targetUrl: elements.targetUrl.value.trim(),
+        authText: elements.authOrigins.value,
+        resourceText: elements.resourceOrigins.value,
+        authMode: mode,
+      });
+      if (origins === null) throw new StudioApiError("INVALID_JOB_REQUEST");
       const request = {
         targetUrl: elements.targetUrl.value.trim(),
         prompt: elements.prompt.value.trim(),
         completionCondition: condition,
         authMode: mode,
+        ...origins,
         voice: "F1",
         ...(mode === "automatic" ? { credentialId: elements.credentialId.value } : {}),
       };
@@ -712,9 +895,12 @@ function initStudio(documentValue) {
         throw new StudioApiError("CONNECTION_FAILED");
       }
       memory.jobId = created.id;
+      memory.authMode = mode;
       memory.plan = null;
       memory.planDigest = null;
+      memory.executionMismatch = null;
       memory.previewDigest = null;
+      memory.renderRecovery = null;
       memory.cursor = createWorkflowCursor();
       elements.jobReference.textContent = `작업 ${created.id} · ${created.request?.targetUrl ?? request.targetUrl}`;
       elements.eventLog.replaceChildren();
@@ -759,7 +945,11 @@ function initStudio(documentValue) {
   ));
   elements.execute.addEventListener("click", () => runAction(
     elements.execute,
-    () => api.execute(memory.jobId, memory.planDigest),
+    () => memory.state === "needs_review" ? api.reapproveExecution(
+      memory.jobId,
+      memory.executionMismatch?.planDigest,
+      memory.executionMismatch?.mismatchSequence,
+    ) : api.execute(memory.jobId, memory.planDigest),
   ));
   elements.mediaEditForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -792,6 +982,14 @@ function initStudio(documentValue) {
     elements.approvePreview,
     () => api.approvePreview(memory.jobId, memory.previewDigest),
   ));
+  elements.retryRender.addEventListener("click", () => runAction(
+    elements.retryRender,
+    () => api.retryRender(
+      memory.jobId,
+      memory.renderRecovery?.planDigest,
+      memory.renderRecovery?.previewDigest,
+    ),
+  ));
   elements.cancel.addEventListener("click", async () => {
     if (!globalThis.confirm("현재 작업을 취소할까요? 진행 중인 브라우저와 제작 엔진이 안전하게 종료됩니다.")) return;
     await runAction(elements.cancel, () => api.cancel(memory.jobId));
@@ -801,6 +999,9 @@ function initStudio(documentValue) {
     memory.subscription?.close();
     memory.subscription = null;
     memory.jobId = null;
+    memory.authMode = null;
+    memory.executionMismatch = null;
+    memory.renderRecovery = null;
     memory.cursor = createWorkflowCursor();
     elements.workspace.hidden = true;
     elements.credentialUsername.value = "";
@@ -828,6 +1029,9 @@ function initStudio(documentValue) {
       if (!isPlainRecord(snapshot) || snapshot.id !== jobId) {
         throw new StudioApiError("JOB_NOT_FOUND", 404);
       }
+      memory.authMode = ["manual", "automatic"].includes(snapshot.request?.authMode)
+        ? snapshot.request.authMode
+        : null;
       elements.jobReference.textContent = `작업 ${jobId} · ${snapshot.request?.targetUrl ?? "저장된 대상"}`;
       applySnapshot(snapshot);
       subscribe();

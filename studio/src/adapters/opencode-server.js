@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   lstat,
@@ -17,8 +17,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { promisify } from "node:util";
 
+import { verifyLoopbackPortOwner } from "./browser-runtime.js";
 import {
   sanitizeOpenCodeEnvironment,
   sanitizeOpenCodeServerEnvironment,
@@ -26,12 +26,11 @@ import {
 import { killProcessTree, runProcess } from "../process/process-runner.js";
 import { createRedactor } from "../security/redactor.js";
 
-const execFileAsync = promisify(execFile);
 const EXPECTED_VERSION = "1.4.1";
 const MAX_READINESS_LINE_BYTES = 64 * 1024;
 const MAX_READINESS_BYTES = 512 * 1024;
 const MAX_CONTRACT_BYTES = 2 * 1024 * 1024;
-const TRUSTED_PROJECT_DIGEST = "b77f20da31ba7fd0720c0f096d7b22215b853ab2212debe6b763658fcd094c3d";
+const TRUSTED_PROJECT_DIGEST = "ad8b65d6a5fde2bddebcb08f7030d5370e662d885770eb3c016cced463e5c35a";
 const JOB_ID = /^(?:job-[a-z0-9]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 const MCP_CAPABILITY_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const AGENT_TOOLS = Object.freeze({
@@ -179,7 +178,7 @@ function inspectOptions(options) {
   const readinessTimeoutMs = dataValue(options, "readinessTimeoutMs") ?? 30_000;
   const spawnProcess = dataValue(options, "spawnProcess") ?? spawn;
   const fetchImpl = dataValue(options, "fetchImpl") ?? fetch;
-  const verifyPortOwner = dataValue(options, "verifyPortOwner") ?? defaultVerifyPortOwner;
+  const verifyPortOwner = dataValue(options, "verifyPortOwner") ?? verifyLoopbackPortOwner;
   const killTree = dataValue(options, "killTree") ?? killProcessTree;
   const waitForPortClosed = dataValue(options, "waitForPortClosed") ?? defaultWaitForPortClosed;
   const redactor = dataValue(options, "redactor") ?? createRedactor();
@@ -264,49 +263,6 @@ function inspectStartOptions(options) {
   } catch {
     throw serverError("INVALID_OPENCODE_JOB_OPTIONS", "The OpenCode job options are invalid.");
   }
-}
-
-const OWNER_SCRIPT = String.raw`
-$ErrorActionPreference = 'Stop'
-$root = [int]$args[0]
-$port = [int]$args[1]
-$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId
-$owned = [System.Collections.Generic.HashSet[int]]::new()
-[void]$owned.Add($root)
-do {
-  $changed = $false
-  foreach ($process in $all) {
-    if ($owned.Contains([int]$process.ParentProcessId) -and $owned.Add([int]$process.ProcessId)) {
-      $changed = $true
-    }
-  }
-} while ($changed)
-$listeners = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop
-$listenerList = @($listeners)
-if ($listenerList.Count -ne 1) { exit 19 }
-$listener = $listenerList[0]
-if ($listener.LocalAddress -ne '127.0.0.1' -or -not $owned.Contains([int]$listener.OwningProcess)) { exit 19 }
-`;
-const OWNER_SCRIPT_BASE64 = Buffer.from(OWNER_SCRIPT, "utf16le").toString("base64");
-
-async function defaultVerifyPortOwner(port, pid, signal) {
-  if (process.platform !== "win32") return;
-  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
-  await execFileAsync(
-    path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-EncodedCommand",
-      OWNER_SCRIPT_BASE64,
-      String(pid),
-      String(port),
-    ],
-    { encoding: "utf8", timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024, signal },
-  );
 }
 
 function canConnect(port) {
@@ -801,7 +757,13 @@ function effectivePermission(rules, permission) {
   return action;
 }
 
-function validateResolvedAgent(agent, name, expectedPrompt, dataHome = path.join(os.homedir(), ".local", "share")) {
+function validateResolvedAgent(
+  agent,
+  name,
+  expectedPrompt,
+  dataHome = path.join(os.homedir(), ".local", "share"),
+  requireDebugTools = true,
+) {
   if (
     !isPlain(agent) ||
     dataValue(agent, "name") !== name ||
@@ -819,12 +781,16 @@ function validateResolvedAgent(agent, name, expectedPrompt, dataHome = path.join
     throw new Error("resolved prompt");
   }
   const toolsRecord = dataValue(agent, "tools");
-  if (
-    !isPlain(toolsRecord) ||
-    Reflect.ownKeys(toolsRecord).length === 0 ||
-    Reflect.ownKeys(toolsRecord).some((key) => dataValue(toolsRecord, key, true) !== false)
-  ) {
-    throw new Error("native tools");
+  if (requireDebugTools) {
+    if (
+      !isPlain(toolsRecord) ||
+      Reflect.ownKeys(toolsRecord).length === 0 ||
+      Reflect.ownKeys(toolsRecord).some((key) => dataValue(toolsRecord, key, true) !== false)
+    ) {
+      throw new Error("native tools");
+    }
+  } else if (Object.hasOwn(agent, "tools")) {
+    throw new Error("live native tools");
   }
   let finalDeny = -1;
   for (let index = 0; index < rules.length; index += 1) {
@@ -1102,7 +1068,7 @@ async function defaultValidateLiveContract(details) {
   for (const name of Object.keys(AGENT_TOOLS)) {
     const matches = agents.filter((agent) => isPlain(agent) && dataValue(agent, "name") === name);
     if (matches.length !== 1) throw new Error("live agent");
-    validateResolvedAgent(matches[0], name, manifest.prompts[name], details.dataHome);
+    validateResolvedAgent(matches[0], name, manifest.prompts[name], details.dataHome, false);
   }
   if (
     !Array.isArray(toolIds) ||

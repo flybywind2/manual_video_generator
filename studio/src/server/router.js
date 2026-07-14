@@ -5,6 +5,8 @@ import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { StudioError } from "../domain/errors.js";
+import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
+import { latestValidPlanDigest } from "../domain/recovery-provenance.js";
 
 const JSON_TYPE = "application/json; charset=utf-8";
 const HTML_TYPE = "text/html; charset=utf-8";
@@ -15,6 +17,7 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_PROMPT_LENGTH = 10_000;
 const MAX_COMPLETION_CONDITION_LENGTH = 2_000;
 const MAX_URL_LENGTH = 2_048;
+const MAX_APPROVED_ORIGINS = 16;
 const MAX_ARTIFACT_FILES = 1_000;
 const CREDENTIAL_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -42,6 +45,7 @@ const ARTIFACT_TYPES = Object.freeze(new Map([
   [".txt", "text/plain; charset=utf-8"],
   [".wav", "audio/wav"],
   [".webm", "video/webm"],
+  [".vtt", "text/vtt; charset=utf-8"],
   [".webvtt", "text/vtt; charset=utf-8"],
 ]));
 const ERROR_STATUS = Object.freeze({
@@ -86,6 +90,9 @@ const FIXTURE_PASSWORD = "manual-video-demo";
 const FIXTURE_COOKIE = "manual_fixture_session";
 const FIXTURE_SESSION_TTL_MS = 60 * 60 * 1000;
 const MAX_FIXTURE_SESSIONS = 128;
+const FIXTURE_LOGIN_TOKEN_TTL_MS = 5 * 60 * 1000;
+const MAX_FIXTURE_LOGIN_TOKENS = 128;
+const FIXTURE_LOGIN_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const STATIC_CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 const FIXTURE_CSP = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
@@ -200,10 +207,15 @@ function assertLocalRequestAuthority(request) {
 
   const origin = request.headers.origin;
   const fetchSite = request.headers["sec-fetch-site"];
+  const opaqueFixtureLogin =
+    origin === "null" &&
+    request.method === "POST" &&
+    request.url === "/fixture/login";
   if (
     rawHeaderCount(request, "origin") > 1 ||
     (origin !== undefined &&
-      (typeof origin !== "string" || origin !== `http://${expectedHost}`)) ||
+      (typeof origin !== "string" ||
+        (origin !== `http://${expectedHost}` && !opaqueFixtureLogin))) ||
     (fetchSite !== undefined &&
       (typeof fetchSite !== "string" ||
         !new Set(["none", "same-origin"]).has(fetchSite.toLowerCase())))
@@ -291,6 +303,41 @@ function isPlainRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
+function approvedOriginArray(value, targetOrigin, approvedOrigins) {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > MAX_APPROVED_ORIGINS) {
+    throw new HttpError(400, "INVALID_JOB_REQUEST");
+  }
+  const origins = value.map((item) => {
+    if (typeof item !== "string" || item.length === 0 || item.length > MAX_URL_LENGTH) {
+      throw new HttpError(400, "INVALID_JOB_REQUEST");
+    }
+    let parsed;
+    try {
+      parsed = new URL(item.trim());
+    } catch {
+      throw new HttpError(400, "INVALID_JOB_REQUEST");
+    }
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      throw new HttpError(400, "INVALID_JOB_REQUEST");
+    }
+    const origin = parsed.origin;
+    if (origin === targetOrigin || approvedOrigins.has(origin)) {
+      throw new HttpError(400, "INVALID_JOB_REQUEST");
+    }
+    approvedOrigins.add(origin);
+    return origin;
+  });
+  return Object.freeze(origins.sort());
+}
+
 function validateJobRequest(value) {
   if (!isPlainRecord(value)) {
     throw new HttpError(400, "INVALID_JOB_REQUEST");
@@ -300,6 +347,8 @@ function validateJobRequest(value) {
     "prompt",
     "completionCondition",
     "authMode",
+    "authOrigins",
+    "resourceOrigins",
     "credentialId",
     "voice",
   ]);
@@ -346,12 +395,20 @@ function validateJobRequest(value) {
   if (typeof voice !== "string" || !VOICES.has(voice)) {
     throw new HttpError(400, "INVALID_JOB_REQUEST");
   }
+  const approvedOrigins = new Set();
+  const authOrigins = approvedOriginArray(value.authOrigins, target.origin, approvedOrigins);
+  const resourceOrigins = approvedOriginArray(value.resourceOrigins, target.origin, approvedOrigins);
+  if (value.authMode === "automatic" && authOrigins.length > 1) {
+    throw new HttpError(400, "INVALID_JOB_REQUEST");
+  }
 
   return Object.freeze({
     targetUrl: target.href,
     prompt,
     completionCondition: completionCondition || DEFAULT_COMPLETION_CONDITION,
     authMode: value.authMode,
+    authOrigins,
+    resourceOrigins,
     voice,
     ...(value.credentialId === undefined ? {} : { credentialId: value.credentialId }),
   });
@@ -374,6 +431,43 @@ function digestBody(value, field, code) {
     throw new HttpError(400, code);
   }
   return body[field];
+}
+
+function executionReapprovalBody(value) {
+  const body = exactBody(
+    value,
+    ["planDigest", "mismatchSequence"],
+    ["planDigest", "mismatchSequence"],
+    "INVALID_REAPPROVAL_REQUEST",
+  );
+  if (
+    typeof body.planDigest !== "string" ||
+    !PLAN_DIGEST.test(body.planDigest) ||
+    !Number.isSafeInteger(body.mismatchSequence) ||
+    body.mismatchSequence < 1
+  ) {
+    throw new HttpError(400, "INVALID_REAPPROVAL_REQUEST");
+  }
+  return Object.freeze({
+    planDigest: body.planDigest,
+    mismatchSequence: body.mismatchSequence,
+  });
+}
+
+function recoveryBody(value) {
+  const body = exactBody(
+    value,
+    ["planDigest", "previewDigest"],
+    ["planDigest", "previewDigest"],
+    "INVALID_RETRY_REQUEST",
+  );
+  if (!PLAN_DIGEST.test(body.planDigest) || !PLAN_DIGEST.test(body.previewDigest)) {
+    throw new HttpError(400, "INVALID_RETRY_REQUEST");
+  }
+  return Object.freeze({
+    planDigest: body.planDigest,
+    previewDigest: body.previewDigest,
+  });
 }
 
 function planUpdateBody(value) {
@@ -405,7 +499,7 @@ function mediaEditBody(value) {
     if (
       typeof body[field] !== "string" ||
       body[field].trim().length === 0 ||
-      body[field].length > 4_000 ||
+      body[field].length > (field === "narrationText" ? MAX_STEP_NARRATION_CODE_UNITS : 4_000) ||
       /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(body[field])
     ) {
       throw new HttpError(400, "INVALID_MEDIA_EDIT");
@@ -420,8 +514,33 @@ function mediaEditBody(value) {
 }
 
 function credentialBody(value) {
-  const body = exactBody(value, ["username", "password"], ["username", "password"], "INVALID_CREDENTIAL_REQUEST");
+  const body = exactBody(
+    value,
+    ["origin", "username", "password"],
+    ["origin", "username", "password"],
+    "INVALID_CREDENTIAL_REQUEST",
+  );
+  let origin;
+  try {
+    const parsed = new URL(body.origin);
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      throw new Error("invalid credential origin");
+    }
+    origin = parsed.origin;
+  } catch {
+    throw new HttpError(400, "INVALID_CREDENTIAL_REQUEST");
+  }
   if (
+    typeof body.origin !== "string" ||
+    body.origin.length < 1 ||
+    body.origin.length > MAX_URL_LENGTH ||
     typeof body.username !== "string" ||
     body.username.length < 1 ||
     body.username.length > 256 ||
@@ -431,7 +550,7 @@ function credentialBody(value) {
   ) {
     throw new HttpError(400, "INVALID_CREDENTIAL_REQUEST");
   }
-  return { username: body.username, password: body.password };
+  return { origin, username: body.username, password: body.password };
 }
 
 function accepted(response, jobId, operation) {
@@ -456,6 +575,31 @@ function safeHealth(value) {
     }
   }
   return { ready: value?.ready === true, checks };
+}
+
+function scheduleWorkflow(context, jobId, operation) {
+  context.scheduleBackground(async (signal) => {
+    try {
+      return await operation(signal);
+    } catch (error) {
+      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/u.test(error.code)
+        ? error.code
+        : "WORKFLOW_OPERATION_REJECTED";
+      try {
+        const events = await context.jobStore.readEvents(jobId, 0);
+        const planDigest = latestValidPlanDigest(events);
+        const data = {
+          code,
+          retryable: error?.retryable === true,
+        };
+        if (planDigest !== undefined) data.planDigest = planDigest;
+        await context.jobStore.transition(jobId, "OPERATION_REJECTED", data);
+      } catch {
+        // A workflow-owned terminal event or concurrent mutation remains authoritative.
+      }
+      throw error;
+    }
+  });
 }
 
 function decodeComponent(value, code = "ROUTE_NOT_FOUND") {
@@ -832,8 +976,26 @@ function fixturePage(title, content) {
 </html>`;
 }
 
-function loginPage({ invalid = false } = {}) {
-  return fixturePage("로그인", `<main><h1>로그인</h1>${invalid ? '<p role="alert">사용자 이름 또는 비밀번호가 올바르지 않습니다.</p>' : ""}<form method="post" action="/fixture/login"><label for="fixture-username">사용자 이름</label><input id="fixture-username" name="username" autocomplete="username" required><label for="fixture-password">비밀번호</label><input id="fixture-password" name="password" type="password" autocomplete="current-password" required><button type="submit">로그인</button></form></main>`);
+function loginPage({ csrfToken, invalid = false }) {
+  return fixturePage("로그인", `<main><h1>로그인</h1>${invalid ? '<p role="alert">사용자 이름 또는 비밀번호가 올바르지 않습니다.</p>' : ""}<form method="post" action="/fixture/login"><input type="hidden" name="_csrf" value="${csrfToken}"><label for="fixture-username">사용자 이름</label><input id="fixture-username" name="username" autocomplete="username" required><label for="fixture-password">비밀번호</label><input id="fixture-password" name="password" type="password" autocomplete="current-password" required><button type="submit">로그인</button></form></main>`);
+}
+
+function issueFixtureLoginToken(context, now) {
+  while (context.fixtureLoginTokens.size >= MAX_FIXTURE_LOGIN_TOKENS) {
+    const oldest = context.fixtureLoginTokens.keys().next().value;
+    if (oldest === undefined) break;
+    context.fixtureLoginTokens.delete(oldest);
+  }
+  const token = randomBytes(32).toString("base64url");
+  context.fixtureLoginTokens.set(token, now + FIXTURE_LOGIN_TOKEN_TTL_MS);
+  return token;
+}
+
+function consumeFixtureLoginToken(context, token, now) {
+  if (typeof token !== "string" || !FIXTURE_LOGIN_TOKEN.test(token)) return false;
+  const expiresAt = context.fixtureLoginTokens.get(token);
+  context.fixtureLoginTokens.delete(token);
+  return expiresAt !== undefined && expiresAt > now;
 }
 
 function dashboardPage() {
@@ -871,6 +1033,9 @@ async function handleFixture(request, response, context, pathname) {
   for (const [session, sessionExpiresAt] of context.fixtureSessions) {
     if (sessionExpiresAt <= now) context.fixtureSessions.delete(session);
   }
+  for (const [token, tokenExpiresAt] of context.fixtureLoginTokens) {
+    if (tokenExpiresAt <= now) context.fixtureLoginTokens.delete(token);
+  }
   const token = cookieValue(request, FIXTURE_COOKIE);
   const expiresAt = token === null ? undefined : context.fixtureSessions.get(token);
   const authenticated = expiresAt !== undefined && expiresAt > now;
@@ -884,15 +1049,21 @@ async function handleFixture(request, response, context, pathname) {
       if (authenticated) {
         redirect(response, "/fixture/dashboard");
       } else {
-        sendHtml(response, 200, loginPage());
+        sendHtml(response, 200, loginPage({ csrfToken: issueFixtureLoginToken(context, now) }));
       }
       return;
     }
     const form = await readForm(request);
+    if (!consumeFixtureLoginToken(context, form.get("_csrf"), now)) {
+      throw new HttpError(403, "CROSS_ORIGIN_REQUEST");
+    }
     const username = form.get("username") ?? "";
     const password = form.get("password") ?? "";
     if (!sameSecret(username, FIXTURE_USERNAME) || !sameSecret(password, FIXTURE_PASSWORD)) {
-      sendHtml(response, 401, loginPage({ invalid: true }));
+      sendHtml(response, 401, loginPage({
+        csrfToken: issueFixtureLoginToken(context, now),
+        invalid: true,
+      }));
       return;
     }
     const session = randomBytes(32).toString("base64url");
@@ -1007,6 +1178,8 @@ export function createRouter({
       "updatePlan",
       "approvePlan",
       "execute",
+      "reapproveExecution",
+      "retryJob",
       "cancelJob",
       "updateMediaPlan",
       "approvePreview",
@@ -1024,6 +1197,7 @@ export function createRouter({
   const context = Object.freeze({
     credentialVault,
     eventBus,
+    fixtureLoginTokens: new Map(),
     fixtureSessions: new Map(),
     healthCheck,
     jobStore,
@@ -1059,7 +1233,7 @@ export function createRouter({
         const created = await context.jobStore.create(requestBody);
         sendJson(response, 201, created, { Location: `/api/jobs/${encodeURIComponent(created.id)}` });
         if (context.studioService !== null) {
-          context.scheduleBackground((signal) =>
+          scheduleWorkflow(context, created.id, (signal) =>
             context.studioService.authenticateAndPlan(created.id, { signal }));
         }
         return;
@@ -1080,7 +1254,7 @@ export function createRouter({
         return;
       }
 
-      const workflowMatch = /^\/api\/jobs\/([^/]+)\/(login\/manual\/confirm|plan|plan\/approve|execute|cancel|media-plan|preview\/approve)$/u.exec(pathname);
+      const workflowMatch = /^\/api\/jobs\/([^/]+)\/(login\/manual\/confirm|plan|plan\/approve|execute|execution\/reapprove|retry|cancel|media-plan|preview\/approve)$/u.exec(pathname);
       if (workflowMatch) {
         if (context.studioService === null) throw new HttpError(503, "WORKFLOW_UNAVAILABLE");
         const jobId = decodeComponent(workflowMatch[1]);
@@ -1089,7 +1263,8 @@ export function createRouter({
         if (action === "login/manual/confirm") {
           assertMethod(request, ["POST"]);
           await readOptionalEmptyJson(request, context.maxJsonBytes);
-          context.scheduleBackground(() => context.studioService.confirmManualLoginAndPlan(jobId));
+          scheduleWorkflow(context, jobId, (signal) =>
+            context.studioService.confirmManualLoginAndPlan(jobId, { signal }));
           accepted(response, jobId, "confirm_login");
           return;
         }
@@ -1108,9 +1283,25 @@ export function createRouter({
         if (action === "execute") {
           assertMethod(request, ["POST"]);
           const digest = digestBody(await readJson(request, context.maxJsonBytes), "planDigest", "INVALID_EXECUTION_REQUEST");
-          context.scheduleBackground((signal) =>
+          scheduleWorkflow(context, jobId, (signal) =>
             context.studioService.execute(jobId, digest, { signal }));
           accepted(response, jobId, "execute");
+          return;
+        }
+        if (action === "execution/reapprove") {
+          assertMethod(request, ["POST"]);
+          const recovery = executionReapprovalBody(await readJson(request, context.maxJsonBytes));
+          scheduleWorkflow(context, jobId, (signal) =>
+            context.studioService.reapproveExecution(jobId, recovery, { signal }));
+          accepted(response, jobId, "reapprove_execution");
+          return;
+        }
+        if (action === "retry") {
+          assertMethod(request, ["POST"]);
+          const recovery = recoveryBody(await readJson(request, context.maxJsonBytes));
+          scheduleWorkflow(context, jobId, (signal) =>
+            context.studioService.retryJob(jobId, recovery, { signal }));
+          accepted(response, jobId, "retry_render");
           return;
         }
         if (action === "cancel") {
@@ -1122,12 +1313,14 @@ export function createRouter({
         if (action === "media-plan") {
           assertMethod(request, ["PUT"]);
           const edit = mediaEditBody(await readJson(request, context.maxJsonBytes));
-          sendJson(response, 200, await context.studioService.updateMediaPlan(jobId, edit));
+          scheduleWorkflow(context, jobId, (signal) =>
+            context.studioService.updateMediaPlan(jobId, edit, { signal }));
+          accepted(response, jobId, "edit_media");
           return;
         }
         assertMethod(request, ["POST"]);
         const digest = digestBody(await readJson(request, context.maxJsonBytes), "previewDigest", "INVALID_PREVIEW_REQUEST");
-        context.scheduleBackground((signal) =>
+        scheduleWorkflow(context, jobId, (signal) =>
           context.studioService.approvePreview(jobId, digest, { signal }));
         accepted(response, jobId, "render");
         return;

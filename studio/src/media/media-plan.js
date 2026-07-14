@@ -1,6 +1,7 @@
 import { extname } from "node:path/posix";
 
 import { StudioError } from "../domain/errors.js";
+import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 
 export const MIN_PLAYBACK_RATE = 0.9;
 export const MAX_PLAYBACK_RATE = 1.1;
@@ -194,7 +195,11 @@ function normalizedNarration(candidate) {
     sceneId: identifier(fields.sceneId, "narration_scene_id"),
     path: assetPath(fields.path, "narration_path", ".wav"),
     durationMs,
-    text: cleanText(fields.text, "narration_text", 4_000),
+    text: cleanText(
+      fields.text,
+      "narration_text",
+      MAX_STEP_NARRATION_CODE_UNITS,
+    ),
   };
 }
 

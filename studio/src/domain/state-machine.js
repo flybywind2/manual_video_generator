@@ -5,6 +5,7 @@ const freeze = (transitions) => Object.freeze(transitions);
 export const TRANSITIONS = Object.freeze({
   created: freeze({
     CANCEL_JOB: "cancelled",
+    OPERATION_REJECTED: "created",
     START_AUTHENTICATION: "authenticating",
   }),
   authenticating: freeze({
@@ -12,27 +13,33 @@ export const TRANSITIONS = Object.freeze({
     AUTHENTICATION_FAILED: "failed",
     AUTH_REQUIRED: "awaiting_manual_login",
     CANCEL_JOB: "cancelled",
+    OPERATION_REJECTED: "authenticating",
   }),
   awaiting_manual_login: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
     CONFIRM_LOGIN: "planning",
+    CONFIRM_REEXECUTION_LOGIN: "needs_review",
+    OPERATION_REJECTED: "awaiting_manual_login",
   }),
   planning: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
     PLAN_READY: "plan_review",
     PLANNING_FAILED: "failed",
+    OPERATION_REJECTED: "planning",
   }),
   plan_review: freeze({
     APPROVE_PLAN: "approved",
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
+    OPERATION_REJECTED: "plan_review",
     UPDATE_PLAN: "plan_review",
   }),
   approved: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
+    OPERATION_REJECTED: "approved",
     START_EXECUTION: "executing",
   }),
   executing: freeze({
@@ -42,36 +49,45 @@ export const TRANSITIONS = Object.freeze({
     EXECUTION_FAILED: "failed",
     EXECUTION_MISMATCH: "needs_review",
     EXECUTION_PROGRESS: "executing",
+    OPERATION_REJECTED: "executing",
   }),
   needs_review: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
+    OPERATION_REJECTED: "needs_review",
     REAPPROVE_EXECUTION: "executing",
   }),
   narrating: freeze({
     CANCEL_JOB: "cancelled",
     NARRATION_COMPLETED: "composing",
     NARRATION_FAILED: "failed",
+    OPERATION_REJECTED: "narrating",
   }),
   composing: freeze({
     CANCEL_JOB: "cancelled",
     COMPOSITION_COMPLETED: "preview_review",
     COMPOSITION_FAILED: "failed",
+    OPERATION_REJECTED: "composing",
   }),
   preview_review: freeze({
     APPROVE_PREVIEW: "rendering",
     CANCEL_JOB: "cancelled",
     EDIT_COMPOSITION: "composing",
     EDIT_NARRATION: "narrating",
+    OPERATION_REJECTED: "preview_review",
   }),
   rendering: freeze({
     CANCEL_JOB: "cancelled",
     RENDER_COMPLETED: "completed",
     RENDER_FAILED: "failed",
+    OPERATION_REJECTED: "rendering",
   }),
   cancelled: freeze({}),
   completed: freeze({}),
-  failed: freeze({}),
+  failed: freeze({
+    OPERATION_REJECTED: "failed",
+    RETRY_RENDER: "rendering",
+  }),
 });
 
 const resumeSpec = (resumeFrom, planRequired) =>

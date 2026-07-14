@@ -3,22 +3,54 @@ import { isAbsolute } from "node:path";
 
 import { runOpenCode as defaultRunOpenCode } from "../adapters/opencode-client.js";
 import { StudioError } from "../domain/errors.js";
+import { unwrapExactJsonFence } from "../domain/json-output.js";
 import {
   assertApprovedPlan,
   digestPlan,
+  MAX_STEP_NARRATION_CODE_UNITS,
+  parseStableAccessibilityLocator,
   validatePlan,
 } from "../domain/plan.js";
 
 const PLAN_EVENTS = new Set(["PLAN_READY", "UPDATE_PLAN", "APPROVE_PLAN"]);
 const MAX_PLANNER_TEXT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_COMPLETION_CONDITION = "요청한 최종 화면이 보이면 완료";
+const MAX_APPROVED_ORIGINS = 16;
+const MAX_PLANNING_ATTEMPTS = 2;
+const REQUIRED_FORBIDDEN_ACTIONS = Object.freeze([
+  "user-data.change",
+  "record.delete",
+  "message.send",
+  "form.submit",
+  "content.publish",
+  "purchase.create",
+]);
 
-function planningError(code, message, retryable = false) {
+function planningError(code, message, retryable = false, details = {}) {
   return new StudioError(message, {
     code,
     stage: "planning",
     retryable,
+    details,
   });
+}
+
+function planningOptions(options) {
+  if (options === undefined) return Object.freeze({ signal: undefined });
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(options)) ||
+    Reflect.ownKeys(options).some((key) => key !== "signal") ||
+    (options.signal !== undefined && !(options.signal instanceof AbortSignal))
+  ) {
+    throw planningError(
+      "PLANNING_OPTIONS_INVALID",
+      "The planning options are invalid.",
+    );
+  }
+  return Object.freeze({ signal: options.signal });
 }
 
 function validateDependencies(options) {
@@ -46,6 +78,40 @@ function validateDependencies(options) {
   return { jobStore, opencodePath, openCodeServer, runOpenCode };
 }
 
+function approvedOriginArray(value, targetOrigin, approvedOrigins) {
+  const candidate = value === undefined ? [] : value;
+  if (!Array.isArray(candidate) || candidate.length > MAX_APPROVED_ORIGINS) {
+    throw new Error("origins");
+  }
+  const origins = candidate.map((item) => {
+    if (typeof item !== "string" || item.length === 0 || item.length > 2_048) {
+      throw new Error("origin");
+    }
+    const parsed = new URL(item.trim());
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      throw new Error("origin");
+    }
+    const origin = parsed.origin;
+    if (origin === targetOrigin || approvedOrigins.has(origin)) {
+      throw new Error("origin");
+    }
+    approvedOrigins.add(origin);
+    return origin;
+  });
+  return Object.freeze(origins.sort());
+}
+
+function sameOrigins(left, right) {
+  return left.length === right.length && left.every((origin, index) => origin === right[index]);
+}
+
 function targetAuthority(request) {
   try {
     if (typeof request?.prompt !== "string" || request.prompt.trim() === "") {
@@ -70,9 +136,22 @@ function targetAuthority(request) {
     ) {
       throw new Error("completion condition");
     }
+    const approvedOrigins = new Set();
+    const authOrigins = approvedOriginArray(
+      request.authOrigins,
+      target.origin,
+      approvedOrigins,
+    );
+    const resourceOrigins = approvedOriginArray(
+      request.resourceOrigins,
+      target.origin,
+      approvedOrigins,
+    );
     return Object.freeze({
+      authOrigins,
       completionCondition,
       prompt: request.prompt.trim(),
+      resourceOrigins,
       targetOrigin: target.origin,
       targetUrl: target.href,
     });
@@ -84,33 +163,155 @@ function targetAuthority(request) {
   }
 }
 
-function plannerPrompt(authority) {
-  return [
+function plannerRejection(error) {
+  if (
+    error?.code === "INVALID_PLAN" &&
+    typeof error?.details?.path === "string" &&
+    /^[A-Za-z0-9_.\[\]-]{1,256}$/u.test(error.details.path) &&
+    typeof error?.details?.reason === "string" &&
+    /^[a-z0-9_]{1,128}$/u.test(error.details.reason)
+  ) {
+    return Object.freeze({
+      code: "INVALID_PLAN",
+      path: error.details.path,
+      reason: error.details.reason,
+    });
+  }
+  if (
+    typeof error?.code === "string" &&
+    /^PLANNING_[A-Z0-9_]{2,63}$/u.test(error.code)
+  ) {
+    const reason = typeof error?.details?.reason === "string" &&
+      /^[a-z][a-z0-9_]{2,63}$/u.test(error.details.reason)
+      ? error.details.reason
+      : null;
+    return Object.freeze(reason === null
+      ? { code: error.code }
+      : { code: error.code, reason });
+  }
+  return Object.freeze({ code: "PLANNING_OUTPUT_REJECTED" });
+}
+
+function plannerPrompt(authority, rejection = null) {
+  const instructions = [
     "Return exactly one JSON object with no Markdown or commentary.",
+    "Your first action in this run MUST be the playwright_browser_snapshot tool. Do not return JSON until that snapshot completed successfully.",
+    "Use the snapshot to identify accessible roles and names, but never put ephemeral eN or fNeN snapshot refs in the plan.",
+    'Every interactive target must use this stable role/name locator grammar with double quotes: getByRole("link", { name: "Exact accessible name", exact: true }).',
+    "Use exact: true for a full observed accessible name. For a future same-origin element whose requested label is an unambiguous partial accessible name, omit the exact property; runtime strict uniqueness still fails closed on zero or multiple matches.",
+    "Every interactive target in a step after an earlier navigationTarget MUST omit the exact property because that future full accessible name was not observed.",
+    "Never click or type during planning. If the requested label is ambiguous, return a blocked step.",
+    "The locator role, accessible name, and exact flag are reviewable and digest-bound.",
     "Use schemaVersion 1.1 and these exact top-level fields:",
-    "schemaVersion,targetUrl,targetOrigin,successCriteria,forbiddenActions,captureSettings,steps.",
+    "schemaVersion,targetUrl,targetOrigin,authOrigins,resourceOrigins,successCriteria,forbiddenActions,captureSettings,steps.",
+    "Copy authOrigins and resourceOrigins exactly; never add, remove, or reclassify an origin.",
+    "successCriteria must be a JSON array containing 1 to 20 non-empty strings, never a single string.",
+    "The final successCriteria entry MUST equal the supplied completionCondition exactly, without paraphrasing or shortening it.",
+    `forbiddenActions must be exactly ${JSON.stringify(REQUIRED_FORBIDDEN_ACTIONS)}.`,
+    "captureSettings must be exactly {\"width\":1920,\"height\":1080,\"fps\":30}.",
     "Every step must contain id,action,expected,narration,risk,calls.",
+    "For every non-blocked plan, the final step expected field MUST equal completionCondition exactly.",
+    "Plan every safe action needed to reach completionCondition; an intermediate menu or loading screen is never completion.",
+    "When completionCondition is literal visible page text, end the final step with browser_wait_for using that exact text; otherwise use only safe calls appropriate to the described final state.",
+    `Each narration must be concise Korean guidance no longer than ${MAX_STEP_NARRATION_CODE_UNITS} code units.`,
+    "risk must be exactly one of safe, review, or blocked; it is never a prose explanation.",
+    "Omit navigationTarget unless a same-origin route change is intended; then use the complete expected same-origin URL.",
     "Every call must contain id,tool,arguments and use only the planner-approved exact browser call contract.",
-    "Do not navigate to or authorize any origin other than targetOrigin.",
+    "browser_click arguments require target and may contain element,doubleClick,button,modifiers; target must be the stable getByRole locator.",
+    "browser_type arguments require target,text and may contain element,submit,slowly; if submit is present it must be false.",
+    "browser_fill_form arguments are exactly {fields:[{name,type,target,value,element?}]}; every target must be the stable getByRole locator.",
+    "browser_press_key arguments are exactly {key}; Enter is forbidden.",
+    "browser_wait_for arguments contain at least one of time,text,textGone; time must be between 0 and 30.",
+    "Call ids must begin with the parent step id plus a dot, and all step and call ids must be unique.",
+    "Business navigation is limited to targetOrigin. authOrigins are login-only and resourceOrigins are subresource-only.",
+  ];
+  if (rejection !== null) {
+    instructions.push(
+      "Previous planner object was rejected. Start over from a fresh completed snapshot and do not copy the rejected object.",
+      `Safe rejection descriptor: ${JSON.stringify(rejection)}`,
+    );
+  }
+  instructions.push(
     JSON.stringify({
       targetUrl: authority.targetUrl,
       targetOrigin: authority.targetOrigin,
+      authOrigins: authority.authOrigins,
+      resourceOrigins: authority.resourceOrigins,
+      captureSettings: { width: 1920, height: 1080, fps: 30 },
       userRequest: authority.prompt,
       completionCondition: authority.completionCondition,
     }),
-  ].join("\n");
+  );
+  return instructions.join("\n");
+}
+
+function assertCompletedPlanningSnapshot(report) {
+  if (
+    !Array.isArray(report?.toolEvents) ||
+    !report.toolEvents.some((event) =>
+      event?.tool === "playwright_browser_snapshot" && event?.status === "completed")
+  ) {
+    throw planningError(
+      "PLANNING_SNAPSHOT_REQUIRED",
+      "The planner must inspect the authenticated browser before proposing actions.",
+      true,
+    );
+  }
 }
 
 function bindPlanToRequest(candidate, authority) {
   const plan = validatePlan(candidate);
+  let followsNavigation = false;
+  for (const step of plan.steps) {
+    for (const call of step.calls) {
+      const targets = call.tool === "browser_fill_form"
+        ? call.arguments.fields.map(({ target }) => target)
+        : [call.arguments.target].filter((target) => target !== undefined);
+      const locators = targets.map((target) => parseStableAccessibilityLocator(target));
+      if (locators.some((locator) => locator === null)) {
+        throw planningError(
+          "PLANNING_TARGET_UNSTABLE",
+          "Interactive browser targets must use stable accessibility locators.",
+          true,
+        );
+      }
+      if (followsNavigation && locators.some(({ exact }) => exact)) {
+        throw planningError(
+          "PLANNING_FUTURE_TARGET_EXACT",
+          "Future-page browser targets must use strict unique partial accessibility locators.",
+          true,
+        );
+      }
+    }
+    if (Object.hasOwn(step, "navigationTarget")) followsNavigation = true;
+  }
   if (
     plan.targetOrigin !== authority.targetOrigin ||
-    plan.targetUrl !== authority.targetUrl
+    plan.targetUrl !== authority.targetUrl ||
+    !sameOrigins(plan.authOrigins, authority.authOrigins) ||
+    !sameOrigins(plan.resourceOrigins, authority.resourceOrigins)
   ) {
     throw planningError(
       "PLANNING_AUTHORITY_MISMATCH",
       "The proposed plan exceeds the requested target authority.",
     );
+  }
+  const completionError = (reason) => {
+    throw planningError(
+      "PLANNING_COMPLETION_UNBOUND",
+      "The proposed plan is not bound to the requested completion condition.",
+      true,
+      { reason },
+    );
+  };
+  if (plan.successCriteria.at(-1) !== authority.completionCondition) {
+    completionError("success_criterion_missing");
+  }
+  if (!plan.steps.some(({ risk }) => risk === "blocked")) {
+    const finalStep = plan.steps.at(-1);
+    if (finalStep?.expected !== authority.completionCondition) {
+      completionError("final_expected_mismatch");
+    }
   }
   return plan;
 }
@@ -145,11 +346,19 @@ function parsePlannerText(finalText, authority) {
   }
   let candidate;
   try {
-    candidate = JSON.parse(finalText);
+    candidate = JSON.parse(unwrapExactJsonFence(finalText));
   } catch {
+    const trimmed = typeof finalText === "string" ? finalText.trim() : "";
+    const reason = /^```(?:json)?\s*\{[\s\S]*\}\s*```$/iu.test(trimmed)
+      ? "json_parse_fenced_object"
+      : trimmed.startsWith("{") && trimmed.endsWith("}")
+        ? "json_parse_object_like"
+        : "json_parse_other_text";
     throw planningError(
       "PLANNING_OUTPUT_INVALID",
       "The planner output is invalid.",
+      false,
+      { reason },
     );
   }
   return bindPlanToRequest(candidate, authority);
@@ -245,7 +454,8 @@ export function createPlanningWorkflow(options) {
   const settings = validateDependencies(options);
 
   return Object.freeze({
-    async createPlan(jobId) {
+    async createPlan(jobId, options) {
+      const { signal } = planningOptions(options);
       const current = await settings.jobStore.load(jobId);
       if (current.state !== "planning") {
         throw planningError(
@@ -257,21 +467,34 @@ export function createPlanningWorkflow(options) {
       let plan;
       let planDigest;
       try {
-        const report = await settings.openCodeServer.withAttachOptions(
-          "manual-video-planner",
-          (attachOptions) => settings.runOpenCode({
-            ...attachOptions,
-            opencodePath: settings.opencodePath,
-            agent: "manual-video-planner",
-            prompt: plannerPrompt(authority),
-          }),
-        );
-        plan = parsePlannerText(report?.finalText, authority);
-        planDigest = digestPlan(plan);
-      } catch {
+        let prompt = plannerPrompt(authority);
+        for (let attempt = 0; attempt < MAX_PLANNING_ATTEMPTS; attempt += 1) {
+          const report = await settings.openCodeServer.withAttachOptions(
+            "manual-video-planner",
+            (attachOptions) => settings.runOpenCode({
+              ...attachOptions,
+              opencodePath: settings.opencodePath,
+              agent: "manual-video-planner",
+              prompt,
+              signal,
+            }),
+          );
+          try {
+            assertCompletedPlanningSnapshot(report);
+            plan = parsePlannerText(report?.finalText, authority);
+            planDigest = digestPlan(plan);
+            break;
+          } catch (error) {
+            if (attempt + 1 >= MAX_PLANNING_ATTEMPTS) throw error;
+            prompt = plannerPrompt(authority, plannerRejection(error));
+          }
+        }
+      } catch (error) {
+        const outputFailure = plannerRejection(error);
         try {
           await settings.jobStore.transition(jobId, "PLANNING_FAILED", {
             reason: "planner_output_rejected",
+            outputFailure,
           });
         } catch {
           // The original durable state remains authoritative.

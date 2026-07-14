@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
@@ -12,7 +13,9 @@ import { chromium } from "playwright";
 import {
   BrowserRuntime,
   createOriginPolicy,
+  executeApprovedMcpCalls,
   validateMcpToolInventory,
+  verifyLoopbackPortOwner,
   verifyPlaywrightMcpReady,
 } from "../../src/adapters/browser-runtime.js";
 import { JobStore } from "../../src/jobs/job-store.js";
@@ -48,8 +51,9 @@ class FakeGateway {
     this.active = null;
   }
 
-  async start({ jobId, generation }) {
-    this.calls.gatewayStart.push({ jobId, generation });
+  async start(input) {
+    const { jobId, generation } = input;
+    this.calls.gatewayStart.push(input);
     this.endpoint = "http://127.0.0.1:8931/mcp";
     this.active = Object.freeze({
       endpoint: this.endpoint,
@@ -77,6 +81,41 @@ class FakeGateway {
       planDigest: input.planDigest,
       callCount: input.calls.length,
     });
+  }
+
+  readExecutionTiming(input) {
+    this.calls.gatewayTiming.push(input);
+    return Object.freeze({
+      schemaVersion: "1.0",
+      clock: "unix_ms",
+      jobId: input.jobId,
+      generation: input.generation,
+      planDigest: input.planDigest,
+      complete: false,
+      calls: Object.freeze([]),
+    });
+  }
+
+  readRecordingArtifact(input) {
+    this.calls.gatewayArtifact.push(input);
+    this.active = Object.freeze({ ...this.active, phase: "execution_complete", remainingCalls: 0 });
+    return Object.freeze({
+      schemaVersion: "1.0",
+      jobId: input.jobId,
+      generation: input.generation,
+      planDigest: input.planDigest,
+      approvedCallId: "system.stop-video",
+      fileName: this.calls.gatewayArtifactFileName,
+    });
+  }
+
+  readEvidenceArtifacts(input) {
+    this.calls.gatewayEvidence.push(input);
+    this.active = Object.freeze({ ...this.active, phase: "execution_complete", remainingCalls: 0 });
+    return Object.freeze(input.expectedCallIds.map((approvedCallId, index) => Object.freeze({
+      approvedCallId,
+      fileName: this.calls.gatewayEvidenceFileNames[index],
+    })));
   }
 
   async quarantine(code) {
@@ -142,6 +181,33 @@ function startRuntime(runtime, job, options = {}) {
   });
 }
 
+test("BrowserRuntime permits automatic login at the target or an approved auth origin, never a resource-only origin", async (t) => {
+  const { runtime } = await createHarness(t);
+  const base = automaticJob();
+  const targetPolicy = createOriginPolicy({
+    targetOrigin: base.originPolicy.targetOrigin,
+    authOrigins: [],
+    resourceOrigins: base.originPolicy.resourceOrigins,
+  });
+  const targetLogin = {
+    ...base,
+    originPolicy: targetPolicy,
+    auth: { ...base.auth, loginOrigin: targetPolicy.targetOrigin },
+  };
+
+  await startRuntime(runtime, targetLogin);
+  await runtime.stop();
+
+  const resourceLogin = {
+    ...targetLogin,
+    auth: { ...targetLogin.auth, loginOrigin: targetPolicy.resourceOrigins[0] },
+  };
+  await assert.rejects(
+    startRuntime(runtime, resourceLogin),
+    (error) => error.code === "INVALID_BROWSER_JOB",
+  );
+});
+
 async function createHarness(t, overrides = {}) {
   const fixture = await temporaryStudio(t);
   const child = new FakeChild();
@@ -151,8 +217,16 @@ async function createHarness(t, overrides = {}) {
     stop: [],
     kill: [],
     gatewayConstruct: [],
+    gatewayInstances: [],
     gatewayStart: [],
     gatewayApproval: [],
+    gatewayTiming: [],
+    gatewayArtifact: [],
+    gatewayArtifactFileName: "video-generation-owned.webm",
+    gatewayEvidence: [],
+    gatewayEvidenceFileNames: ["page-generation-owned.png"],
+    coordinatorExecutions: [],
+    readinessClose: [],
     gatewayQuarantine: [],
     gatewayStop: [],
     waitForPortClosed: [],
@@ -173,6 +247,7 @@ async function createHarness(t, overrides = {}) {
       GITHUB_TOKEN: "github-secret",
       AWS_SECRET_ACCESS_KEY: "cloud-secret",
       OCI_CLI_KEY_FILE: "C:\\private\\oci.pem",
+      PLAYWRIGHT_MCP_PING_TIMEOUT_MS: "999999",
     },
     readinessTimeoutMs: 5_000,
     spawnProcess: (command, args, options) => {
@@ -185,7 +260,12 @@ async function createHarness(t, overrides = {}) {
       if (details.secretsFile) {
         assert.match(await readFile(details.secretsFile, "utf8"), /MCP_REDACT_USERNAME/u);
       }
-      return { sessionId: "mcp-ready-session" };
+      return details.retainSession
+        ? {
+            sessionId: "mcp-ready-session",
+            close: async () => calls.readinessClose.push("mcp-ready-session"),
+          }
+        : { sessionId: "mcp-ready-session" };
     },
     stopRequest: async (endpoint, headers) => {
       calls.stop.push({ endpoint, headers });
@@ -199,13 +279,28 @@ async function createHarness(t, overrides = {}) {
     verifyPortOwner: async (port, pid) => calls.verifyPortOwner.push({ port, pid }),
     gatewayFactory: (options) => {
       calls.gatewayConstruct.push(options);
-      return new FakeGateway(options, calls);
+      const gateway = new FakeGateway(options, calls);
+      calls.gatewayInstances.push(gateway);
+      return gateway;
     },
     onFatal: async (event) => calls.fatal.push(event),
     ...overrides,
   });
   return { ...fixture, calls, child, runtime };
 }
+
+test("the Windows owner probe accepts a loopback listener owned by the requested process", {
+  skip: process.platform !== "win32" ? "Windows PowerShell ownership probe" : false,
+}, async (t) => {
+  const server = createServer((_request, response) => response.end("ok"));
+  const port = await listen(server);
+  t.after(() => new Promise((resolvePromise) => server.close(resolvePromise)));
+
+  await verifyLoopbackPortOwner(port, process.pid, AbortSignal.timeout(20_000));
+  await assert.rejects(
+    verifyLoopbackPortOwner(port, process.pid + 100_000, AbortSignal.timeout(20_000)),
+  );
+});
 
 test("BrowserRuntime builds the exact job MCP config and launches the pinned JS CLI through preload", async (t) => {
   const { calls, child, runtime, studioRoot } = await createHarness(t);
@@ -215,7 +310,7 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.equal(calls.spawn[0].command, process.execPath);
   assert.equal(
     calls.spawn[0].options.cwd,
-    path.join(studioRoot, "data", "jobs", automaticJob().id, "browser"),
+    JSON.parse(await readFile(calls.spawn[0].args[4], "utf8")).outputDir,
   );
   assert.deepEqual(calls.spawn[0].args.slice(0, 4), [
     "--require",
@@ -228,7 +323,13 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.deepEqual(config.browser, {
     browserName: "chromium",
     isolated: false,
-    userDataDir: path.join(studioRoot, "data", "browser-profile"),
+    userDataDir: path.join(
+      studioRoot,
+      ".runtime",
+      "browser",
+      automaticJob().id,
+      "profile",
+    ),
     launchOptions: { channel: "msedge", headless: false },
     contextOptions: {
       viewport: { width: 1920, height: 1080 },
@@ -242,9 +343,11 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
     allowedHosts: ["127.0.0.1:8932", "localhost:8932"],
   });
   assert.deepEqual(config.capabilities, ["core", "devtools"]);
+  assert.equal(config.imageResponses, "omit");
   assert.equal(config.sharedBrowserContext, true);
   assert.equal(config.saveSession, true);
-  assert.equal(config.outputDir, path.join(studioRoot, "data", "jobs", automaticJob().id, "browser"));
+  assert.equal(path.dirname(config.outputDir), path.join(studioRoot, "data", "jobs", automaticJob().id, "browser"));
+  assert.match(path.basename(config.outputDir), /^generation-1-[a-f0-9]{16}$/u);
   assert.deepEqual(config.network.allowedOrigins, [
     "http://127.0.0.1:5001",
     "http://127.0.0.1:5002",
@@ -255,6 +358,7 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.equal(JSON.stringify(config).includes("automatic-password"), false);
   assert.equal(JSON.stringify(config).includes(MCP_CAPABILITY_TOKEN), false);
   assert.equal(calls.verify.length, 1);
+  assert.equal(calls.verify[0].details.retainSession, true);
   assert.deepEqual(calls.verifyPortOwner, [{ port: 8932, pid: child.pid }]);
   assert.equal(calls.verify[0].endpoint, "http://127.0.0.1:8932/mcp");
   assert.equal(calls.gatewayConstruct.length, 1);
@@ -262,7 +366,11 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.equal(calls.gatewayConstruct[0].port, 8931);
   assert.equal(calls.gatewayConstruct[0].capabilityToken, MCP_CAPABILITY_TOKEN);
   assert.equal(typeof calls.gatewayConstruct[0].onFatal, "function");
-  assert.deepEqual(calls.gatewayStart, [{ jobId: automaticJob().id, generation: 1 }]);
+  assert.deepEqual(calls.gatewayStart, [{
+    jobId: automaticJob().id,
+    generation: 1,
+    adoptedSessionId: "mcp-ready-session",
+  }]);
   assert.equal(active.endpoint, "http://127.0.0.1:8931/mcp");
   assert.equal(active.phase, "planning");
   assert.equal(runtime.active, active);
@@ -272,11 +380,20 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.equal(childEnv.MANUAL_STUDIO_LOGIN_PASSWORD, "automatic-password");
   assert.equal(childEnv.MANUAL_STUDIO_LOGIN_ORIGIN, "http://127.0.0.1:5002");
   assert.equal(childEnv.MANUAL_STUDIO_TARGET_URL, "http://127.0.0.1:5001/app");
+  assert.equal(childEnv.PLAYWRIGHT_MCP_PING_TIMEOUT_MS, "30000");
   assert.equal(Object.values(childEnv).includes(MCP_CAPABILITY_TOKEN), false);
   assert.deepEqual(JSON.parse(childEnv.MANUAL_STUDIO_NAVIGATION_ORIGINS), [
     "http://127.0.0.1:5001",
     "http://127.0.0.1:5002",
   ]);
+  assert.equal(
+    childEnv.MANUAL_STUDIO_AUTH_SEAL_PATH,
+    path.join(studioRoot, ".runtime", "browser", automaticJob().id, "auth-sealed"),
+  );
+  assert.equal(
+    childEnv.MANUAL_STUDIO_AUTH_ACK_PATH,
+    path.join(studioRoot, ".runtime", "browser", automaticJob().id, "auth-armed"),
+  );
   assert.equal("NODE_OPTIONS" in childEnv, false);
   assert.equal("PLAYWRIGHT_MCP_BROWSER" in childEnv, false);
   assert.equal("PLAYWRIGHT_MCP_ALLOWED_ORIGINS" in childEnv, false);
@@ -285,6 +402,87 @@ test("BrowserRuntime builds the exact job MCP config and launches the pinned JS 
   assert.equal("AWS_SECRET_ACCESS_KEY" in childEnv, false);
   assert.equal("OCI_CLI_KEY_FILE" in childEnv, false);
   await assert.rejects(stat(childEnv.PLAYWRIGHT_MCP_SECRETS_FILE), /ENOENT/u);
+  await runtime.stop();
+});
+
+test("BrowserRuntime seals a manual authentication phase inside its owned config directory", async (t) => {
+  const { calls, runtime, studioRoot } = await createHarness(t);
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  await startRuntime(runtime, job);
+
+  const sealPath = path.join(
+    studioRoot,
+    ".runtime",
+    "browser",
+    job.id,
+    "auth-sealed",
+  );
+  const ackPath = path.join(path.dirname(sealPath), "auth-armed");
+  assert.equal(calls.spawn[0].options.env.MANUAL_STUDIO_AUTH_SEAL_PATH, sealPath);
+  assert.equal(calls.spawn[0].options.env.MANUAL_STUDIO_AUTH_ACK_PATH, ackPath);
+  let sealSettled = false;
+  const sealing = runtime.sealAuthentication(job.id).then((value) => {
+    sealSettled = true;
+    return value;
+  });
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      if (await readFile(sealPath, "utf8")) break;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(sealSettled, false);
+  await writeFile(ackPath, "manual-video-auth-armed-v1\n", "utf8");
+  await sealing;
+  assert.equal(await readFile(sealPath, "utf8"), "manual-video-auth-sealed-v1\n");
+  await assert.doesNotReject(runtime.sealAuthentication(job.id));
+  await assert.rejects(
+    runtime.sealAuthentication("job-ffffffffffffffff"),
+    (error) => error.code === "BROWSER_RUNTIME_AUTH_SEAL_FAILED",
+  );
+});
+
+test("automatic jobs use fresh owned profiles and cannot inherit an earlier login session", async (t) => {
+  const children = [];
+  const spawns = [];
+  const { runtime, studioRoot } = await createHarness(t, {
+    spawnProcess: (command, args, options) => {
+      const child = new FakeChild(89_400 + children.length);
+      children.push(child);
+      spawns.push({ command, args, options });
+      queueMicrotask(() => child.stderr.write("Listening on http://localhost:8932\n"));
+      return child;
+    },
+    stopRequest: async () => children.at(-1)?.close(),
+    killTree: async (child) => child.close(),
+  });
+  const firstJob = automaticJob();
+  await startRuntime(runtime, firstJob);
+  const firstConfig = JSON.parse(await readFile(spawns[0].args[4], "utf8"));
+  const firstProfile = firstConfig.browser.userDataDir;
+  const priorSession = path.join(firstProfile, "prior-auth-session.txt");
+  await writeFile(priorSession, "authenticated", "utf8");
+
+  await runtime.stop();
+  await assert.rejects(stat(firstProfile), /ENOENT/u);
+
+  const secondJob = { ...automaticJob(), id: "job-fedcba9876543210" };
+  await startRuntime(runtime, secondJob);
+  const secondConfig = JSON.parse(await readFile(spawns[1].args[4], "utf8"));
+  const secondProfile = secondConfig.browser.userDataDir;
+  assert.equal(
+    firstProfile,
+    path.join(studioRoot, ".runtime", "browser", firstJob.id, "profile"),
+  );
+  assert.equal(
+    secondProfile,
+    path.join(studioRoot, ".runtime", "browser", secondJob.id, "profile"),
+  );
+  assert.notEqual(secondProfile, firstProfile);
+  await assert.rejects(readFile(path.join(secondProfile, "prior-auth-session.txt"), "utf8"), /ENOENT/u);
   await runtime.stop();
 });
 
@@ -313,7 +511,7 @@ test("Playwright MCP readiness rejects tool inventory drift before any browser t
         if (request.method === "initialize") {
           return sse({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-03-26" } }, {
             status: 200,
-            headers: { "mcp-session-id": "fixture-session" },
+            headers: { "mcp-session-id": "fixture-session-1" },
           });
         }
         if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
@@ -329,11 +527,141 @@ test("Playwright MCP readiness rejects tool inventory drift before any browser t
   assert.equal(calls.at(-1).method, "DELETE");
 });
 
+test("a retained MCP session answers bounded server heartbeats until its lease closes", async () => {
+  const module = await import("../../src/adapters/browser-runtime.js");
+  assert.equal(typeof module.openPlaywrightMcpHeartbeat, "function");
+
+  const sessionId = "retained-heartbeat-session";
+  const requests = [];
+  let streamController;
+  let streamCancelled = 0;
+  const stream = new ReadableStream({
+    start(controller) {
+      streamController = controller;
+    },
+    cancel() {
+      streamCancelled += 1;
+    },
+  });
+  const fetchImpl = async (_endpoint, options) => {
+    const message = options.body === undefined ? null : JSON.parse(options.body);
+    requests.push({ method: options.method, headers: options.headers, message });
+    if (options.method === "GET") {
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "mcp-session-id": sessionId,
+        },
+      });
+    }
+    assert.deepEqual(message, { jsonrpc: "2.0", id: 17, result: {} });
+    return new Response(null, { status: 202 });
+  };
+
+  const lease = await module.openPlaywrightMcpHeartbeat(
+    "http://127.0.0.1:8932/mcp",
+    { sessionId, fetchImpl },
+  );
+  streamController.enqueue(new TextEncoder().encode(
+    ': keepalive\n\nevent: message\ndata: {"jsonrpc":"2.0","id":17,"method":"ping"}\n\n',
+  ));
+  for (let attempt = 0; attempt < 100 && requests.length < 2; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].method, "GET");
+  assert.equal(requests[0].headers["mcp-session-id"], sessionId);
+  assert.equal(requests[1].method, "POST");
+  assert.equal(requests[1].headers["mcp-session-id"], sessionId);
+  await lease.close();
+  await lease.close();
+  assert.equal(streamCancelled, 1);
+});
+
+test("BrowserRuntime retains the automatic readiness session until the owned runtime stops", async (t) => {
+  let readinessOptions;
+  let closeCalls = 0;
+  const { runtime } = await createHarness(t, {
+    verifyMcpReady: async (_endpoint, options) => {
+      readinessOptions = options;
+      return Object.freeze({
+        sessionId: "retained-readiness-session",
+        close: async () => { closeCalls += 1; },
+      });
+    },
+  });
+  await startRuntime(runtime, automaticJob());
+  assert.equal(readinessOptions.retainSession, true);
+  assert.equal(closeCalls, 0);
+  await runtime.stop();
+  assert.equal(closeCalls, 1);
+});
+
+test("the retained MCP lifetime outlives the production thirty-second readiness deadline", async (t) => {
+  let readinessSignal;
+  let lifetimeSignal;
+  let closeCalls = 0;
+  const { runtime } = await createHarness(t, {
+    // Compress the production 30s deadline without changing the lifetime relationship.
+    readinessTimeoutMs: 100,
+    verifyMcpReady: async (_endpoint, options) => {
+      readinessSignal = options.signal;
+      lifetimeSignal = options.lifetimeSignal;
+      return Object.freeze({
+        sessionId: "retained-readiness-session",
+        close: async () => { closeCalls += 1; },
+      });
+    },
+  });
+
+  await startRuntime(runtime, { ...automaticJob(), auth: { mode: "manual" } });
+  assert.ok(readinessSignal instanceof AbortSignal);
+  assert.ok(lifetimeSignal instanceof AbortSignal);
+  assert.notEqual(lifetimeSignal, readinessSignal);
+  await new Promise((resolvePromise, rejectPromise) => {
+    if (readinessSignal.aborted) {
+      resolvePromise();
+      return;
+    }
+    const deadline = setTimeout(() => rejectPromise(new Error("readiness deadline did not expire")), 1_000);
+    readinessSignal.addEventListener("abort", () => {
+      clearTimeout(deadline);
+      resolvePromise();
+    }, { once: true });
+  });
+  assert.equal(readinessSignal.aborted, true);
+  assert.equal(lifetimeSignal.aborted, false);
+  assert.equal(closeCalls, 0);
+
+  await runtime.stop();
+  assert.equal(lifetimeSignal.aborted, true);
+  assert.equal(closeCalls, 1);
+});
+
+test("automatic BrowserRuntime startup rejects an incomplete retained readiness lease", async (t) => {
+  for (const readiness of [
+    { sessionId: "retained-readiness-session" },
+    { sessionId: "short", close: async () => {} },
+  ]) {
+    const { calls, runtime } = await createHarness(t, {
+      verifyMcpReady: async () => readiness,
+    });
+    await assert.rejects(
+      startRuntime(runtime, automaticJob()),
+      (error) => error.code === "BROWSER_RUNTIME_START_FAILED",
+    );
+    assert.equal(calls.gatewayConstruct.length, 0);
+    assert.equal(runtime.active, null);
+  }
+});
+
 test("BrowserRuntime proves the random raw listener belongs to the spawned MCP tree before readiness", async (t) => {
   const { calls, runtime } = await createHarness(t, {
     verifyPortOwner: async () => { throw new Error("foreign listener"); },
   });
-  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const job = automaticJob();
   await assert.rejects(startRuntime(runtime, job), (error) => error.code === "BROWSER_RUNTIME_START_FAILED");
   assert.equal(calls.verify.length, 0);
   assert.equal(calls.gatewayConstruct.length, 0);
@@ -341,7 +669,7 @@ test("BrowserRuntime proves the random raw listener belongs to the spawned MCP t
   assert.equal(runtime.active, null);
 });
 
-test("BrowserRuntime manual mode passes no login values and one process remains across phases", async (t) => {
+test("BrowserRuntime manual mode retains and adopts one exclusive executor session", async (t) => {
   const { calls, runtime } = await createHarness(t);
   const job = {
     ...automaticJob(),
@@ -351,11 +679,17 @@ test("BrowserRuntime manual mode passes no login values and one process remains 
   assert.equal("MANUAL_STUDIO_LOGIN_USERNAME" in calls.spawn[0].options.env, false);
   assert.equal("MANUAL_STUDIO_LOGIN_PASSWORD" in calls.spawn[0].options.env, false);
   assert.equal("PLAYWRIGHT_MCP_SECRETS_FILE" in calls.spawn[0].options.env, false);
-  assert.equal(runtime.active, active);
+  assert.equal(calls.verify[0].details.retainSession, true);
+  assert.deepEqual(calls.gatewayStart, [{
+    jobId: job.id,
+    generation: 1,
+    adoptedSessionId: "mcp-ready-session",
+  }]);
   assert.equal(runtime.active, active);
   await assert.rejects(startRuntime(runtime, job), (error) => error.code === "BROWSER_RUNTIME_BUSY");
   assert.equal(calls.spawn.length, 1);
   await runtime.stop();
+  assert.deepEqual(calls.readinessClose, ["mcp-ready-session"]);
 });
 
 test("BrowserRuntime installs the immutable approval queue only on its active gateway generation", async (t) => {
@@ -380,11 +714,304 @@ test("BrowserRuntime installs the immutable approval queue only on its active ga
   assert.equal(runtime.active.phase, "execution");
   assert.equal(runtime.active.planDigest, approval.planDigest);
   assert.deepEqual(calls.gatewayApproval, [approval]);
+  const binding = {
+    jobId: job.id,
+    generation: active.generation,
+    planDigest: approval.planDigest,
+  };
+  assert.deepEqual(runtime.readExecutionTiming(binding), {
+    schemaVersion: "1.0",
+    clock: "unix_ms",
+    ...binding,
+    complete: false,
+    calls: [],
+  });
+  assert.deepEqual(calls.gatewayTiming, [binding]);
+  const config = JSON.parse(await readFile(calls.spawn[0].args[4], "utf8"));
+  await writeFile(path.join(config.outputDir, calls.gatewayArtifactFileName), "owned recording", "utf8");
+  assert.deepEqual(await runtime.readRecordingArtifact(binding), {
+    schemaVersion: "1.0",
+    ...binding,
+    approvedCallId: "system.stop-video",
+    recordingPath: `browser/${path.basename(config.outputDir)}/${calls.gatewayArtifactFileName}`,
+  });
+  assert.deepEqual(calls.gatewayArtifact, [binding]);
   await runtime.stop();
   assert.throws(
     () => runtime.installApproval(approval),
     (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
   );
+  assert.throws(
+    () => runtime.readExecutionTiming(binding),
+    (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
+  );
+  await assert.rejects(
+    runtime.readRecordingArtifact(binding),
+    (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
+  );
+  await assert.rejects(
+    runtime.readEvidenceArtifacts({
+      ...binding,
+      expectedCallIds: ["step-01.evidence-screenshot"],
+    }),
+    (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
+  );
+});
+
+test("BrowserRuntime executes its installed approval queue through the coordinator MCP client", async (t) => {
+  const progress = [];
+  const { calls, runtime } = await createHarness(t, {
+    executeMcpCalls: async (input) => {
+      calls.coordinatorExecutions.push(input);
+      for (const call of input.calls) {
+        await input.onCall({ id: call.id, tool: call.tool, status: "completed" });
+      }
+      const gateway = calls.gatewayInstances.at(-1);
+      gateway.active = Object.freeze({
+        ...gateway.active,
+        phase: "execution_complete",
+        remainingCalls: 0,
+      });
+      return Object.freeze({ callCount: input.calls.length });
+    },
+  });
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const active = await startRuntime(runtime, job);
+  const binding = {
+    jobId: job.id,
+    generation: active.generation,
+    planDigest: "b".repeat(64),
+  };
+  const approvalCalls = [
+    { id: "system.start-video", tool: "browser_start_video", arguments: { size: { width: 1920, height: 1080 } } },
+    { id: "system.stop-video", tool: "browser_stop_video", arguments: {} },
+  ];
+  runtime.installApproval({ ...binding, calls: approvalCalls });
+
+  assert.deepEqual(await runtime.executeApproval(binding, {
+    onCall: async (event) => progress.push(event),
+  }), {
+    schemaVersion: "1.0",
+    ...binding,
+    status: "completed",
+    callCount: 2,
+  });
+  assert.equal(calls.coordinatorExecutions.length, 1);
+  assert.equal(calls.coordinatorExecutions[0].endpoint, "http://127.0.0.1:8931/mcp");
+  assert.equal(calls.coordinatorExecutions[0].capabilityToken, MCP_CAPABILITY_TOKEN);
+  assert.equal(calls.coordinatorExecutions[0].sessionId, "mcp-ready-session");
+  assert.deepEqual(calls.coordinatorExecutions[0].calls, approvalCalls);
+  assert.deepEqual(progress, [
+    { id: "system.start-video", tool: "browser_start_video", status: "completed" },
+    { id: "system.stop-video", tool: "browser_stop_video", status: "completed" },
+  ]);
+  await runtime.stop();
+  assert.deepEqual(calls.readinessClose, ["mcp-ready-session"]);
+});
+
+test("the coordinator MCP client initializes one authenticated session and executes exact calls in order", async () => {
+  const requests = [];
+  const progress = [];
+  const sessionId = "coordinator-session-1";
+  const calls = [
+    { id: "system.start-video", tool: "browser_start_video", arguments: { size: { width: 1920, height: 1080 } } },
+    { id: "system.stop-video", tool: "browser_stop_video", arguments: {} },
+  ];
+  const fetchImpl = async (_endpoint, options) => {
+    const message = options.body === undefined ? null : JSON.parse(options.body);
+    requests.push({ method: options.method, headers: options.headers, message });
+    if (options.method === "DELETE") return new Response("", { status: 200 });
+    if (message.method === "initialize") {
+      return new Response(
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-03-26", capabilities: {} } })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream", "mcp-session-id": sessionId } },
+      );
+    }
+    if (message.method === "notifications/initialized") {
+      return new Response("", { status: 202 });
+    }
+    return new Response(
+      `data: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "ok" }] } })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  assert.deepEqual(await executeApprovedMcpCalls({
+    endpoint: "http://127.0.0.1:8931/mcp",
+    capabilityToken: MCP_CAPABILITY_TOKEN,
+    calls,
+    onCall: async (event) => progress.push(event),
+    fetchImpl,
+  }), { callCount: 2 });
+  assert.deepEqual(requests.map(({ method, message }) => [method, message?.method]), [
+    ["POST", "initialize"],
+    ["POST", "notifications/initialized"],
+    ["POST", "tools/call"],
+    ["POST", "tools/call"],
+    ["DELETE", undefined],
+  ]);
+  assert.equal(requests[0].headers.Authorization, `Bearer ${MCP_CAPABILITY_TOKEN}`);
+  assert.equal(requests[1].headers["mcp-session-id"], sessionId);
+  assert.deepEqual(requests.slice(2, 4).map(({ message }) => message.params), [
+    { name: "browser_start_video", arguments: calls[0].arguments },
+    { name: "browser_stop_video", arguments: calls[1].arguments },
+  ]);
+  assert.deepEqual(progress, calls.map(({ id, tool }) => ({ id, tool, status: "completed" })));
+});
+
+test("the coordinator MCP client reuses an adopted authenticated session without opening or deleting it", async () => {
+  const requests = [];
+  const progress = [];
+  const sessionId = "mcp-ready-session";
+  const calls = [
+    { id: "system.start-video", tool: "browser_start_video", arguments: { size: { width: 1920, height: 1080 } } },
+    { id: "system.stop-video", tool: "browser_stop_video", arguments: {} },
+  ];
+  const fetchImpl = async (_endpoint, options) => {
+    const message = JSON.parse(options.body);
+    requests.push({ method: options.method, headers: options.headers, message });
+    return new Response(
+      `data: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "ok" }] } })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  assert.deepEqual(await executeApprovedMcpCalls({
+    endpoint: "http://127.0.0.1:8931/mcp",
+    capabilityToken: MCP_CAPABILITY_TOKEN,
+    sessionId,
+    calls,
+    onCall: async (event) => progress.push(event),
+    fetchImpl,
+  }), { callCount: 2 });
+  assert.deepEqual(requests.map(({ method, message }) => [method, message.method]), [
+    ["POST", "tools/call"],
+    ["POST", "tools/call"],
+  ]);
+  assert.equal(requests.every(({ headers }) => headers["mcp-session-id"] === sessionId), true);
+  assert.deepEqual(progress, calls.map(({ id, tool }) => ({ id, tool, status: "completed" })));
+});
+
+test("a borrowed coordinator session fails without initializing or deleting the retained lease", async () => {
+  const requests = [];
+  await assert.rejects(
+    executeApprovedMcpCalls({
+      endpoint: "http://127.0.0.1:8931/mcp",
+      capabilityToken: MCP_CAPABILITY_TOKEN,
+      sessionId: "mcp-ready-session",
+      calls: [{ id: "system.start-video", tool: "browser_start_video", arguments: {} }],
+      onCall: async () => {},
+      fetchImpl: async (_endpoint, options) => {
+        requests.push(options);
+        const message = JSON.parse(options.body);
+        return new Response(
+          `data: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { isError: true, content: [] } })}\n\n`,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    }),
+    (error) => error.code === "BROWSER_RUNTIME_MCP_TOOL_FAILED",
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(JSON.parse(requests[0].body).method, "tools/call");
+
+  let fetched = false;
+  await assert.rejects(
+    executeApprovedMcpCalls({
+      endpoint: "http://127.0.0.1:8931/mcp",
+      capabilityToken: MCP_CAPABILITY_TOKEN,
+      sessionId: "short",
+      calls: [{ id: "system.start-video", tool: "browser_start_video", arguments: {} }],
+      onCall: async () => {},
+      fetchImpl: async () => { fetched = true; },
+    }),
+    (error) => error.code === "BROWSER_RUNTIME_EXECUTION_INVALID",
+  );
+  assert.equal(fetched, false);
+});
+
+test("BrowserRuntime binds gateway-owned screenshots to generation-owned evidence paths", async (t) => {
+  const { calls, runtime } = await createHarness(t);
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const active = await startRuntime(runtime, job);
+  const binding = {
+    jobId: job.id,
+    generation: active.generation,
+    planDigest: "d".repeat(64),
+  };
+  runtime.installApproval({
+    ...binding,
+    calls: [
+      {
+        id: "step-01.evidence-screenshot",
+        tool: "browser_take_screenshot",
+        arguments: { filename: "step-01.png", type: "png" },
+      },
+    ],
+  });
+  const config = JSON.parse(await readFile(calls.spawn[0].args[4], "utf8"));
+  await writeFile(path.join(config.outputDir, calls.gatewayEvidenceFileNames[0]), "owned image", "utf8");
+  const input = {
+    ...binding,
+    expectedCallIds: ["step-01.evidence-screenshot"],
+  };
+
+  assert.deepEqual(await runtime.readEvidenceArtifacts(input), {
+    schemaVersion: "1.0",
+    ...binding,
+    artifacts: [{
+      approvedCallId: "step-01.evidence-screenshot",
+      screenshotPath: `browser/${path.basename(config.outputDir)}/${calls.gatewayEvidenceFileNames[0]}`,
+    }],
+  });
+  assert.deepEqual(calls.gatewayEvidence, [{
+    expectedGenerationId: active.generation,
+    expectedCallIds: ["step-01.evidence-screenshot"],
+  }]);
+  await runtime.stop();
+});
+
+test("BrowserRuntime rejects screenshot evidence that escapes its generation output", async (t) => {
+  const { calls, runtime } = await createHarness(t);
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const active = await startRuntime(runtime, job);
+  const binding = { jobId: job.id, generation: active.generation, planDigest: "e".repeat(64) };
+  runtime.installApproval({
+    ...binding,
+    calls: [{
+      id: "step-01.evidence-screenshot",
+      tool: "browser_take_screenshot",
+      arguments: { filename: "step-01.png", type: "png" },
+    }],
+  });
+  calls.gatewayEvidenceFileNames = ["../forged.png"];
+
+  await assert.rejects(
+    runtime.readEvidenceArtifacts({
+      ...binding,
+      expectedCallIds: ["step-01.evidence-screenshot"],
+    }),
+    (error) => error.code === "BROWSER_RUNTIME_EVIDENCE_FAILED",
+  );
+  await runtime.stop();
+});
+
+test("BrowserRuntime rejects an artifact name that escapes its generation-owned output directory", async (t) => {
+  const { calls, runtime } = await createHarness(t);
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const active = await startRuntime(runtime, job);
+  const binding = { jobId: job.id, generation: active.generation, planDigest: "c".repeat(64) };
+  runtime.installApproval({
+    ...binding,
+    calls: [{ id: "system.stop-video", tool: "browser_stop_video", arguments: {} }],
+  });
+  calls.gatewayArtifactFileName = "../forged.webm";
+
+  await assert.rejects(
+    runtime.readRecordingArtifact(binding),
+    (error) => error.code === "BROWSER_RUNTIME_ARTIFACT_FAILED",
+  );
+  await runtime.stop();
 });
 
 test("a gateway policy fatal is surfaced and stops the raw browser runtime", async (t) => {
@@ -876,6 +1503,19 @@ test("BrowserRuntime never follows a replaced config directory during cleanup", 
 
 function loadFreshBootstrap(environment) {
   const completeEnvironment = { ...environment };
+  if (!completeEnvironment.MANUAL_STUDIO_AUTH_SEAL_PATH) {
+    completeEnvironment.MANUAL_STUDIO_AUTH_SEAL_PATH = path.join(
+      os.tmpdir(),
+      `manual-studio-bootstrap-seal-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      "auth-sealed",
+    );
+  }
+  if (!completeEnvironment.MANUAL_STUDIO_AUTH_ACK_PATH) {
+    completeEnvironment.MANUAL_STUDIO_AUTH_ACK_PATH = path.join(
+      path.dirname(completeEnvironment.MANUAL_STUDIO_AUTH_SEAL_PATH),
+      "auth-armed",
+    );
+  }
   if (!completeEnvironment.MANUAL_STUDIO_TARGET_URL) {
     const [firstOrigin] = JSON.parse(completeEnvironment.MANUAL_STUDIO_ALLOWED_ORIGINS);
     completeEnvironment.MANUAL_STUDIO_TARGET_URL = `${firstOrigin}/`;
@@ -1153,15 +1793,446 @@ test("browser bootstrap permits resource requests but never top-level resource-o
     await routeHandler({
       request: () => ({
         frame: () => ({ page: () => page }),
+        isNavigationRequest: () => false,
         url: () => `${resourceOrigin}/asset.png`,
       }),
       fallback: async () => { continued += 1; },
       abort: async () => { throw new Error("resource request must not be aborted"); },
     });
     assert.equal(continued, 1);
+    let aborted = 0;
+    let navigationContinued = 0;
+    await routeHandler({
+      request: () => ({
+        frame: () => ({ page: () => page }),
+        isNavigationRequest: () => true,
+        url: () => `${resourceOrigin}/document`,
+      }),
+      fallback: async () => { navigationContinued += 1; },
+      abort: async () => { aborted += 1; },
+    });
+    assert.equal(aborted, 1);
+    assert.equal(navigationContinued, 0);
     frameHandler(mainFrame);
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
     assert.equal(closed, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("browser bootstrap removes auth origins from navigation immediately after the seal appears", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auth-seal-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const ackPath = path.join(temporary, "auth-armed");
+  const targetOrigin = "http://127.0.0.1:5001";
+  const authOrigin = "http://127.0.0.1:5002";
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_TARGET_URL: `${targetOrigin}/app`,
+    MANUAL_STUDIO_AUTH_MODE: "manual",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_AUTH_ACK_PATH: ackPath,
+  });
+  try {
+    let routeHandler;
+    let webSocketHandler;
+    let requestFinishedHandler;
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async (_pattern, handler) => { routeHandler = handler; },
+      routeWebSocket: async (_pattern, handler) => { webSocketHandler = handler; },
+      newCDPSession: async () => ({ on: () => {}, send: async () => {} }),
+    };
+    const mainFrame = { url: () => `${targetOrigin}/app` };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      mainFrame: () => mainFrame,
+      on: (name, handler) => {
+        if (name === "requestfinished") requestFinishedHandler = handler;
+      },
+      url: () => `${targetOrigin}/app`,
+      close: async () => {},
+    };
+    await loaded.default({ page });
+
+    let continuedBeforeSeal = 0;
+    const preSealAuthRequest = {
+      frame: () => ({ page: () => page }),
+      isNavigationRequest: () => true,
+      url: () => `${authOrigin}/login`,
+    };
+    await routeHandler({
+      request: () => preSealAuthRequest,
+      fallback: async () => { continuedBeforeSeal += 1; },
+      abort: async () => { throw new Error("auth navigation must remain available before confirmation"); },
+    });
+    assert.equal(continuedBeforeSeal, 1);
+    requestFinishedHandler(preSealAuthRequest);
+
+    await writeFile(sealPath, "manual-video-auth-sealed-v1\n", "utf8");
+    let abortedAfterSeal = 0;
+    await routeHandler({
+      request: () => ({
+        frame: () => ({ page: () => page }),
+        isNavigationRequest: () => true,
+        url: () => `${authOrigin}/login`,
+      }),
+      fallback: async () => { throw new Error("sealed auth navigation must not reach the network"); },
+      abort: async () => { abortedAfterSeal += 1; },
+    });
+    assert.equal(abortedAfterSeal, 1);
+
+    let authFetchAborted = 0;
+    let authFetchContinued = 0;
+    await routeHandler({
+      request: () => ({
+        frame: () => ({ page: () => page }),
+        isNavigationRequest: () => false,
+        url: () => `${authOrigin}/session`,
+      }),
+      fallback: async () => { authFetchContinued += 1; },
+      abort: async () => { authFetchAborted += 1; },
+    });
+    assert.equal(authFetchAborted, 1);
+    assert.equal(authFetchContinued, 0);
+
+    let authSocketClosed = 0;
+    let authSocketConnected = 0;
+    await webSocketHandler({
+      url: () => "ws://127.0.0.1:5002/session",
+      close: async () => { authSocketClosed += 1; },
+      connectToServer: async () => { authSocketConnected += 1; },
+    });
+    assert.equal(authSocketClosed, 1);
+    assert.equal(authSocketConnected, 0);
+
+    let targetContinued = 0;
+    const postSealTargetRequest = {
+      frame: () => ({ page: () => page }),
+      isNavigationRequest: () => true,
+      url: () => `${targetOrigin}/projects`,
+    };
+    await routeHandler({
+      request: () => postSealTargetRequest,
+      fallback: async () => { targetContinued += 1; },
+      abort: async () => { throw new Error("the target origin must remain available"); },
+    });
+    assert.equal(targetContinued, 1);
+    requestFinishedHandler(postSealTargetRequest);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        if (await readFile(ackPath, "utf8")) break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    }
+    assert.equal(await readFile(ackPath, "utf8"), "manual-video-auth-armed-v1\n");
+  } finally {
+    restore();
+  }
+});
+
+test("browser bootstrap closes an already-open auth page instead of arming planning", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auth-page-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const ackPath = path.join(temporary, "auth-armed");
+  const targetOrigin = "http://127.0.0.1:5001";
+  const authOrigin = "http://127.0.0.1:5002";
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_TARGET_URL: `${targetOrigin}/app`,
+    MANUAL_STUDIO_AUTH_MODE: "manual",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_AUTH_ACK_PATH: ackPath,
+  });
+  try {
+    let closed = 0;
+    const mainFrame = { url: () => `${authOrigin}/login` };
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async () => {},
+      routeWebSocket: async () => {},
+      newCDPSession: async () => ({ on: () => {}, send: async () => {} }),
+    };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      mainFrame: () => mainFrame,
+      on: () => {},
+      url: () => `${authOrigin}/login`,
+      close: async () => { closed += 1; },
+    };
+    await loaded.default({ page });
+    await writeFile(sealPath, "manual-video-auth-sealed-v1\n", "utf8");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    assert.ok(closed > 0);
+    await assert.rejects(readFile(ackPath, "utf8"), /ENOENT/u);
+  } finally {
+    restore();
+  }
+});
+
+test("browser bootstrap never acknowledges while a pre-seal auth document navigation can still commit", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auth-navigation-race-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const ackPath = path.join(temporary, "auth-armed");
+  const targetOrigin = "http://127.0.0.1:5001";
+  const authOrigin = "http://127.0.0.1:5002";
+  const targetUrl = `${targetOrigin}/app`;
+  const authUrl = `${authOrigin}/login`;
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([targetOrigin, authOrigin]),
+    MANUAL_STUDIO_TARGET_URL: targetUrl,
+    MANUAL_STUDIO_AUTH_MODE: "manual",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_AUTH_ACK_PATH: ackPath,
+  });
+  try {
+    let routeHandler;
+    let requestPausedHandler;
+    const protocolCalls = [];
+    const mainFrame = { url: () => targetUrl };
+    const session = {
+      on: (name, handler) => {
+        if (name === "Fetch.requestPaused") requestPausedHandler = handler;
+      },
+      send: async (method, parameters) => { protocolCalls.push([method, parameters]); },
+    };
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async (_pattern, handler) => { routeHandler = handler; },
+      routeWebSocket: async () => {},
+      newCDPSession: async () => session,
+    };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      frames: () => [mainFrame],
+      mainFrame: () => mainFrame,
+      on: () => {},
+      url: () => targetUrl,
+      close: async () => {},
+    };
+    await loaded.default({ page });
+
+    let routeContinued = false;
+    await routeHandler({
+      request: () => ({
+        frame: () => ({ page: () => page }),
+        isNavigationRequest: () => true,
+        url: () => authUrl,
+      }),
+      fallback: async () => { routeContinued = true; },
+      abort: async () => { throw new Error("the pre-seal auth navigation must initially be allowed"); },
+    });
+    assert.equal(routeContinued, true);
+
+    requestPausedHandler({
+      requestId: "auth-document-request",
+      resourceType: "Document",
+      request: { url: authUrl },
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    requestPausedHandler({
+      requestId: "auth-document-response",
+      resourceType: "Document",
+      request: { url: authUrl },
+      responseStatusCode: 200,
+      responseHeaders: [],
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    assert.deepEqual(
+      protocolCalls.filter(([method]) => method === "Fetch.continueRequest" || method === "Fetch.continueResponse")
+        .map(([method]) => method),
+      ["Fetch.continueRequest", "Fetch.continueResponse"],
+    );
+
+    await writeFile(sealPath, "manual-video-auth-sealed-v1\n", "utf8");
+    let acknowledgement;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        acknowledgement = await readFile(ackPath, "utf8");
+        break;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    }
+    assert.equal(
+      acknowledgement,
+      undefined,
+      "auth-armed must remain absent until the pre-seal auth Document navigation resolves",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("automatic login writes the phase seal only after returning to the exact target", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auto-seal-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const targetUrl = "http://127.0.0.1:5001/app";
+  const loginUrl = "http://127.0.0.1:5002/login";
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([
+      "http://127.0.0.1:5001",
+      "http://127.0.0.1:5002",
+    ]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([
+      "http://127.0.0.1:5001",
+      "http://127.0.0.1:5002",
+    ]),
+    MANUAL_STUDIO_TARGET_URL: targetUrl,
+    MANUAL_STUDIO_AUTH_MODE: "automatic",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_LOGIN_ORIGIN: "http://127.0.0.1:5002",
+    MANUAL_STUDIO_LOGIN_USERNAME: "phase-user",
+    MANUAL_STUDIO_LOGIN_PASSWORD: "phase-password",
+  });
+  try {
+    const handlers = new Map();
+    let currentUrl = loginUrl;
+    const mainFrame = { url: () => currentUrl };
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async () => {},
+      routeWebSocket: async () => {},
+      newCDPSession: async () => ({ on: () => {}, send: async () => {} }),
+    };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      mainFrame: () => mainFrame,
+      on: (name, callback) => handlers.set(name, callback),
+      off: () => {},
+      url: () => currentUrl,
+      close: async () => {},
+      locator: () => ({ fill: async () => {}, click: async () => {} }),
+    };
+    await loaded.default({ page });
+    await handlers.get("domcontentloaded")();
+    await assert.rejects(readFile(sealPath, "utf8"), /ENOENT/u);
+
+    currentUrl = targetUrl;
+    handlers.get("framenavigated")(mainFrame);
+    assert.equal(await readFile(sealPath, "utf8"), "manual-video-auth-sealed-v1\n");
+  } finally {
+    restore();
+  }
+});
+
+test("automatic login never treats a same-URL credential submission as authenticated", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auto-same-url-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const loginUrl = "http://127.0.0.1:5001/login";
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify(["http://127.0.0.1:5001"]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify(["http://127.0.0.1:5001"]),
+    MANUAL_STUDIO_TARGET_URL: loginUrl,
+    MANUAL_STUDIO_AUTH_MODE: "automatic",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_LOGIN_ORIGIN: "http://127.0.0.1:5001",
+    MANUAL_STUDIO_LOGIN_USERNAME: "same-url-user",
+    MANUAL_STUDIO_LOGIN_PASSWORD: "rejected-password",
+  });
+  try {
+    const handlers = new Map();
+    const mainFrame = { url: () => loginUrl };
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async () => {},
+      routeWebSocket: async () => {},
+      newCDPSession: async () => ({ on: () => {}, send: async () => {} }),
+    };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      mainFrame: () => mainFrame,
+      on: (name, callback) => handlers.set(name, callback),
+      off: () => {},
+      url: () => loginUrl,
+      close: async () => {},
+      locator: () => ({ fill: async () => {}, click: async () => {} }),
+    };
+    await loaded.default({ page });
+    await handlers.get("domcontentloaded")();
+    await assert.rejects(readFile(sealPath, "utf8"), /ENOENT/u);
+    handlers.get("framenavigated")(mainFrame);
+    await assert.rejects(readFile(sealPath, "utf8"), /ENOENT/u);
+  } finally {
+    restore();
+  }
+});
+
+test("automatic login ignores navigation that happens during credential fill before submit", async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auto-prefill-nav-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const sealPath = path.join(temporary, "auth-sealed");
+  const targetUrl = "http://127.0.0.1:5001/app";
+  let currentUrl = "http://127.0.0.1:5001/login";
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify(["http://127.0.0.1:5001"]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify(["http://127.0.0.1:5001"]),
+    MANUAL_STUDIO_TARGET_URL: targetUrl,
+    MANUAL_STUDIO_AUTH_MODE: "automatic",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_LOGIN_ORIGIN: "http://127.0.0.1:5001",
+    MANUAL_STUDIO_LOGIN_USERNAME: "prefill-user",
+    MANUAL_STUDIO_LOGIN_PASSWORD: "prefill-password",
+  });
+  try {
+    const handlers = new Map();
+    const mainFrame = { url: () => currentUrl };
+    const context = {
+      _options: { serviceWorkers: "block" },
+      serviceWorkers: () => [],
+      addInitScript: async () => {},
+      route: async () => {},
+      routeWebSocket: async () => {},
+      newCDPSession: async () => ({ on: () => {}, send: async () => {} }),
+    };
+    const page = {
+      context: () => context,
+      goto: async () => {},
+      mainFrame: () => mainFrame,
+      on: (name, callback) => handlers.set(name, callback),
+      off: () => {},
+      url: () => currentUrl,
+      close: async () => {},
+      locator: (selector) => ({
+        fill: async () => {
+          if (selector === '[name="username"]') {
+            currentUrl = targetUrl;
+            handlers.get("framenavigated")(mainFrame);
+          }
+        },
+        click: async () => {},
+      }),
+    };
+    await loaded.default({ page });
+    await handlers.get("domcontentloaded")();
+    await assert.rejects(readFile(sealPath, "utf8"), /ENOENT/u);
   } finally {
     restore();
   }
@@ -1228,19 +2299,216 @@ async function listen(server) {
   return server.address().port;
 }
 
-test("browser bootstrap blocks redirects, subresources, OOPIFs, popups, WebSockets and service workers before attacker hit", {
+test("actual Edge automatic login seals only after a credential redirect reaches the target", {
   skip: process.platform !== "win32",
   timeout: 45_000,
 }, async (t) => {
-  let attacker;
-  let approved;
+  let server;
   let context;
   let profile;
   let restoreBootstrap;
   t.after(async () => {
     restoreBootstrap?.();
     if (context) await context.close().catch(() => undefined);
-    for (const server of [approved, attacker]) {
+    server?.closeIdleConnections?.();
+    server?.closeAllConnections?.();
+    if (server?.listening) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    if (profile) await rm(profile, { recursive: true, force: true });
+  });
+
+  let authenticated = false;
+  server = createServer((request, response) => {
+    const send = (status, body, headers = {}) => {
+      response.writeHead(status, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        ...headers,
+      });
+      response.end(body);
+    };
+    if (request.method === "GET" && request.url === "/app") {
+      if (!authenticated) {
+        send(303, "", { Location: "/login" });
+      } else {
+        send(200, "<!doctype html><title>Target</title><h1>Target ready</h1>");
+      }
+      return;
+    }
+    if (request.method === "GET" && request.url === "/login") {
+      send(200, '<!doctype html><title>Login</title><form method="post" action="/login"><input name="username"><input name="password" type="password"><button type="submit">Login</button></form>');
+      return;
+    }
+    if (request.method === "POST" && request.url === "/login") {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        if (form.get("username") === "automatic-user" && form.get("password") === "automatic-password") {
+          authenticated = true;
+          send(303, "", { Location: "/app" });
+        } else {
+          send(401, "invalid");
+        }
+      });
+      return;
+    }
+    send(404, "missing");
+  });
+  const port = await listen(server);
+  const origin = `http://127.0.0.1:${port}`;
+  const targetUrl = `${origin}/app`;
+  profile = await mkdtemp(path.join(os.tmpdir(), "manual-studio-auto-edge-"));
+  const sealPath = path.join(profile, "auth-sealed");
+  const ackPath = path.join(profile, "auth-armed");
+  const { loaded, restore } = loadFreshBootstrap({
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([origin]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([origin]),
+    MANUAL_STUDIO_TARGET_URL: targetUrl,
+    MANUAL_STUDIO_AUTH_MODE: "automatic",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: sealPath,
+    MANUAL_STUDIO_AUTH_ACK_PATH: ackPath,
+    MANUAL_STUDIO_LOGIN_ORIGIN: origin,
+    MANUAL_STUDIO_LOGIN_USERNAME: "automatic-user",
+    MANUAL_STUDIO_LOGIN_PASSWORD: "automatic-password",
+  });
+  restoreBootstrap = restore;
+  context = await chromium.launchPersistentContext(profile, {
+    channel: "msedge",
+    headless: true,
+    serviceWorkers: "block",
+    viewport: { width: 800, height: 600 },
+  });
+  const page = context.pages()[0] ?? await context.newPage();
+  await loaded.default({ page });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      if (await readFile(ackPath, "utf8") === "manual-video-auth-armed-v1\n") break;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  assert.equal(authenticated, true);
+  assert.equal(page.url(), targetUrl);
+  assert.equal(await readFile(sealPath, "utf8"), "manual-video-auth-sealed-v1\n");
+  assert.equal(await readFile(ackPath, "utf8"), "manual-video-auth-armed-v1\n");
+  const planningPage = await context.newPage();
+  await loaded.default({ page: planningPage });
+  assert.equal(planningPage.url(), targetUrl);
+});
+
+test("production BrowserRuntime keeps automatic login alive through the MCP readiness probe", {
+  skip: process.platform !== "win32",
+  timeout: 60_000,
+}, async (t) => {
+  let server;
+  let runtime;
+  const jobId = randomUUID();
+  const studioRoot = path.resolve(".");
+  t.after(async () => {
+    if (runtime) await runtime.stop().catch(() => undefined);
+    server?.closeIdleConnections?.();
+    server?.closeAllConnections?.();
+    if (server?.listening) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await rm(path.join(studioRoot, "data", "jobs", jobId), { recursive: true, force: true });
+  });
+
+  let authenticated = false;
+  server = createServer((request, response) => {
+    const send = (status, body, headers = {}) => {
+      response.writeHead(status, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        ...headers,
+      });
+      response.end(body);
+    };
+    if (request.method === "GET" && request.url === "/app") {
+      if (!authenticated) send(303, "", { Location: "/login" });
+      else send(200, "<!doctype html><title>Target</title><h1>Target ready</h1>");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/login") {
+      send(200, '<!doctype html><title>Login</title><form method="post" action="/login"><input name="username"><input name="password" type="password"><button type="submit">Login</button></form>');
+      return;
+    }
+    if (request.method === "POST" && request.url === "/login") {
+      const chunks = [];
+      request.on("data", (chunk) => chunks.push(chunk));
+      request.on("end", () => {
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        if (form.get("username") === "automatic-user" && form.get("password") === "automatic-password") {
+          authenticated = true;
+          send(303, "", { Location: "/app" });
+        } else {
+          send(401, "invalid");
+        }
+      });
+      return;
+    }
+    send(404, "missing");
+  });
+  const port = await listen(server);
+  const origin = `http://127.0.0.1:${port}`;
+  const targetUrl = `${origin}/app`;
+  const calls = {
+    gatewayStart: [], gatewayApproval: [], gatewayTiming: [], gatewayArtifact: [],
+    gatewayArtifactFileName: "video-generation-owned.webm", gatewayQuarantine: [], gatewayStop: [],
+  };
+  runtime = new BrowserRuntime({
+    studioRoot,
+    mcpPackageDir: path.join(studioRoot, "node_modules", "@playwright", "mcp"),
+    port: 8931,
+    env: { Path: process.env.Path ?? "" },
+    readinessTimeoutMs: 10_000,
+    gatewayFactory: (options) => new FakeGateway(options, calls),
+  });
+  const originPolicy = createOriginPolicy({
+    targetOrigin: origin,
+    authOrigins: [],
+    resourceOrigins: [],
+  });
+  const job = {
+    id: jobId,
+    targetUrl,
+    originPolicy,
+    blockedOrigins: [],
+    auth: {
+      mode: "automatic",
+      loginOrigin: origin,
+      username: "automatic-user",
+      password: "automatic-password",
+      selectors: {
+        username: '[name="username"]',
+        password: '[name="password"]',
+        submit: 'button[type="submit"]',
+      },
+    },
+  };
+  await startRuntime(runtime, job);
+  await runtime.sealAuthentication(jobId);
+  assert.equal(authenticated, true);
+});
+
+test("browser bootstrap blocks redirects, subresources, OOPIFs, popups, WebSockets and service workers before attacker hit", {
+  skip: process.platform !== "win32",
+  timeout: 45_000,
+}, async (t) => {
+  let attacker;
+  let approved;
+  let auth;
+  let resource;
+  let context;
+  let profile;
+  let restoreBootstrap;
+  t.after(async () => {
+    restoreBootstrap?.();
+    if (context) await context.close().catch(() => undefined);
+    for (const server of [approved, auth, attacker, resource]) {
       server?.closeIdleConnections?.();
       server?.closeAllConnections?.();
       if (server?.listening) {
@@ -1264,12 +2532,35 @@ test("browser bootstrap blocks redirects, subresources, OOPIFs, popups, WebSocke
   const attackerPort = await listen(attacker);
   const attackerOrigin = `http://localhost:${attackerPort}`;
 
+  let resourceHits = 0;
+  resource = createServer((_request, response) => {
+    resourceHits += 1;
+    response.end("resource");
+  });
+  const resourcePort = await listen(resource);
+  const resourceOrigin = `http://127.0.0.1:${resourcePort}`;
+
+  let authHits = 0;
+  auth = createServer((request, response) => {
+    if (request.url === "/login") authHits += 1;
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.end("auth");
+  });
+  const authPort = await listen(auth);
+  const authOrigin = `http://127.0.0.1:${authPort}`;
+
   let approvedOrigin;
   let approvedWsRedirects = 0;
   approved = createServer((request, response) => {
     if (request.url === "/redirect-same") {
       response.writeHead(302, { Location: "/ok" });
       response.end();
+    } else if (request.url === "/redirect-resource") {
+      response.writeHead(302, { Location: `${resourceOrigin}/document` });
+      response.end();
+    } else if (request.url === "/resource-image") {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<img src="${resourceOrigin}/pixel">resource image`);
     } else if (request.url === "/redirect-attacker" || request.url === "/sw.js") {
       response.writeHead(302, { Location: `${attackerOrigin}/attack` });
       response.end();
@@ -1346,14 +2637,58 @@ test("browser bootstrap blocks redirects, subresources, OOPIFs, popups, WebSocke
     viewport: { width: 800, height: 600 },
   });
   const page = context.pages()[0] ?? await context.newPage();
+  const authSealPath = path.join(profile, "auth-sealed");
+  const authAckPath = path.join(profile, "auth-armed");
+  const resourceDiagnostics = [];
+  page.on("request", (request) => {
+    if (request.url().startsWith(resourceOrigin)) {
+      resourceDiagnostics.push(["request", request.resourceType(), request.isNavigationRequest()]);
+    }
+  });
+  page.on("requestfailed", (request) => {
+    if (request.url().startsWith(resourceOrigin)) {
+      resourceDiagnostics.push(["failed", request.failure()?.errorText ?? null]);
+    }
+  });
   const { loaded, restore } = loadFreshBootstrap({
-    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([approvedOrigin]),
+    MANUAL_STUDIO_ALLOWED_ORIGINS: JSON.stringify([approvedOrigin, authOrigin, resourceOrigin]),
+    MANUAL_STUDIO_NAVIGATION_ORIGINS: JSON.stringify([approvedOrigin, authOrigin]),
+    MANUAL_STUDIO_TARGET_URL: `${approvedOrigin}/ok`,
     MANUAL_STUDIO_AUTH_MODE: "manual",
+    MANUAL_STUDIO_AUTH_SEAL_PATH: authSealPath,
   });
   restoreBootstrap = restore;
   await loaded.default({ page });
 
   assert.equal((await page.goto(`${approvedOrigin}/redirect-same`)).status(), 200);
+  assert.equal((await page.goto(`${authOrigin}/login`)).status(), 200);
+  assert.equal(authHits, 1);
+  assert.equal((await page.goto(`${approvedOrigin}/ok`)).status(), 200);
+  await writeFile(authSealPath, "manual-video-auth-sealed-v1\n", "utf8");
+  let authenticationArmed = false;
+  const authenticationDeadline = Date.now() + 10_000;
+  while (Date.now() < authenticationDeadline) {
+    try {
+      if (await readFile(authAckPath, "utf8") === "manual-video-auth-armed-v1\n") {
+        authenticationArmed = true;
+        break;
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  assert.equal(authenticationArmed, true, "manual authentication was not armed before the bounded deadline");
+  await page.goto(`${authOrigin}/login`).catch(() => undefined);
+  await page.waitForTimeout(100);
+  assert.equal(authHits, 1);
+  await page.goto(`${approvedOrigin}/resource-image`);
+  await page.waitForTimeout(100);
+  assert.equal(resourceHits, 1, JSON.stringify(resourceDiagnostics));
+  resourceHits = 0;
+  await page.goto(`${approvedOrigin}/redirect-resource`).catch(() => undefined);
+  await page.waitForTimeout(100);
+  assert.equal(resourceHits, 0);
   const connectionSnapshots = [];
   for (const route of [
     "/redirect-attacker",

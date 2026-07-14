@@ -12,6 +12,8 @@ function plan() {
     schemaVersion: "1.1",
     targetUrl: "https://example.test/dashboard",
     targetOrigin: "https://example.test",
+    authOrigins: [],
+    resourceOrigins: [],
     successCriteria: ["프로젝트 목록이 표시됨"],
     forbiddenActions: ["사용자 데이터 변경"],
     captureSettings: { width: 1920, height: 1080, fps: 30 },

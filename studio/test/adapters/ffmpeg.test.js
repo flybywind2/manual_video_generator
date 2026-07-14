@@ -57,10 +57,12 @@ test("normalization argv fixes the browser recording contract without shell quot
       args[args.indexOf("-fps_mode") + 1],
       args[args.indexOf("-c:v") + 1],
       args[args.indexOf("-crf") + 1],
+      args[args.indexOf("-g") + 1],
+      args[args.indexOf("-keyint_min") + 1],
       args[args.indexOf("-pix_fmt") + 1],
       args[args.indexOf("-movflags") + 1],
     ],
-    ["cfr", "libx264", "18", "yuv420p", "+faststart"],
+    ["cfr", "libx264", "18", "30", "30", "yuv420p", "+faststart"],
   );
   assert.equal(args.includes("-an"), true);
 });

@@ -91,6 +91,19 @@ test("compiled clips use escaped text, relative in-job media, and separate muted
   assert.doesNotMatch(html, /(?:src|href)="\.\.\//u);
 });
 
+test("fixed template applies the validated playback rate before HyperFrames discovers media", async () => {
+  const html = compileComposition({
+    template: await readFile(templatePath, "utf8"),
+    mediaPlan: manifest(),
+    projectPath: "composition",
+  });
+
+  assert.match(html, /querySelectorAll\("video\[data-playback-rate\]"\)/u);
+  assert.match(html, /element\.defaultPlaybackRate = rate/u);
+  assert.match(html, /element\.playbackRate = rate/u);
+  assert.match(html, /rate < 0\.9 \|\| rate > 1\.1/u);
+});
+
 test("composition contains only finite deterministic timing and no runtime network or randomness", async () => {
   const html = compileComposition({
     template: await readFile(templatePath, "utf8"),

@@ -1,6 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { StudioError } from "../domain/errors.js";
+import { findRecoveryAnchor } from "../domain/recovery-provenance.js";
+import {
+  createFailureDescriptor,
+  resumeFailure,
+} from "../domain/state-machine.js";
 
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -82,6 +87,7 @@ function validateDependencies({ jobStore, producer } = {}) {
     typeof jobStore?.load !== "function" ||
     typeof jobStore?.readEvents !== "function" ||
     typeof jobStore?.transition !== "function" ||
+    typeof jobStore?.compareAndTransition !== "function" ||
     producer === null ||
     typeof producer !== "object" ||
     PRODUCER_METHODS.some((method) => typeof producer[method] !== "function")
@@ -233,6 +239,108 @@ export class ProductionWorkflow {
         if (latest?.state === "rendering") {
           await this.#jobStore.transition(jobId, "RENDER_FAILED", {
             reason: "render_failed",
+            planDigest: preview.planDigest,
+            previewDigest: preview.previewDigest,
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+  }
+
+  async retryRender(
+    jobIdInput,
+    expectedPlanDigest,
+    expectedPreviewDigest,
+    options = {},
+  ) {
+    const jobId = validJobId(jobIdInput);
+    const planDigest = validDigest(expectedPlanDigest, "PLAN_DIGEST_MISMATCH");
+    const previewDigest = validDigest(expectedPreviewDigest);
+    const externalSignal = signalOption(options);
+    const [current, events] = await Promise.all([
+      this.#jobStore.load(jobId),
+      this.#jobStore.readEvents(jobId, 0),
+    ]);
+    const failure = findRecoveryAnchor(events, {
+      anchorEvent: "RENDER_FAILED",
+      currentEventSequence: current.eventSequence,
+      currentState: "failed",
+    });
+    const descriptor = createFailureDescriptor({
+      jobId,
+      eventSequence: failure?.sequence,
+      planDigest: failure?.data?.planDigest,
+      failedFrom: "rendering",
+      failedEvent: failure?.event,
+    });
+    const resumeFrom = resumeFailure(descriptor, {
+      currentState: current.state,
+      jobId,
+      eventSequence: failure?.sequence,
+      planDigest,
+      requestedResumeFrom: "rendering",
+    });
+    if (resumeFrom !== "rendering") {
+      throw productionError("PRODUCTION_RECOVERY_INVALID", "The render recovery request is invalid.");
+    }
+    const preview = await latestPreview(this.#jobStore, jobId);
+    if (
+      !sameDigest(preview.planDigest, planDigest) ||
+      !sameDigest(preview.previewDigest, previewDigest) ||
+      !sameDigest(failure?.data?.previewDigest, previewDigest)
+    ) {
+      throw productionError(
+        sameDigest(preview.planDigest, planDigest)
+          ? "PREVIEW_DIGEST_MISMATCH"
+          : "PLAN_DIGEST_MISMATCH",
+        "The approved render artifacts are no longer current.",
+      );
+    }
+
+    return this.#run(jobId, externalSignal, async (signal) => {
+      await this.#producer.verifyPreview({ jobId, job: current, preview, signal });
+      await this.#jobStore.compareAndTransition(jobId, {
+        expectedState: "failed",
+        expectedEventSequence: current.eventSequence,
+        expectedPlanDigest: planDigest,
+        eventName: "RETRY_RENDER",
+        data: {
+          planDigest,
+          previewDigest,
+          retryOfSequence: failure.sequence,
+        },
+      });
+      try {
+        const rendered = await this.#producer.render({
+          jobId,
+          job: current,
+          preview,
+          signal,
+        });
+        if (
+          rendered === null ||
+          typeof rendered !== "object" ||
+          typeof rendered.outputArtifact !== "string" ||
+          rendered.outputArtifact.length === 0
+        ) {
+          throw productionError("PRODUCTION_RENDER_INVALID", "The final render contract is invalid.");
+        }
+        const job = await this.#jobStore.transition(jobId, "RENDER_COMPLETED", {
+          outputArtifact: rendered.outputArtifact,
+          planDigest,
+          previewDigest,
+          quality: rendered.quality ?? {},
+        });
+        return Object.freeze({ state: job.state, ...rendered });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const latest = await this.#jobStore.load(jobId).catch(() => null);
+        if (latest?.state === "rendering") {
+          await this.#jobStore.transition(jobId, "RENDER_FAILED", {
+            reason: "render_failed",
+            planDigest,
+            previewDigest,
           }).catch(() => undefined);
         }
         throw error;
@@ -317,4 +425,3 @@ export class ProductionWorkflow {
     return cancelled;
   }
 }
-

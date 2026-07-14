@@ -3,10 +3,13 @@ import path from "node:path";
 const DEFAULT_PORT = 4317;
 
 export const VERSION_PINS = Object.freeze({
+  opencode: "1.4.1",
   playwrightMcp: "0.0.78",
   python: "3.13.14",
   supertonic: "1.3.1",
   hyperframes: "0.7.57",
+  ffmpeg: "8.1.1",
+  ffprobe: "8.1.1",
 });
 
 function parsePort(rawPort) {

@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 
 import {
   assertApprovedPlan,
   canonicalPlan,
   digestPlan,
+  parseStableAccessibilityLocator,
   validatePlan,
 } from "../../src/domain/plan.js";
 import { evaluateStepPolicy } from "../../src/domain/policy.js";
+
+const require = createRequire(import.meta.url);
+const { iso: playwrightIsomorphic } = require("playwright-core/lib/coreBundle");
 
 function validStep(overrides = {}) {
   const id = overrides.id ?? "step-01";
@@ -33,6 +38,8 @@ function validPlan(overrides = {}) {
     schemaVersion: "1.1",
     targetUrl: "https://example.test/dashboard",
     targetOrigin: "https://example.test",
+    authOrigins: ["https://login.example.test"],
+    resourceOrigins: ["https://cdn.example.test"],
     successCriteria: ["설정 화면이 표시됨"],
     forbiddenActions: ["사용자 데이터 변경"],
     captureSettings: {
@@ -90,6 +97,25 @@ test("plan requires an HTTP(S) target URL and matching canonical origin", () => 
     () => validatePlan(validPlan({ targetOrigin: "https://other.test" })),
     { code: "INVALID_PLAN" },
   );
+});
+
+test("plan accepts only the capture format produced by the fixed media pipeline", () => {
+  assert.deepEqual(validatePlan(validPlan()).captureSettings, {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+  });
+
+  for (const captureSettings of [
+    { width: 1280, height: 1080, fps: 30 },
+    { width: 1920, height: 720, fps: 30 },
+    { width: 1920, height: 1080, fps: 60 },
+  ]) {
+    assert.throws(
+      () => validatePlan(validPlan({ captureSettings })),
+      { code: "INVALID_PLAN" },
+    );
+  }
 });
 
 test("plan requires at least one step and caps plans at 12 executable steps", () => {
@@ -165,6 +191,8 @@ test("canonical plan is normalized and digest ignores object insertion order", (
     captureSettings: { fps: 30, height: 1080, width: 1920 },
     forbiddenActions: ["사용자 데이터 변경"],
     successCriteria: ["설정 화면이 표시됨"],
+    resourceOrigins: ["https://cdn.example.test"],
+    authOrigins: ["https://login.example.test"],
     targetOrigin: "https://example.test",
     targetUrl: "https://example.test/dashboard",
     schemaVersion: "1.1",
@@ -173,6 +201,54 @@ test("canonical plan is normalized and digest ignores object insertion order", (
   assert.deepEqual(canonicalPlan(first), canonicalPlan(reordered));
   assert.equal(digestPlan(first), digestPlan(reordered));
   assert.match(digestPlan(first), /^[a-f0-9]{64}$/u);
+});
+
+test("plan canonicalizes bounded approved origin lists and binds them into the digest", () => {
+  const canonical = canonicalPlan(validPlan({
+    authOrigins: ["https://LOGIN.example.test:443/", "http://login-b.example.test:80"],
+    resourceOrigins: ["https://static-b.example.test", "https://STATIC-a.example.test:443/"],
+  }));
+
+  assert.deepEqual(canonical.authOrigins, [
+    "http://login-b.example.test",
+    "https://login.example.test",
+  ]);
+  assert.deepEqual(canonical.resourceOrigins, [
+    "https://static-a.example.test",
+    "https://static-b.example.test",
+  ]);
+  assert.equal(Object.isFrozen(canonical.authOrigins), true);
+  assert.equal(Object.isFrozen(canonical.resourceOrigins), true);
+  assert.notEqual(
+    digestPlan(canonical),
+    digestPlan(validPlan({
+      authOrigins: ["https://login.example.test"],
+      resourceOrigins: ["https://static-a.example.test", "https://static-b.example.test"],
+    })),
+  );
+});
+
+test("plan rejects unsafe, duplicate, target, overlapping, and excessive approved origins", () => {
+  for (const override of [
+    { authOrigins: ["ftp://login.example.test"] },
+    { authOrigins: ["https://user:secret@login.example.test"] },
+    { authOrigins: ["https://login.example.test/path"] },
+    { resourceOrigins: ["https://cdn.example.test?token=secret"] },
+    { resourceOrigins: ["https://cdn.example.test#fragment"] },
+    { authOrigins: ["https://example.test"] },
+    { authOrigins: ["https://LOGIN.example.test:443", "https://login.example.test/"] },
+    {
+      authOrigins: ["https://shared.example.test"],
+      resourceOrigins: ["https://SHARED.example.test:443/"],
+    },
+    {
+      authOrigins: Array.from({ length: 17 }, (_, index) => `https://login-${index}.example.test`),
+    },
+  ]) {
+    assert.throws(() => validatePlan(validPlan(override)), {
+      code: "INVALID_PLAN",
+    });
+  }
 });
 
 test("plan binds every step to exact bounded browser calls", () => {
@@ -199,6 +275,74 @@ test("plan binds every step to exact bounded browser calls", () => {
   }
 });
 
+test("stable accessibility locators are exact, reviewable, and policy-inspected by accessible name", () => {
+  const target = 'getByRole("link", { name: "프로젝트 메뉴 열기", exact: true })';
+  assert.deepEqual(parseStableAccessibilityLocator(target), {
+    role: "link",
+    name: "프로젝트 메뉴 열기",
+    exact: true,
+  });
+  assert.deepEqual(
+    parseStableAccessibilityLocator('getByRole("link", { name: "Manual Video 프로젝트" })'),
+    { role: "link", name: "Manual Video 프로젝트", exact: false },
+  );
+  assert.equal(
+    parseStableAccessibilityLocator('getByRole("link", { name: "Manual Video 프로젝트", exact: false })'),
+    null,
+  );
+  assert.equal(parseStableAccessibilityLocator("e11"), null);
+  assert.equal(
+    parseStableAccessibilityLocator("getByRole('link', { name: '프로젝트', exact: true })"),
+    null,
+  );
+  assert.equal(
+    canonicalPlan(validPlan({
+      steps: [validStep({
+        calls: [{
+          id: "step-01.click",
+          tool: "browser_click",
+          arguments: { element: "프로젝트 메뉴 열기", target },
+        }],
+      })],
+    })).steps[0].risk,
+    "safe",
+  );
+
+  const forbiddenTarget = 'getByRole("button", { name: "프로젝트 삭제", exact: true })';
+  assert.equal(
+    canonicalPlan(validPlan({
+      forbiddenActions: ["record.delete"],
+      steps: [validStep({
+        calls: [{
+          id: "step-01.click",
+          tool: "browser_click",
+          arguments: { element: "프로젝트 삭제", target: forbiddenTarget },
+        }],
+      })],
+    })).steps[0].risk,
+    "blocked",
+  );
+});
+
+test("stable accessibility locator grammar is accepted by the pinned Playwright MCP parser", () => {
+  const exact = 'getByRole("link", { name: "프로젝트 메뉴 열기", exact: true })';
+  const partial = 'getByRole("link", { name: "Manual Video 프로젝트" })';
+  for (const target of [exact, partial]) {
+    assert.notEqual(
+      playwrightIsomorphic.locatorOrSelectorAsSelector("javascript", target, "data-testid"),
+      "",
+    );
+  }
+  assert.equal(
+    playwrightIsomorphic.locatorOrSelectorAsSelector(
+      "javascript",
+      'getByRole("link", { name: "Manual Video 프로젝트", exact: false })',
+      "data-testid",
+    ),
+    "",
+  );
+});
+
 test("call ids are globally unique and exact call arguments are approval-digested", () => {
   const second = validStep({
     id: "step-02",
@@ -219,6 +363,14 @@ test("call ids are globally unique and exact call arguments are approval-digeste
   assert.throws(
     () => canonicalPlan(validPlan({
       steps: [validStep(), { ...second, calls: [{ id: "step-01.click", tool: "browser_click", arguments: { target: "e12" } }] }],
+    })),
+    { code: "INVALID_PLAN" },
+  );
+  assert.throws(
+    () => canonicalPlan(validPlan({
+      steps: [validStep({
+        calls: [{ id: "step-01.result-dwell", tool: "browser_wait_for", arguments: { time: 2 } }],
+      })],
     })),
     { code: "INVALID_PLAN" },
   );
@@ -243,6 +395,21 @@ test("canonical plans are bounded to fit the Windows OpenCode execution command"
   });
 
   assert.throws(() => canonicalPlan(oversized), { code: "INVALID_PLAN" });
+});
+
+test("step narration is concise enough for the bounded capture dwell", () => {
+  assert.equal(
+    canonicalPlan(validPlan({
+      steps: [validStep({ narration: "가".repeat(60) })],
+    })).steps[0].narration.length,
+    60,
+  );
+  assert.throws(
+    () => canonicalPlan(validPlan({
+      steps: [validStep({ narration: "가".repeat(61) })],
+    })),
+    { code: "INVALID_PLAN" },
+  );
 });
 
 test("approved digest is required to match the exact canonical plan", () => {

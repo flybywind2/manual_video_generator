@@ -122,6 +122,108 @@ test("preview approval requires the exact current digest and verifies the artifa
   ]);
 });
 
+test("render retry after restart uses the persisted approved preview without browser recapture", async (t) => {
+  const jobId = "job-production-retry-render";
+  const store = await setup(t, jobId);
+  const calls = [];
+  let renderAttempts = 0;
+  const durableProducer = producer({
+    async narrate() {
+      calls.push("narrate");
+      return { sceneCount: 1 };
+    },
+    async compose() {
+      calls.push("compose");
+      return preview();
+    },
+    async verifyPreview({ preview: value }) {
+      calls.push(["verify", value.previewDigest]);
+    },
+    async render({ preview: value }) {
+      renderAttempts += 1;
+      calls.push(["render", value.previewDigest]);
+      if (renderAttempts === 1) throw new Error("render process killed");
+      return { outputArtifact: "final.mp4", quality: { fps: 30 } };
+    },
+  });
+  const firstProcess = new ProductionWorkflow({ jobStore: store, producer: durableProducer });
+  await firstProcess.preparePreview(jobId, {
+    report: { status: "completed", planDigest: DIGEST },
+  });
+  await assert.rejects(firstProcess.approvePreview(jobId, PREVIEW_DIGEST), /killed/u);
+
+  const failure = (await store.readEvents(jobId)).at(-1);
+  assert.equal((await store.load(jobId)).state, "failed");
+  assert.equal(failure.event, "RENDER_FAILED");
+  assert.deepEqual(failure.data, {
+    reason: "render_failed",
+    planDigest: DIGEST,
+    previewDigest: PREVIEW_DIGEST,
+  });
+
+  const restartedProcess = new ProductionWorkflow({ jobStore: store, producer: durableProducer });
+  await assert.rejects(
+    restartedProcess.retryRender(jobId, DIGEST, "c".repeat(64)),
+    { code: "PREVIEW_DIGEST_MISMATCH" },
+  );
+  assert.equal(renderAttempts, 1);
+
+  const result = await restartedProcess.retryRender(jobId, DIGEST, PREVIEW_DIGEST);
+  assert.equal(result.state, "completed");
+  assert.equal(result.outputArtifact, "final.mp4");
+  assert.deepEqual(calls, [
+    "narrate",
+    "compose",
+    ["verify", PREVIEW_DIGEST],
+    ["render", PREVIEW_DIGEST],
+    ["verify", PREVIEW_DIGEST],
+    ["render", PREVIEW_DIGEST],
+  ]);
+  assert.deepEqual(
+    (await store.readEvents(jobId)).slice(-2).map(({ event }) => event),
+    ["RETRY_RENDER", "RENDER_COMPLETED"],
+  );
+});
+
+test("render retry keeps the original failure anchor behind rejection self-events", async (t) => {
+  const jobId = "job-production-retry-rejected";
+  const store = await setup(t, jobId);
+  let renderAttempts = 0;
+  const workflow = new ProductionWorkflow({
+    jobStore: store,
+    producer: producer({
+      async render() {
+        renderAttempts += 1;
+        if (renderAttempts === 1) throw new Error("render process killed");
+        return { outputArtifact: "final.mp4", quality: { fps: 30 } };
+      },
+    }),
+  });
+  await workflow.preparePreview(jobId, {
+    report: { status: "completed", planDigest: DIGEST },
+  });
+  await assert.rejects(workflow.approvePreview(jobId, PREVIEW_DIGEST), /killed/u);
+  const failure = (await store.readEvents(jobId)).at(-1);
+  await store.transition(jobId, "OPERATION_REJECTED", {
+    code: "PRODUCTION_RECOVERY_INVALID",
+    planDigest: DIGEST,
+    retryable: false,
+  });
+  await store.transition(jobId, "OPERATION_REJECTED", {
+    code: "PRODUCTION_RECOVERY_INVALID",
+    planDigest: DIGEST,
+    retryable: false,
+  });
+  const currentSequence = (await store.load(jobId)).eventSequence;
+
+  const result = await workflow.retryRender(jobId, DIGEST, PREVIEW_DIGEST);
+
+  assert.equal(result.state, "completed");
+  const retry = (await store.readEvents(jobId)).find(({ event }) => event === "RETRY_RENDER");
+  assert.equal(retry.sequence, currentSequence + 1);
+  assert.equal(retry.data.retryOfSequence, failure.sequence);
+});
+
 test("caption edits invalidate review first, rebuild without recapture, and bind a new preview", async (t) => {
   const jobId = "job-production-3";
   const store = await setup(t, jobId);

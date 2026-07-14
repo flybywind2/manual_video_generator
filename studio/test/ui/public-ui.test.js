@@ -22,8 +22,113 @@ test("the first viewport exposes the AI Center Manual Video Studio creation flow
   assert.match(html, /id="completion-condition"/u);
   assert.match(html, /name="auth-mode"/u);
   assert.match(html, /id="credential-id"/u);
+  assert.match(html, /id="auth-origins"/u);
+  assert.match(html, /id="resource-origins"/u);
+  assert.match(html, /<link rel="icon" href="data:image\/svg\+xml,/u);
   assert.match(html, /aria-live="polite"/u);
   assert.match(html, /id="workflow"/u);
+});
+
+test("origin allowlist inputs and plan review expose separate approved authentication and resource origins", async () => {
+  const [html, javascript] = await Promise.all([source("index.html"), source("app.js")]);
+
+  assert.match(html, /id="auth-origins"[^>]*maxlength=/u);
+  assert.match(html, /id="resource-origins"[^>]*maxlength=/u);
+  assert.match(html, /id="plan-auth-origins"/u);
+  assert.match(html, /id="plan-resource-origins"/u);
+  assert.match(html, /SSO|로그인 출처/u);
+  assert.match(html, /CDN|리소스 출처/u);
+  assert.match(javascript, /planAuthOrigins\.textContent/u);
+  assert.match(javascript, /planResourceOrigins\.textContent/u);
+});
+
+test("origin allowlist form parsing canonicalizes and bounds one approved origin per line", async () => {
+  const { approvedOriginRequest } = await import("../../public/app.js");
+
+  const normalized = approvedOriginRequest({
+    targetUrl: "https://APP.example.test:443/start",
+    authText: " HTTPS://LOGIN.example.test:443/ \nhttp://login-b.example.test:80",
+    resourceText: "https://static-b.example.test\nhttps://STATIC-a.example.test:443/",
+    authMode: "manual",
+  });
+  assert.deepEqual(normalized, {
+    authOrigins: ["http://login-b.example.test", "https://login.example.test"],
+    resourceOrigins: ["https://static-a.example.test", "https://static-b.example.test"],
+  });
+  assert.equal(Object.isFrozen(normalized.authOrigins), true);
+  assert.equal(Object.isFrozen(normalized.resourceOrigins), true);
+
+  for (const input of [
+    { authText: "https://app.example.test", resourceText: "" },
+    { authText: "https://login.example.test/path", resourceText: "" },
+    { authText: "https://login.example.test\nhttps://LOGIN.example.test:443/", resourceText: "" },
+    { authText: "https://shared.example.test", resourceText: "https://SHARED.example.test:443/" },
+    {
+      authText: Array.from({ length: 17 }, (_, index) => `https://login-${index}.example.test`).join("\n"),
+      resourceText: "",
+    },
+  ]) {
+    assert.equal(approvedOriginRequest({
+      targetUrl: "https://app.example.test/start",
+      authMode: "manual",
+      ...input,
+    }), null);
+  }
+});
+
+test("automatic authentication accepts at most one credential origin while manual mode accepts many", async () => {
+  const { approvedOriginRequest } = await import("../../public/app.js");
+  const request = {
+    targetUrl: "https://app.example.test/start",
+    authText: "https://z-login.example.test\nhttps://a-login.example.test",
+    resourceText: "https://cdn.example.test",
+  };
+
+  assert.equal(approvedOriginRequest(request), null);
+  assert.deepEqual(approvedOriginRequest({ ...request, authMode: "manual" }), {
+    authOrigins: ["https://a-login.example.test", "https://z-login.example.test"],
+    resourceOrigins: ["https://cdn.example.test"],
+  });
+  assert.equal(
+    approvedOriginRequest({ ...request, authMode: "automatic" }),
+    null,
+  );
+  assert.deepEqual(approvedOriginRequest({
+    ...request,
+    authMode: "automatic",
+    authText: "https://login.example.test",
+  }), {
+    authOrigins: ["https://login.example.test"],
+    resourceOrigins: ["https://cdn.example.test"],
+  });
+});
+
+test("credential saving binds to the canonical login origin selected by the job form", async () => {
+  const { credentialOriginRequest } = await import("../../public/app.js");
+
+  assert.equal(credentialOriginRequest({
+    targetUrl: "HTTPS://APP.example.test:443/start",
+    authText: "",
+    resourceText: "https://cdn.example.test",
+  }), "https://app.example.test");
+  assert.equal(credentialOriginRequest({
+    targetUrl: "https://app.example.test/start",
+    authText: " HTTPS://LOGIN.example.test:443/ ",
+    resourceText: "",
+  }), "https://login.example.test");
+  assert.equal(credentialOriginRequest({
+    targetUrl: "https://app.example.test/start",
+    authText: "https://login-a.example.test\nhttps://login-b.example.test",
+    resourceText: "",
+  }), null);
+});
+
+test("the completed artifact action links to the produced media plan", async () => {
+  const [html, javascript] = await Promise.all([source("index.html"), source("app.js")]);
+
+  assert.match(html, /id="download-plan-link"[^>]*>미디어 계획 받기</u);
+  assert.match(javascript, /artifactPath\(memory\.jobId,\s*"media-plan\.json"\)/u);
+  assert.doesNotMatch(javascript, /artifactPath\(memory\.jobId,\s*"plan\.json"\)/u);
 });
 
 test("the workflow surface includes every review gate and final artifact action", async () => {
@@ -34,11 +139,13 @@ test("the workflow surface includes every review gate and final artifact action"
     "plan-panel",
     "execution-panel",
     "preview-panel",
+    "recovery-panel",
     "completed-panel",
     "confirm-login-button",
     "approve-plan-button",
     "execute-button",
     "approve-preview-button",
+    "retry-render-button",
     "download-video-link",
   ]) {
     assert.match(html, new RegExp(`id="${id}"`, "u"));
@@ -48,13 +155,23 @@ test("the workflow surface includes every review gate and final artifact action"
 });
 
 test("automatic login exposes an ephemeral credential save surface", async () => {
-  const html = await source("index.html");
+  const [html, javascript] = await Promise.all([source("index.html"), source("app.js")]);
 
   assert.match(html, /id="new-credential-id"/u);
   assert.match(html, /id="credential-username"[^>]*autocomplete="username"/u);
   assert.match(html, /id="credential-secret"[^>]*type="password"/u);
   assert.match(html, /id="save-credential-button"/u);
   assert.match(html, /id="credential-save-status"[^>]*role="status"/u);
+  assert.match(javascript, /const credentialOrigin = credentialOriginRequest\(\{/u);
+  assert.match(javascript, /origin:\s*\{ value: credentialOrigin \}/u);
+});
+
+test("automatic login explains the post-login target contract and same-URL manual fallback", async () => {
+  const html = await source("index.html");
+
+  assert.match(html, /id="automatic-auth-target-help"[^>]*class="field-hint"/u);
+  assert.match(html, /자동 로그인에서는 대상 웹 주소에 로그인 후 도착할 화면을 입력/u);
+  assert.match(html, /로그인 폼과 대상 주소가 같다면[^<]*직접 로그인을 사용/u);
 });
 
 test("preview review exposes an accessible digest-bound scene editor", async () => {
@@ -99,6 +216,14 @@ test("the browser module never persists or logs credentials", async () => {
   assert.doesNotMatch(javascript, /memory\s*=\s*\{[^}]*username|memory\s*=\s*\{[^}]*password/su);
 });
 
+test("background workflow rejections are visible through the authoritative SSE stream", async () => {
+  const javascript = await source("app.js");
+
+  assert.match(javascript, /"OPERATION_REJECTED"/u);
+  assert.match(javascript, /OPERATION_REJECTED:\s*"요청을 처리하지 못했습니다/u);
+  assert.match(javascript, /event\.event\s*===\s*"OPERATION_REJECTED"/u);
+});
+
 test("the API client isolates every workflow endpoint and JSON request", async () => {
   const { createStudioApi } = await import("../../public/app.js");
   const calls = [];
@@ -118,6 +243,8 @@ test("the API client isolates every workflow endpoint and JSON request", async (
     prompt: "안내",
     completionCondition: "완료 화면이 보이면 끝",
     authMode: "manual",
+    authOrigins: ["https://login.example.test"],
+    resourceOrigins: ["https://cdn.example.test"],
     voice: "F1",
   });
   await api.getJob("job-1");
@@ -125,14 +252,20 @@ test("the API client isolates every workflow endpoint and JSON request", async (
   await api.updatePlan("job-1", plan, digest);
   await api.approvePlan("job-1", digest);
   await api.execute("job-1", digest);
+  await api.reapproveExecution("job-1", digest, 17);
   await api.editMedia("job-1", {
     previewDigest: "b".repeat(64),
     sceneId: "step-01",
     captionText: "새 캡션",
   }, digest);
   await api.approvePreview("job-1", digest);
+  await api.retryRender("job-1", digest, "b".repeat(64));
   await api.cancel("job-1");
-  await api.saveCredential("team-login", { username: "operator", password: "one-use-value" });
+  await api.saveCredential("team-login", {
+    origin: "https://login.example.test",
+    username: "operator",
+    password: "one-use-value",
+  });
 
   assert.deepEqual(calls.map(({ url, init }) => [url, init.method ?? "GET"]), [
     ["/api/jobs", "POST"],
@@ -141,8 +274,10 @@ test("the API client isolates every workflow endpoint and JSON request", async (
     ["/api/jobs/job-1/plan", "PUT"],
     ["/api/jobs/job-1/plan/approve", "POST"],
     ["/api/jobs/job-1/execute", "POST"],
+    ["/api/jobs/job-1/execution/reapprove", "POST"],
     ["/api/jobs/job-1/media-plan", "PUT"],
     ["/api/jobs/job-1/preview/approve", "POST"],
+    ["/api/jobs/job-1/retry", "POST"],
     ["/api/jobs/job-1/cancel", "POST"],
     ["/api/credentials/team-login", "PUT"],
   ]);
@@ -152,16 +287,27 @@ test("the API client isolates every workflow endpoint and JSON request", async (
     prompt: "안내",
     completionCondition: "완료 화면이 보이면 끝",
     authMode: "manual",
+    authOrigins: ["https://login.example.test"],
+    resourceOrigins: ["https://cdn.example.test"],
     voice: "F1",
   });
-  assert.deepEqual(JSON.parse(calls[6].init.body), {
+  assert.deepEqual(JSON.parse(calls[7].init.body), {
     previewDigest: digest,
     sceneId: "step-01",
     captionText: "새 캡션",
   });
   assert.equal(calls[2].init.body, undefined);
-  assert.equal(calls[8].init.body, undefined);
+  assert.deepEqual(JSON.parse(calls[6].init.body), {
+    planDigest: digest,
+    mismatchSequence: 17,
+  });
   assert.deepEqual(JSON.parse(calls[9].init.body), {
+    planDigest: digest,
+    previewDigest: "b".repeat(64),
+  });
+  assert.equal(calls[10].init.body, undefined);
+  assert.deepEqual(JSON.parse(calls[11].init.body), {
+    origin: "https://login.example.test",
     username: "operator",
     password: "one-use-value",
   });
@@ -198,6 +344,23 @@ test("workflow event payloads are read only from exact digest-bound contracts", 
     event: "RENDER_COMPLETED",
     data: { outputArtifact: "video/final.mp4" },
   }), { outputArtifact: "video/final.mp4" });
+  assert.deepEqual(readWorkflowEvent({
+    event: "RENDER_FAILED",
+    data: {
+      reason: "interrupted_render",
+      planDigest,
+      previewDigest,
+    },
+  }), {
+    renderRecovery: { planDigest, previewDigest },
+  });
+  assert.deepEqual(readWorkflowEvent({
+    event: "EXECUTION_MISMATCH",
+    sequence: 17,
+    data: { planDigest, report: { status: "mismatch" } },
+  }), {
+    executionMismatch: { planDigest, mismatchSequence: 17 },
+  });
 
   assert.deepEqual(readWorkflowEvent({
     event: "COMPOSITION_COMPLETED",
@@ -207,6 +370,48 @@ test("workflow event payloads are read only from exact digest-bound contracts", 
     event: "RENDER_COMPLETED",
     data: { outputArtifact: "https://attacker.invalid/final.mp4" },
   }), {});
+  assert.deepEqual(readWorkflowEvent({
+    event: "RENDER_FAILED",
+    data: { planDigest, previewDigest: "not-a-digest" },
+  }), {});
+  for (const data of [
+    { sequence: 17, data: { planDigest: "not-a-digest" } },
+    { sequence: 0, data: { planDigest } },
+    { sequence: 1.5, data: { planDigest } },
+    { sequence: Number.MAX_SAFE_INTEGER + 1, data: { planDigest } },
+  ]) {
+    assert.deepEqual(readWorkflowEvent({ event: "EXECUTION_MISMATCH", ...data }), {});
+  }
+});
+
+test("manual mismatch review announces a fresh login and reexecution while automatic review stays automatic", async () => {
+  const { executionReviewView } = await import("../../public/app.js");
+  const recovery = { planDigest: "a".repeat(64), mismatchSequence: 17 };
+
+  assert.deepEqual(executionReviewView("manual", recovery), {
+    disabled: false,
+    label: "새 수동 로그인 · 다시 실행",
+    copy: "새 브라우저에서 다시 로그인한 뒤 승인된 전체 실행을 다시 녹화합니다.",
+  });
+  assert.deepEqual(executionReviewView("automatic", recovery), {
+    disabled: false,
+    label: "증거 불일치 승인 · 다시 녹화",
+    copy: "저장된 로그인 참조로 새 브라우저를 시작해 승인된 전체 실행을 다시 녹화합니다.",
+  });
+  assert.equal(executionReviewView("manual", null).disabled, true);
+});
+
+test("the UI stores authoritative mismatch provenance for reapproval and exposes render retry", async () => {
+  const [html, javascript] = await Promise.all([source("index.html"), source("app.js")]);
+
+  assert.match(html, /id="recovery-panel"[^>]*hidden/u);
+  assert.match(html, /id="retry-render-button"/u);
+  assert.match(javascript, /memory\.executionMismatch\s*=\s*payload\.executionMismatch/u);
+  assert.match(javascript, /state === "needs_review"\s*\?\s*api\.reapproveExecution/u);
+  assert.match(javascript, /memory\.executionMismatch\?\.mismatchSequence/u);
+  assert.match(javascript, /"CONFIRM_REEXECUTION_LOGIN"/u);
+  assert.match(javascript, /api\.retryRender\(\s*memory\.jobId/u);
+  assert.match(javascript, /"RETRY_RENDER"/u);
 });
 
 test("reload recovery accepts only a bounded job id from the current URL", async () => {
@@ -245,6 +450,7 @@ test("credential fields are erased synchronously after the request body is creat
   const observed = [];
   const fields = {
     id: { value: "team-login" },
+    origin: { value: "https://login.example.test" },
     username: { value: "operator" },
     secret: { value: "one-use-value" },
   };
@@ -259,6 +465,7 @@ test("credential fields are erased synchronously after the request body is creat
   assert.equal(fields.username.value, "");
   assert.equal(fields.secret.value, "");
   assert.deepEqual(observed, [["team-login", {
+    origin: "https://login.example.test",
     username: "operator",
     password: "one-use-value",
   }]]);

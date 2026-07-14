@@ -1,14 +1,29 @@
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
+const { randomBytes } = require("node:crypto");
+
 const guardedContexts = new WeakMap();
+const guardedPages = new Set();
+const frameUrlsByPage = new WeakMap();
+const pendingDocumentNavigationsByPage = new WeakMap();
 const readyPages = new WeakSet();
+const mainFrameNavigationCounts = new WeakMap();
 const credentialKeys = [
   "MANUAL_STUDIO_LOGIN_USERNAME",
   "MANUAL_STUDIO_LOGIN_PASSWORD",
 ];
+const authSealContents = "manual-video-auth-sealed-v1\n";
+const authAckContents = "manual-video-auth-armed-v1\n";
 
 function fail(message) {
   throw new Error(message);
+}
+
+function pathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function canonicalOrigin(value) {
@@ -71,6 +86,8 @@ if ([...navigationOrigins].some((origin) => !allowedOrigins.has(origin))) {
   fail("Invalid browser navigation policy.");
 }
 let initialTargetUrl;
+let targetOrigin;
+let targetCompletionUrl;
 try {
   const parsedTarget = new URL(process.env.MANUAL_STUDIO_TARGET_URL);
   if (
@@ -82,8 +99,37 @@ try {
     fail("Invalid browser target URL.");
   }
   initialTargetUrl = parsedTarget.href;
+  targetOrigin = parsedTarget.origin;
+  parsedTarget.hash = "";
+  targetCompletionUrl = parsedTarget.href;
 } catch {
   fail("Invalid browser target URL.");
+}
+const authenticationOrigins = new Set(
+  [...navigationOrigins].filter((origin) => origin !== targetOrigin),
+);
+const authSealPath = process.env.MANUAL_STUDIO_AUTH_SEAL_PATH;
+if (
+  typeof authSealPath !== "string" ||
+  authSealPath.length === 0 ||
+  authSealPath.length > 4096 ||
+  authSealPath.includes("\0") ||
+  !path.isAbsolute(authSealPath) ||
+  path.basename(authSealPath) !== "auth-sealed"
+) {
+  fail("Invalid browser authentication seal path.");
+}
+const authAckPath = process.env.MANUAL_STUDIO_AUTH_ACK_PATH;
+if (
+  typeof authAckPath !== "string" ||
+  authAckPath.length === 0 ||
+  authAckPath.length > 4096 ||
+  authAckPath.includes("\0") ||
+  !path.isAbsolute(authAckPath) ||
+  path.basename(authAckPath) !== "auth-armed" ||
+  pathKey(path.dirname(authAckPath)) !== pathKey(path.dirname(authSealPath))
+) {
+  fail("Invalid browser authentication acknowledgement path.");
 }
 const authMode = process.env.MANUAL_STUDIO_AUTH_MODE;
 if (authMode !== "manual" && authMode !== "automatic") {
@@ -95,6 +141,10 @@ let loginPassword;
 let loginOrigin;
 let selectors;
 let loginCompleted = false;
+let credentialSubmitted = false;
+let credentialPage = null;
+let credentialSubmissionNavigation = -1;
+let credentialPageWasExactTarget = false;
 let loginInProgress = false;
 let initialNavigationClaimed = false;
 let fatalNavigationTriggered = false;
@@ -140,7 +190,187 @@ function originAllowed(urlValue, websocket = false) {
       else return false;
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (authenticationOrigins.has(parsed.origin) && authenticationSealed()) return false;
     return allowedOrigins.has(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+function markerFileIsValid(markerPath, contents) {
+  const status = fs.lstatSync(markerPath);
+  return (
+    status.isFile() &&
+    !status.isSymbolicLink() &&
+    status.nlink === 1 &&
+    status.size === Buffer.byteLength(contents) &&
+    pathKey(fs.realpathSync(markerPath)) === pathKey(markerPath) &&
+    fs.readFileSync(markerPath, "utf8") === contents
+  );
+}
+
+function authenticationSealed() {
+  if (loginCompleted) return true;
+  try {
+    markerFileIsValid(authSealPath, authSealContents);
+    return true;
+  } catch (error) {
+    return error?.code !== "ENOENT";
+  }
+}
+
+function publishAuthenticationMarker(markerPath, contents, invalidMessage) {
+  try {
+    if (markerFileIsValid(markerPath, contents)) return;
+    fail(invalidMessage);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const temporaryPath = path.join(
+    path.dirname(markerPath),
+    `.${path.basename(markerPath)}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`,
+  );
+  let descriptor;
+  let renamed = false;
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+    descriptor = fs.openSync(
+      temporaryPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollow,
+      0o600,
+    );
+    fs.writeFileSync(descriptor, contents, { encoding: "utf8" });
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    try {
+      fs.renameSync(temporaryPath, markerPath);
+      renamed = true;
+    } catch (error) {
+      if (
+        !["EEXIST", "EPERM"].includes(error?.code) ||
+        !markerFileIsValid(markerPath, contents)
+      ) {
+        throw error;
+      }
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (!renamed) {
+      try {
+        fs.unlinkSync(temporaryPath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  if (!markerFileIsValid(markerPath, contents)) fail(invalidMessage);
+}
+
+function writeAuthenticationSeal() {
+  publishAuthenticationMarker(
+    authSealPath,
+    authSealContents,
+    "Invalid browser authentication seal.",
+  );
+  loginCompleted = true;
+}
+
+function closePageFailClosed(page) {
+  void Promise.resolve()
+    .then(() => page.close({ runBeforeUnload: false }))
+    .catch(() => undefined);
+}
+
+function authenticationMarkerState(markerPath, contents) {
+  try {
+    return markerFileIsValid(markerPath, contents) ? "valid" : "invalid";
+  } catch (error) {
+    if (error?.code === "ENOENT") return "missing";
+    return "invalid";
+  }
+}
+
+function frameHasUnsafeOrigin(urlValue) {
+  try {
+    const parsed = new URL(urlValue);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    return parsed.origin !== targetOrigin;
+  } catch {
+    return false;
+  }
+}
+
+let authenticationAcknowledgementTimer;
+function checkAuthenticationAcknowledgement() {
+  const sealState = authenticationMarkerState(authSealPath, authSealContents);
+  if (sealState === "missing") return;
+  const ackState = authenticationMarkerState(authAckPath, authAckContents);
+  if (sealState !== "valid" || ackState === "invalid") {
+    for (const page of guardedPages) closePageFailClosed(page);
+    return;
+  }
+  if (ackState === "valid") {
+    clearInterval(authenticationAcknowledgementTimer);
+    authenticationAcknowledgementTimer = undefined;
+    return;
+  }
+
+  let exactTargetPages = 0;
+  let unsafePageFound = false;
+  let pendingNavigationFound = false;
+  for (const page of guardedPages) {
+    let pageUnsafe = false;
+    try {
+      const frameUrls = frameUrlsByPage.get(page);
+      const pendingDocumentNavigations = pendingDocumentNavigationsByPage.get(page);
+      if (pendingDocumentNavigations?.size) pendingNavigationFound = true;
+      let committedTopUrl;
+      try {
+        committedTopUrl = frameUrls?.get(page.mainFrame());
+      } catch {
+        committedTopUrl = undefined;
+      }
+      const currentTopUrl = page.url();
+      if (exactTargetReached(committedTopUrl) && exactTargetReached(currentTopUrl)) {
+        exactTargetPages += 1;
+      }
+      else pageUnsafe = true;
+      if (frameUrls && [...frameUrls.values()].some(frameHasUnsafeOrigin)) pageUnsafe = true;
+    } catch {
+      pageUnsafe = true;
+    }
+    if (pageUnsafe) {
+      unsafePageFound = true;
+      closePageFailClosed(page);
+    }
+  }
+  if (unsafePageFound || pendingNavigationFound || exactTargetPages === 0) return;
+  try {
+    publishAuthenticationMarker(
+      authAckPath,
+      authAckContents,
+      "Invalid browser authentication acknowledgement.",
+    );
+  } catch {
+    for (const page of guardedPages) closePageFailClosed(page);
+    return;
+  }
+  clearInterval(authenticationAcknowledgementTimer);
+  authenticationAcknowledgementTimer = undefined;
+}
+
+function ensureAuthenticationAcknowledgementMonitor() {
+  if (authenticationAcknowledgementTimer) return;
+  authenticationAcknowledgementTimer = setInterval(checkAuthenticationAcknowledgement, 25);
+  authenticationAcknowledgementTimer.unref?.();
+}
+
+function exactTargetReached(urlValue) {
+  try {
+    const parsed = new URL(urlValue);
+    parsed.hash = "";
+    return parsed.href === targetCompletionUrl;
   } catch {
     return false;
   }
@@ -149,7 +379,9 @@ function originAllowed(urlValue, websocket = false) {
 function navigationOriginAllowed(urlValue) {
   try {
     const parsed = new URL(urlValue);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && navigationOrigins.has(parsed.origin);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.origin === targetOrigin) return true;
+    return navigationOrigins.has(parsed.origin) && !authenticationSealed();
   } catch {
     return false;
   }
@@ -228,15 +460,28 @@ async function installContextGuard(context) {
     });
   }, { origins: [...navigationOrigins] });
   await context.route("**/*", async (route) => {
+    let pendingDocumentNavigations;
+    let request;
+    let navigation = false;
     try {
-      const request = route.request();
+      request = route.request();
       const owner = request.frame().page();
-      if (!readyPages.has(owner) || !originAllowed(request.url())) {
+      navigation = typeof request.isNavigationRequest === "function" &&
+        request.isNavigationRequest();
+      pendingDocumentNavigations = pendingDocumentNavigationsByPage.get(owner);
+      if (navigation) pendingDocumentNavigations?.add(request);
+      if (
+        !readyPages.has(owner) ||
+        !originAllowed(request.url()) ||
+        (navigation && !navigationOriginAllowed(request.url()))
+      ) {
+        if (navigation) pendingDocumentNavigations?.delete(request);
         await abortRoute(route);
         return;
       }
       await route.fallback();
     } catch {
+      if (navigation) pendingDocumentNavigations?.delete(request);
       await abortRoute(route);
     }
   });
@@ -261,11 +506,41 @@ async function installContextGuard(context) {
 }
 
 async function installPageGuard(context, page) {
+  guardedPages.add(page);
+  const frameUrls = new Map();
+  const pendingDocumentNavigations = new Set();
+  try {
+    const frames = typeof page.frames === "function" ? page.frames() : [page.mainFrame()];
+    for (const frame of frames) frameUrls.set(frame, frame.url());
+  } catch {
+    // The top-level page URL remains authoritative if a frame cannot be inspected.
+  }
+  frameUrlsByPage.set(page, frameUrls);
+  pendingDocumentNavigationsByPage.set(page, pendingDocumentNavigations);
+  const releaseDocumentNavigation = (request) => {
+    pendingDocumentNavigations.delete(request);
+  };
+  page.on("requestfinished", releaseDocumentNavigation);
+  page.on("requestfailed", releaseDocumentNavigation);
+  page.on("frameattached", (frame) => {
+    try {
+      frameUrls.set(frame, frame.url());
+    } catch {
+      frameUrls.set(frame, "invalid:");
+    }
+  });
+  page.on("framedetached", (frame) => frameUrls.delete(frame));
+  page.on("close", () => guardedPages.delete(page));
+  ensureAuthenticationAcknowledgementMonitor();
   const session = await context.newCDPSession(page);
   session.on("Fetch.requestPaused", (event) => {
     void (async () => {
       try {
-        if (!originAllowed(event.request?.url)) {
+        const documentRequest = event.resourceType === "Document";
+        if (
+          !originAllowed(event.request?.url) ||
+          (documentRequest && !navigationOriginAllowed(event.request?.url))
+        ) {
           await session.send("Fetch.failRequest", {
             requestId: event.requestId,
             errorReason: "BlockedByClient",
@@ -279,9 +554,12 @@ async function installPageGuard(context, page) {
             )?.value;
             let redirectAllowed = false;
             try {
-              redirectAllowed =
-                typeof location === "string" &&
-                originAllowed(new URL(location, event.request.url).href);
+              if (typeof location === "string") {
+                const destination = new URL(location, event.request.url).href;
+                redirectAllowed = documentRequest
+                  ? navigationOriginAllowed(destination)
+                  : originAllowed(destination);
+              }
             } catch {
               redirectAllowed = false;
             }
@@ -322,6 +600,24 @@ async function installPageGuard(context, page) {
   page.on("framenavigated", (frame) => {
     try {
       const url = frame.url();
+      frameUrls.set(frame, url);
+      const mainFrame = frame === page.mainFrame();
+      let navigationCount = mainFrameNavigationCounts.get(page) ?? 0;
+      if (mainFrame) {
+        navigationCount += 1;
+        mainFrameNavigationCounts.set(page, navigationCount);
+      }
+      if (
+        mainFrame &&
+        authMode === "automatic" &&
+        credentialSubmitted &&
+        credentialPage === page &&
+        !credentialPageWasExactTarget &&
+        navigationCount > credentialSubmissionNavigation &&
+        exactTargetReached(url)
+      ) {
+        writeAuthenticationSeal();
+      }
       if (
         frame === page.mainFrame() &&
         !url.startsWith("chrome-error://") &&
@@ -364,11 +660,21 @@ async function installAutomaticLogin(page) {
     let password = loginPassword;
     try {
       if (!username || !password) fail("Automatic login credentials are unavailable.");
+      credentialPage = page;
       await page.locator(selectors.username).fill(username);
       await page.locator(selectors.password).fill(password);
+      credentialSubmissionNavigation = mainFrameNavigationCounts.get(page) ?? 0;
+      credentialPageWasExactTarget = exactTargetReached(page.url());
       await page.locator(selectors.submit).click();
       used = true;
-      loginCompleted = true;
+      credentialSubmitted = true;
+      if (
+        !credentialPageWasExactTarget &&
+        (mainFrameNavigationCounts.get(page) ?? 0) > credentialSubmissionNavigation &&
+        exactTargetReached(page.url())
+      ) {
+        writeAuthenticationSeal();
+      }
       page.off("domcontentloaded", handler);
     } catch {
       used = true;
@@ -419,5 +725,12 @@ module.exports.default = async ({ page }) => {
   if (!initialNavigationClaimed) {
     initialNavigationClaimed = true;
     await page.goto(initialTargetUrl, { waitUntil: "domcontentloaded" });
+  } else if (
+    authenticationMarkerState(authSealPath, authSealContents) === "valid" &&
+    authenticationMarkerState(authAckPath, authAckContents) === "valid"
+  ) {
+    await page.goto(initialTargetUrl, { waitUntil: "domcontentloaded" });
+  } else {
+    closePageFailClosed(page);
   }
 };

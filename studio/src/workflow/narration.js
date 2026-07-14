@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { ALLOWED_SUPERTONIC_VOICES } from "../adapters/supertonic-client.js";
 import { StudioError } from "../domain/errors.js";
+import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 const VOICES = new Set(ALLOWED_SUPERTONIC_VOICES);
 const SAMPLE_RATE = 44_100;
 const SUPERTONIC_VERSION = "1.3.1";
@@ -169,7 +170,7 @@ function normalizeInputs({ plan, outputDirectory, client, voice, signal }) {
       ids.has(step.id) ||
       typeof step.narration !== "string" ||
       step.narration.trim().length < 1 ||
-      step.narration.length > 4_000
+      step.narration.length > MAX_STEP_NARRATION_CODE_UNITS
     ) {
       throw workflowError("A plan step has invalid narration metadata.", {
         code: "NARRATION_INVALID_PLAN",

@@ -8,6 +8,11 @@ import { CredentialVault } from "../../src/security/credential-vault.js";
 
 const USERNAME = "demo";
 const PASSWORD = "secret-123";
+const ORIGIN = "https://login.example.test";
+
+function credential(overrides = {}) {
+  return { origin: ORIGIN, username: USERNAME, password: PASSWORD, ...overrides };
+}
 
 async function temporaryRoot(t) {
   const root = await mkdtemp(join(tmpdir(), "manual-video-vault-"));
@@ -34,17 +39,23 @@ function fakeDpapi(calls = []) {
   };
 }
 
-test("round-trips injected DPAPI without persisting either credential value", async (t) => {
+test("round-trips a canonical origin-bound record without persisting credential plaintext", async (t) => {
   const root = await temporaryRoot(t);
   const calls = [];
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi(calls) });
 
-  await vault.save("fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("fixture", {
+    origin: "HTTPS://LOGIN.example.test:443/",
+    username: USERNAME,
+    password: PASSWORD,
+  });
   const persisted = await readFile(vault.pathFor("fixture"), "utf8");
 
   assert.equal(persisted.includes(USERNAME), false);
   assert.equal(persisted.includes(PASSWORD), false);
+  assert.equal(JSON.parse(persisted).version, 2);
   assert.deepEqual(await vault.load("fixture"), {
+    origin: ORIGIN,
     username: USERNAME,
     password: PASSWORD,
   });
@@ -73,15 +84,12 @@ test("uses real Windows CurrentUser DPAPI for a persisted round trip", async (t)
   const root = await temporaryRoot(t);
   const vault = new CredentialVault({ root });
 
-  await vault.save("real-fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("real-fixture", credential());
   const persisted = await readFile(vault.pathFor("real-fixture"), "utf8");
 
   assert.equal(persisted.includes(USERNAME), false);
   assert.equal(persisted.includes(PASSWORD), false);
-  assert.deepEqual(await vault.load("real-fixture"), {
-    username: USERNAME,
-    password: PASSWORD,
-  });
+  assert.deepEqual(await vault.load("real-fixture"), credential());
 });
 
 test("passes a constant script in arguments and plaintext only through stdin", async (t) => {
@@ -89,7 +97,7 @@ test("passes a constant script in arguments and plaintext only through stdin", a
   const calls = [];
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi(calls) });
 
-  await vault.save("fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("fixture", credential());
 
   assert.equal(calls[0].args.includes("-EncodedCommand"), true);
   assert.equal(calls[0].args.join(" ").includes(USERNAME), false);
@@ -122,7 +130,7 @@ test("rejects traversal, device names, unsafe types, and overlong names", async 
       code: "INVALID_CREDENTIAL_NAME",
     });
     await assert.rejects(
-      vault.save(name, { username: USERNAME, password: PASSWORD }),
+      vault.save(name, credential()),
       { code: "INVALID_CREDENTIAL_NAME" },
     );
   }
@@ -140,7 +148,7 @@ test("rejects invalid credential shapes without invoking getters or PowerShell",
       throw new Error("must not run");
     },
   });
-  const accessor = { password: PASSWORD };
+  const accessor = { origin: ORIGIN, password: PASSWORD };
   Object.defineProperty(accessor, "username", {
     enumerable: true,
     get() {
@@ -150,13 +158,17 @@ test("rejects invalid credential shapes without invoking getters or PowerShell",
   });
   const invalid = [
     null,
-    { username: "", password: PASSWORD },
-    { username: USERNAME, password: "" },
-    { username: USERNAME, password: PASSWORD, passwordSelector: "#password" },
-    { username: "u".repeat(257), password: PASSWORD },
-    { username: USERNAME, password: "p".repeat(4097) },
+    { username: USERNAME, password: PASSWORD },
+    credential({ origin: "ftp://login.example.test" }),
+    credential({ origin: "https://login.example.test/path" }),
+    credential({ origin: "https://user:secret@login.example.test" }),
+    credential({ username: "" }),
+    credential({ password: "" }),
+    { ...credential(), passwordSelector: "#password" },
+    credential({ username: "u".repeat(257) }),
+    credential({ password: "p".repeat(4097) }),
     accessor,
-    Object.create({ username: USERNAME, password: PASSWORD }),
+    Object.create(credential()),
   ];
 
   for (const credentials of invalid) {
@@ -180,10 +192,10 @@ test("rejects unpaired Unicode surrogates before creating the vault", async (t) 
   });
 
   for (const credentials of [
-    { username: `bad\uD800`, password: PASSWORD },
-    { username: `bad\uDC00`, password: PASSWORD },
-    { username: USERNAME, password: `bad\uD800` },
-    { username: USERNAME, password: `bad\uDC00` },
+    credential({ username: `bad\uD800` }),
+    credential({ username: `bad\uDC00` }),
+    credential({ password: `bad\uD800` }),
+    credential({ password: `bad\uDC00` }),
   ]) {
     await assert.rejects(vault.save("fixture", credentials), {
       code: "INVALID_CREDENTIALS",
@@ -197,7 +209,7 @@ test("rejects unpaired Unicode surrogates before creating the vault", async (t) 
 test("round-trips well-formed supplementary Unicode credentials", async (t) => {
   const root = await temporaryRoot(t);
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
-  const credentials = { username: "operator-😀", password: "lock-🔐" };
+  const credentials = credential({ username: "operator-😀", password: "lock-🔐" });
 
   await vault.save("emoji", credentials);
 
@@ -232,7 +244,7 @@ test("normalizes hostile option and credential reflection traps", async (t) => {
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
   for (const [index, trap] of traps.entries()) {
     const credentials = new Proxy(
-      { username: USERNAME, password: PASSWORD },
+      credential(),
       {
         [trap]() {
           throw new Error(marker);
@@ -270,7 +282,7 @@ test("normalizes hostile PowerShell result reflection traps", async (t) => {
         ),
     });
     await assert.rejects(
-      vault.save(`runner-${index}`, { username: USERNAME, password: PASSWORD }),
+      vault.save(`runner-${index}`, credential()),
       (error) => {
         assert.equal(error.code, "VAULT_ENCRYPT_FAILED");
         assert.equal(error.message, "The credential operation failed safely.");
@@ -299,7 +311,7 @@ test("rejects a relative, symbolic-link, or junction vault root", async (t) => {
   });
 
   await assert.rejects(
-    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    vault.save("fixture", credential()),
     { code: "UNSAFE_VAULT_ROOT" },
   );
   assert.deepEqual(await readdir(target), []);
@@ -322,7 +334,7 @@ test("rejects an intermediate junction before creating directories outside it", 
   });
 
   await assert.rejects(
-    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    vault.save("fixture", credential()),
     { code: "UNSAFE_VAULT_ROOT" },
   );
   assert.deepEqual(await readdir(outside), []);
@@ -331,7 +343,7 @@ test("rejects an intermediate junction before creating directories outside it", 
 test("rejects symbolic credential paths and leaves their target untouched", async (t) => {
   const root = await temporaryRoot(t);
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
-  await vault.save("fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("fixture", credential());
   const outside = join(dirname(root), "outside");
   await mkdir(outside);
   await writeFile(join(outside, "sentinel"), "outside", "utf8");
@@ -361,7 +373,7 @@ test("normalizes runner failures and never exposes child output or credentials",
   });
 
   await assert.rejects(
-    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    vault.save("fixture", credential()),
     (error) => {
       assert.equal(error.code, "VAULT_ENCRYPT_FAILED");
       assert.equal(error.message, "The credential operation failed safely.");
@@ -375,13 +387,14 @@ test("normalizes runner failures and never exposes child output or credentials",
 test("returns one safe error for corrupt, tampered, or invalid decrypted payloads", async (t) => {
   const root = await temporaryRoot(t);
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
-  await vault.save("fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("fixture", credential());
 
   for (const persisted of [
     "not-json",
-    JSON.stringify({ version: 1, ciphertext: "%%%" }),
-    JSON.stringify({ version: 2, ciphertext: "AAAA" }),
-    JSON.stringify({ version: 1, ciphertext: "AAAA", extra: true }),
+    JSON.stringify({ version: 1, ciphertext: "AAAA" }),
+    JSON.stringify({ version: 2, ciphertext: "%%%" }),
+    JSON.stringify({ version: 3, ciphertext: "AAAA" }),
+    JSON.stringify({ version: 2, ciphertext: "AAAA", extra: true }),
   ]) {
     await writeFile(vault.pathFor("fixture"), persisted, "utf8");
     await assert.rejects(vault.load("fixture"), {
@@ -400,6 +413,7 @@ test("returns one safe error for corrupt, tampered, or invalid decrypted payload
       return {
         exitCode: 0,
         stdout: JSON.stringify({
+          origin: ORIGIN,
           username: USERNAME,
           password: PASSWORD,
           passwordSelector: "#password",
@@ -409,6 +423,7 @@ test("returns one safe error for corrupt, tampered, or invalid decrypted payload
     },
   });
   await invalidPlaintextVault.save("fixture", {
+    origin: ORIGIN,
     username: USERNAME,
     password: PASSWORD,
   });
@@ -422,7 +437,7 @@ test("publishes ciphertext atomically without leaving temporary files", async (t
   const root = await temporaryRoot(t);
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
 
-  await vault.save("fixture", { username: USERNAME, password: PASSWORD });
+  await vault.save("fixture", credential());
 
   assert.deepEqual(await readdir(root), ["fixture.dpapi"]);
 });
@@ -440,7 +455,7 @@ test("permission failure on the temporary file cannot publish a target", async (
   const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
 
   await assert.rejects(
-    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    vault.save("fixture", credential()),
     { code: "VAULT_WRITE_FAILED" },
   );
   await assert.rejects(readFile(vault.pathFor("fixture")), { code: "ENOENT" });

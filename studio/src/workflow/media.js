@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import { StudioError } from "../domain/errors.js";
+import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 import { mediaPlanDigest } from "../media/composition.js";
 
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -44,11 +45,11 @@ function dependency(value, name, code) {
   return value;
 }
 
-function editableText(value, reason) {
+function editableText(value, reason, maximum = 4_000) {
   if (
     typeof value !== "string" ||
     value.trim().length < 1 ||
-    value.length > 4_000 ||
+    value.length > maximum ||
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
   ) {
     throw workflowError(
@@ -232,7 +233,11 @@ function editRequest(options) {
   }
   return {
     narrationText: hasNarration
-      ? editableText(options.narrationText, "invalid_narration_text")
+      ? editableText(
+          options.narrationText,
+          "invalid_narration_text",
+          MAX_STEP_NARRATION_CODE_UNITS,
+        )
       : undefined,
     captionText: hasCaption
       ? editableText(options.captionText, "invalid_caption_text")

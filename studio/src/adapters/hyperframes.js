@@ -1,12 +1,10 @@
-import { randomUUID } from "node:crypto";
 import {
   lstat,
-  mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rename,
   rm,
-  rmdir,
 } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -207,8 +205,10 @@ async function verifyDirectory(path, expected, realRoot) {
 }
 
 async function createStagingOutput(realRoot) {
-  const directory = join(realRoot, `.hyperframes-stage-${randomUUID()}`);
-  await mkdir(directory, { recursive: false, mode: 0o700 });
+  // Keep this segment deliberately short. HyperFrames creates nested FFmpeg
+  // work directories beside the output and legacy Windows path limits still
+  // apply inside that dependency.
+  const directory = await mkdtemp(join(realRoot, ".hf-"));
   const entry = await lstat(directory);
   if (
     !entry.isDirectory() ||
@@ -305,7 +305,7 @@ async function publishStagedOutput(realRoot, staging, stagedEntry, output) {
   return published;
 }
 
-async function cleanupStaging(staging) {
+async function cleanupStaging(realRoot, staging) {
   const entry = await lstat(staging.directory).catch(() => null);
   if (
     !entry?.isDirectory() ||
@@ -314,8 +314,16 @@ async function cleanupStaging(staging) {
   ) {
     return;
   }
-  await rm(staging.outputPath, { force: true }).catch(() => undefined);
-  await rmdir(staging.directory).catch(() => undefined);
+  const canonical = await realpath(staging.directory).catch(() => null);
+  if (canonical === null || !strictChild(realRoot, canonical)) {
+    return;
+  }
+  await rm(staging.directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  }).catch(() => undefined);
 }
 
 function childEnvironment(source) {
@@ -653,7 +661,7 @@ export class HyperframesAdapter {
         bytes: published.size,
       });
     } finally {
-      await cleanupStaging(staging);
+      await cleanupStaging(project.realRoot, staging);
     }
   }
 }

@@ -111,6 +111,8 @@ test("POST /api/jobs validates and persists a normalized public request", async 
   const response = await createJob(baseUrl, validRequest({
     targetUrl: "HTTP://127.0.0.1:4317/fixture/login",
     prompt: "  프로젝트 메뉴를 여는 방법  ",
+    authOrigins: ["HTTPS://LOGIN.example.test:443/", "http://login-b.example.test:80"],
+    resourceOrigins: ["https://static-b.example.test", "https://STATIC-a.example.test:443/"],
   }));
   assert.equal(response.status, 201);
   assert.equal(response.headers.get("location"), "/api/jobs/job-http-create");
@@ -127,10 +129,31 @@ test("POST /api/jobs validates and persists a normalized public request", async 
       prompt: "프로젝트 메뉴를 여는 방법",
       completionCondition: "요청한 최종 화면이 보이면 완료",
       authMode: "manual",
+      authOrigins: [
+        "http://login-b.example.test",
+        "https://login.example.test",
+      ],
+      resourceOrigins: [
+        "https://static-a.example.test",
+        "https://static-b.example.test",
+      ],
       voice: "F1",
     },
   });
   assert.deepEqual(await store.load("job-http-create"), body);
+});
+
+test("POST /api/jobs defaults approved origin lists to empty canonical arrays", async (t) => {
+  const { baseUrl } = await startTestStudio(t, {
+    randomId: () => "job-empty-origins",
+  });
+
+  const response = await createJob(baseUrl);
+
+  assert.equal(response.status, 201);
+  assert.deepEqual((await response.json()).request.authOrigins, []);
+  const snapshot = await fetch(`${baseUrl}/api/jobs/job-empty-origins`).then((item) => item.json());
+  assert.deepEqual(snapshot.request.resourceOrigins, []);
 });
 
 test("POST /api/jobs accepts an opaque credential reference but never raw credentials", async (t) => {
@@ -166,8 +189,33 @@ test("POST /api/jobs rejects invalid URLs, prompts, auth modes, and credential r
     validRequest({ authMode: "automatic" }),
     validRequest({ authMode: "manual", credentialId: "unexpected" }),
     validRequest({ authMode: "automatic", credentialId: "../secret" }),
+    validRequest({
+      authMode: "automatic",
+      credentialId: "fixture-login",
+      authOrigins: [
+        "https://z-login.example.test",
+        "https://a-login.example.test",
+      ],
+    }),
     validRequest({ completionCondition: "x".repeat(2_001) }),
     validRequest({ voice: "custom-clone" }),
+    validRequest({ authOrigins: "https://login.example.test" }),
+    validRequest({ authOrigins: ["ftp://login.example.test"] }),
+    validRequest({ authOrigins: ["https://user:secret@login.example.test"] }),
+    validRequest({ authOrigins: ["https://login.example.test/path"] }),
+    validRequest({ resourceOrigins: ["https://cdn.example.test?token=secret"] }),
+    validRequest({ resourceOrigins: ["https://cdn.example.test#fragment"] }),
+    validRequest({ authOrigins: ["http://127.0.0.1:4317"] }),
+    validRequest({
+      authOrigins: ["https://LOGIN.example.test:443", "https://login.example.test/"],
+    }),
+    validRequest({
+      authOrigins: ["https://shared.example.test"],
+      resourceOrigins: ["https://SHARED.example.test:443/"],
+    }),
+    validRequest({
+      resourceOrigins: Array.from({ length: 17 }, (_, index) => `https://cdn-${index}.example.test`),
+    }),
   ];
 
   for (const [index, request] of invalidCases.entries()) {
@@ -223,6 +271,8 @@ test("GET /api/jobs/:id returns a public snapshot and maps a missing job safely"
     "prompt",
     "completionCondition",
     "authMode",
+    "authOrigins",
+    "resourceOrigins",
     "voice",
   ]);
 
@@ -308,6 +358,19 @@ test("artifact GET serves only a manifest-listed regular file", async (t) => {
   const unlisted = await fetch(`${baseUrl}/api/jobs/job-artifact/artifacts/private.txt`);
   assert.equal(unlisted.status, 404);
   assert.equal((await json(unlisted)).error.code, "ARTIFACT_NOT_FOUND");
+});
+
+test("caption artifacts are served as WebVTT", async (t) => {
+  const { baseUrl, artifacts } = await prepareArtifactJob(t, "captions.vtt");
+  await writeFile(
+    join(artifacts, "captions.vtt"),
+    "WEBVTT\n\n00:00.000 --> 00:01.000\n안내\n",
+    "utf8",
+  );
+
+  const response = await fetch(`${baseUrl}/api/jobs/job-artifact/artifacts/captions.vtt`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/vtt; charset=utf-8");
 });
 
 test("HTML artifacts can be downloaded but never execute in the studio origin", async (t) => {

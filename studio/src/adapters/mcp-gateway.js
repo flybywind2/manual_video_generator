@@ -168,15 +168,19 @@ function validateConstructor(options) {
 }
 
 function inspectStart(value) {
-  if (!isPlain(value) || Reflect.ownKeys(value).some((key) => !["jobId", "generation"].includes(key))) {
+  if (!isPlain(value) || Reflect.ownKeys(value).some((key) => !["jobId", "generation", "adoptedSessionId"].includes(key))) {
     throw new Error("start");
   }
   const jobId = dataValue(value, "jobId", true);
   const generation = dataValue(value, "generation", true);
+  const adoptedSessionId = dataValue(value, "adoptedSessionId");
   if (typeof jobId !== "string" || !JOB_ID.test(jobId) || !Number.isSafeInteger(generation) || generation < 1) {
     throw new Error("start");
   }
-  return Object.freeze({ jobId, generation });
+  if (adoptedSessionId !== undefined && (typeof adoptedSessionId !== "string" || !SESSION_ID.test(adoptedSessionId))) {
+    throw new Error("start");
+  }
+  return Object.freeze({ jobId, generation, adoptedSessionId });
 }
 
 function parseMessage(source) {
@@ -387,6 +391,73 @@ function inspectApproval(value) {
   return Object.freeze({ jobId, generation, planDigest, calls: Object.freeze(calls) });
 }
 
+function inspectTimingBinding(value) {
+  if (
+    !isPlain(value) ||
+    Reflect.ownKeys(value).length !== 3 ||
+    Reflect.ownKeys(value).some((key) => !["jobId", "generation", "planDigest"].includes(key))
+  ) {
+    throw new Error("timing binding");
+  }
+  const jobId = dataValue(value, "jobId", true);
+  const generation = dataValue(value, "generation", true);
+  const planDigest = dataValue(value, "planDigest", true);
+  if (
+    typeof jobId !== "string" ||
+    !JOB_ID.test(jobId) ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1 ||
+    typeof planDigest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(planDigest)
+  ) {
+    throw new Error("timing binding");
+  }
+  return Object.freeze({ jobId, generation, planDigest });
+}
+
+function inspectEvidenceBinding(value) {
+  if (
+    !isPlain(value) ||
+    Reflect.ownKeys(value).length !== 2 ||
+    Reflect.ownKeys(value).some((key) => !["expectedGenerationId", "expectedCallIds"].includes(key))
+  ) {
+    throw new Error("evidence binding");
+  }
+  const expectedGenerationId = dataValue(value, "expectedGenerationId", true);
+  const sourceCallIds = dataValue(value, "expectedCallIds", true);
+  const arrayKeys = Array.isArray(sourceCallIds) ? Reflect.ownKeys(sourceCallIds) : [];
+  if (
+    !Number.isSafeInteger(expectedGenerationId) ||
+    expectedGenerationId < 1 ||
+    !Array.isArray(sourceCallIds) ||
+    Object.getPrototypeOf(sourceCallIds) !== Array.prototype ||
+    sourceCallIds.length > 512 ||
+    arrayKeys.length !== sourceCallIds.length + 1 ||
+    arrayKeys.some((key) => key !== "length" && (typeof key !== "string" || !/^(?:0|[1-9]\d*)$/u.test(key)))
+  ) {
+    throw new Error("evidence binding");
+  }
+  const ids = new Set();
+  const expectedCallIds = sourceCallIds.map((_source, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(sourceCallIds, String(index));
+    const id = descriptor?.value;
+    if (
+      !descriptor?.enumerable ||
+      typeof id !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u.test(id) ||
+      ids.has(id)
+    ) {
+      throw new Error("evidence call id");
+    }
+    ids.add(id);
+    return id;
+  });
+  return Object.freeze({
+    expectedGenerationId,
+    expectedCallIds: Object.freeze(expectedCallIds),
+  });
+}
+
 async function readBoundedBody(request) {
   const chunks = [];
   let bytes = 0;
@@ -497,6 +568,76 @@ function validateToolResponse(chunks, contentType, expectedId) {
   if (!isPlain(result) || dataValue(result, "isError") === true) {
     throw new PolicyViolation("TOOL_CALL_FAILED", expectedId);
   }
+  return result;
+}
+
+function recordingArtifactFileName(result, expectedId) {
+  try {
+    const content = dataValue(result, "content", true);
+    if (
+      !Array.isArray(content) ||
+      Object.getPrototypeOf(content) !== Array.prototype ||
+      content.length !== 1 ||
+      Reflect.ownKeys(content).length !== 2
+    ) {
+      throw new Error("content");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(content, "0");
+    const item = descriptor?.value;
+    if (
+      !descriptor?.enumerable ||
+      !isPlain(item) ||
+      Reflect.ownKeys(item).length !== 2 ||
+      Reflect.ownKeys(item).some((key) => !["type", "text"].includes(key)) ||
+      dataValue(item, "type", true) !== "text"
+    ) {
+      throw new Error("content item");
+    }
+    const text = dataValue(item, "text", true);
+    if (typeof text !== "string") throw new Error("text");
+    const matches = [...text.matchAll(/^- \[Video\]\(\.\/([A-Za-z0-9][A-Za-z0-9._-]{0,199}\.webm)\)$/gmu)];
+    if (matches.length !== 1) throw new Error("video links");
+    return matches[0][1];
+  } catch {
+    throw new PolicyViolation("RECORDING_ARTIFACT_INVALID", expectedId);
+  }
+}
+
+function evidenceArtifactFileName(result, expectedId) {
+  try {
+    const content = dataValue(result, "content", true);
+    if (
+      !Array.isArray(content) ||
+      Object.getPrototypeOf(content) !== Array.prototype ||
+      content.length !== 1 ||
+      Reflect.ownKeys(content).length !== 2
+    ) {
+      throw new Error("content");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(content, "0");
+    const item = descriptor?.value;
+    if (
+      !descriptor?.enumerable ||
+      !isPlain(item) ||
+      Reflect.ownKeys(item).length !== 2 ||
+      Reflect.ownKeys(item).some((key) => !["type", "text"].includes(key)) ||
+      dataValue(item, "type", true) !== "text"
+    ) {
+      throw new Error("content item");
+    }
+    const text = dataValue(item, "text", true);
+    if (typeof text !== "string") throw new Error("text");
+    const screenshotLines = text
+      .replace(/\r\n?/gu, "\n")
+      .split("\n")
+      .filter((line) => line.includes("[Screenshot"));
+    if (screenshotLines.length !== 1) throw new Error("screenshot links");
+    const match = /^- \[Screenshot of viewport\]\(\.\/([A-Za-z0-9][A-Za-z0-9._-]{0,199}\.(?:png|jpe?g))\)$/u.exec(screenshotLines[0]);
+    if (!match) throw new Error("screenshot link");
+    return match[1];
+  } catch {
+    throw new PolicyViolation("EVIDENCE_ARTIFACT_INVALID", expectedId);
+  }
 }
 
 export class McpGateway {
@@ -508,6 +649,7 @@ export class McpGateway {
   #lifecycle = null;
   #phase = "stopped";
   #sessions = new Map();
+  #executorSessionId = null;
   #pendingInitializations = new Set();
   #sockets = new Set();
   #upstreamRequests = new Set();
@@ -515,6 +657,10 @@ export class McpGateway {
   #planningCalls = 0;
   #approval = null;
   #approvalIndex = 0;
+  #executionTiming = [];
+  #recordingArtifact = null;
+  #evidenceArtifacts = [];
+  #lastTimingMs = 0;
   #fatalTriggered = false;
   #stopPromise = null;
 
@@ -554,10 +700,18 @@ export class McpGateway {
     this.#lifecycle = Object.freeze({});
     this.#phase = "planning";
     this.#sessions.clear();
+    this.#executorSessionId = start.adoptedSessionId ?? null;
+    if (start.adoptedSessionId !== undefined) {
+      this.#sessions.set(start.adoptedSessionId, Object.freeze({ generation: start.generation }));
+    }
     this.#pendingInitializations.clear();
     this.#planningCalls = 0;
     this.#approval = null;
     this.#approvalIndex = 0;
+    this.#executionTiming = [];
+    this.#recordingArtifact = null;
+    this.#evidenceArtifacts = [];
+    this.#lastTimingMs = 0;
     this.#fatalTriggered = false;
     const server = createServer((request, response) => {
       void this.#handle(request, response);
@@ -603,6 +757,10 @@ export class McpGateway {
       this.#enterQuarantine("INVALID_APPROVAL");
       throw gatewayError("INVALID_MCP_GATEWAY_APPROVAL", "The MCP gateway approval is invalid.");
     }
+    if (this.#executorSessionId === null) {
+      this.#enterQuarantine("EXECUTOR_SESSION_REQUIRED");
+      throw gatewayError("INVALID_MCP_GATEWAY_APPROVAL", "The MCP gateway approval is invalid.");
+    }
     if (
       this.#phase !== "planning" ||
       this.#inFlightTool ||
@@ -614,6 +772,10 @@ export class McpGateway {
     }
     this.#approval = approval;
     this.#approvalIndex = 0;
+    this.#executionTiming = [];
+    this.#recordingArtifact = null;
+    this.#evidenceArtifacts = [];
+    this.#lastTimingMs = 0;
     this.#phase = "execution";
     return Object.freeze({
       jobId: approval.jobId,
@@ -623,13 +785,93 @@ export class McpGateway {
     });
   }
 
+  readExecutionTiming(input) {
+    let binding;
+    try {
+      binding = inspectTimingBinding(input);
+    } catch {
+      throw gatewayError("INVALID_MCP_GATEWAY_TIMING", "The MCP execution timing request is invalid.");
+    }
+    if (
+      !this.#approval ||
+      !["execution", "execution_complete"].includes(this.#phase) ||
+      binding.jobId !== this.#jobId ||
+      binding.generation !== this.#generation ||
+      binding.planDigest !== this.#approval.planDigest
+    ) {
+      throw gatewayError("INVALID_MCP_GATEWAY_TIMING", "The MCP execution timing request is invalid.");
+    }
+    return Object.freeze({
+      schemaVersion: "1.0",
+      clock: "unix_ms",
+      jobId: binding.jobId,
+      generation: binding.generation,
+      planDigest: binding.planDigest,
+      complete:
+        this.#phase === "execution_complete" &&
+        this.#executionTiming.length === this.#approval.calls.length,
+      calls: Object.freeze([...this.#executionTiming]),
+    });
+  }
+
+  readRecordingArtifact(input) {
+    let binding;
+    try {
+      binding = inspectTimingBinding(input);
+    } catch {
+      throw gatewayError("INVALID_MCP_GATEWAY_ARTIFACT", "The MCP recording artifact request is invalid.");
+    }
+    const artifact = this.#recordingArtifact;
+    if (
+      !artifact ||
+      !this.#approval ||
+      this.#phase !== "execution_complete" ||
+      binding.jobId !== this.#jobId ||
+      binding.generation !== this.#generation ||
+      binding.planDigest !== this.#approval.planDigest ||
+      artifact.jobId !== binding.jobId ||
+      artifact.generation !== binding.generation ||
+      artifact.planDigest !== binding.planDigest
+    ) {
+      throw gatewayError("INVALID_MCP_GATEWAY_ARTIFACT", "The MCP recording artifact request is invalid.");
+    }
+    return artifact;
+  }
+
+  readEvidenceArtifacts(input) {
+    let binding;
+    try {
+      binding = inspectEvidenceBinding(input);
+    } catch {
+      throw gatewayError("INVALID_MCP_GATEWAY_EVIDENCE", "The MCP screenshot evidence request is invalid.");
+    }
+    if (
+      !this.#approval ||
+      this.#phase !== "execution_complete" ||
+      binding.expectedGenerationId !== this.#generation ||
+      binding.expectedCallIds.length !== this.#evidenceArtifacts.length ||
+      this.#evidenceArtifacts.some((artifact, index) =>
+        artifact.generation !== binding.expectedGenerationId ||
+        artifact.approvedCallId !== binding.expectedCallIds[index])
+    ) {
+      throw gatewayError("INVALID_MCP_GATEWAY_EVIDENCE", "The MCP screenshot evidence request is invalid.");
+    }
+    return Object.freeze(this.#evidenceArtifacts.map((artifact) => Object.freeze({
+      approvedCallId: artifact.approvedCallId,
+      fileName: artifact.fileName,
+    })));
+  }
+
   #enterQuarantine(reason) {
     if (this.#phase === "stopped" || this.#phase === "quarantined") return;
     const previousPhase = this.#phase;
     this.#phase = "quarantined";
     this.#sessions.clear();
+    this.#executorSessionId = null;
     this.#pendingInitializations.clear();
     this.#inFlightTool = null;
+    this.#recordingArtifact = null;
+    this.#evidenceArtifacts = [];
     for (const request of this.#upstreamRequests) request.destroy();
     if (this.#fatalTriggered) return;
     this.#fatalTriggered = true;
@@ -653,6 +895,9 @@ export class McpGateway {
   #authorize(request, parsed) {
     const sessionId = sessionHeader(request);
     if (parsed.method === "initialize") {
+      if (this.#executorSessionId !== null && this.#phase !== "planning") {
+        throw new PolicyViolation("EXECUTION_SESSION_MISMATCH", parsed.id);
+      }
       if (sessionId !== undefined) throw new PolicyViolation("INITIALIZE_WITH_SESSION", parsed.id);
       if (this.#sessions.size + this.#pendingInitializations.size >= MAX_SESSIONS) {
         throw new PolicyViolation("SESSION_LIMIT", parsed.id);
@@ -685,6 +930,7 @@ export class McpGateway {
       throw new PolicyViolation(hasFilename(argumentsValue) ? "FILENAME_NOT_ALLOWED" : "INVALID_TOOL_CALL", parsed.id);
     }
     if (ALWAYS_FORBIDDEN_TOOLS.has(name)) throw new PolicyViolation("TOOL_ALWAYS_FORBIDDEN", parsed.id);
+    let approvedCall = null;
     if (this.#phase === "planning") {
       if (!PLANNING_TOOLS.has(name) || this.#planningCalls >= MAX_PLANNING_CALLS) {
         throw new PolicyViolation("TOOL_NOT_ALLOWED_IN_PHASE", parsed.id);
@@ -693,6 +939,9 @@ export class McpGateway {
         throw new PolicyViolation("INVALID_PLANNING_ARGUMENTS", parsed.id);
       }
     } else if (this.#phase === "execution") {
+      if (this.#executorSessionId !== null && sessionId !== this.#executorSessionId) {
+        throw new PolicyViolation("EXECUTION_SESSION_MISMATCH", parsed.id);
+      }
       const expected = this.#approval?.calls[this.#approvalIndex];
       if (
         !expected ||
@@ -701,6 +950,7 @@ export class McpGateway {
       ) {
         throw new PolicyViolation("EXECUTION_CALL_MISMATCH", parsed.id);
       }
+      approvedCall = expected;
     } else {
       throw new PolicyViolation("TOOL_NOT_ALLOWED_IN_PHASE", parsed.id);
     }
@@ -708,6 +958,8 @@ export class McpGateway {
       name,
       phase: this.#phase,
       approvalIndex: this.#approvalIndex,
+      approvedCallId: approvedCall?.id ?? null,
+      startedAtMs: approvedCall === null ? null : Math.max(Date.now(), this.#lastTimingMs),
       generation: this.#generation,
       lifecycle: this.#lifecycle,
     });
@@ -893,8 +1145,19 @@ export class McpGateway {
               finish(new PolicyViolation("TOOL_CALL_FAILED", authorization.parsed?.id));
               return;
             }
+            let recordingFileName = null;
+            let evidenceFileName = null;
             try {
-              validateToolResponse(toolResponseChunks, contentType, authorization.parsed.id);
+              const result = validateToolResponse(toolResponseChunks, contentType, authorization.parsed.id);
+              if (authorization.tool.name === "browser_stop_video") {
+                recordingFileName = recordingArtifactFileName(result, authorization.parsed.id);
+              }
+              if (
+                authorization.tool.phase === "execution" &&
+                authorization.tool.name === "browser_take_screenshot"
+              ) {
+                evidenceFileName = evidenceArtifactFileName(result, authorization.parsed.id);
+              }
             } catch (error) {
               finish(error instanceof PolicyViolation ? error : new PolicyViolation("TOOL_CALL_FAILED", authorization.parsed?.id));
               return;
@@ -906,6 +1169,31 @@ export class McpGateway {
                 finish(new PolicyViolation("EXECUTION_QUEUE_DRIFT", authorization.parsed?.id));
                 return;
               }
+              const endedAtMs = Math.max(Date.now(), authorization.tool.startedAtMs + 1);
+              this.#executionTiming.push(Object.freeze({
+                id: authorization.tool.approvedCallId,
+                tool: authorization.tool.name,
+                startedAtMs: authorization.tool.startedAtMs,
+                endedAtMs,
+              }));
+              if (recordingFileName !== null) {
+                this.#recordingArtifact = Object.freeze({
+                  schemaVersion: "1.0",
+                  jobId: this.#jobId,
+                  generation: this.#generation,
+                  planDigest: this.#approval.planDigest,
+                  approvedCallId: authorization.tool.approvedCallId,
+                  fileName: recordingFileName,
+                });
+              }
+              if (evidenceFileName !== null) {
+                this.#evidenceArtifacts.push(Object.freeze({
+                  generation: this.#generation,
+                  approvedCallId: authorization.tool.approvedCallId,
+                  fileName: evidenceFileName,
+                }));
+              }
+              this.#lastTimingMs = endedAtMs;
               this.#approvalIndex += 1;
               if (this.#approvalIndex === this.#approval.calls.length) this.#phase = "execution_complete";
             }
@@ -938,10 +1226,15 @@ export class McpGateway {
       this.#phase = "stopped";
       this.#lifecycle = null;
       this.#sessions.clear();
+      this.#executorSessionId = null;
       this.#pendingInitializations.clear();
       this.#inFlightTool = null;
       this.#approval = null;
       this.#approvalIndex = 0;
+      this.#executionTiming = [];
+      this.#recordingArtifact = null;
+      this.#evidenceArtifacts = [];
+      this.#lastTimingMs = 0;
       for (const request of this.#upstreamRequests) request.destroy();
       this.#upstreamRequests.clear();
       const server = this.#server;

@@ -121,6 +121,29 @@ function isWellFormedUnicode(value) {
   return true;
 }
 
+function canonicalCredentialOrigin(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
+    throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
+  }
+  return parsed.origin;
+}
+
 function inspectCredentials(value) {
   if (
     value === null ||
@@ -133,22 +156,26 @@ function inspectCredentials(value) {
   }
   const keys = Reflect.ownKeys(value);
   if (
-    keys.length !== 2 ||
+    keys.length !== 3 ||
     keys.some(
       (key) =>
         typeof key !== "string" ||
-        (key !== "username" && key !== "password"),
+        !["origin", "username", "password"].includes(key),
     )
   ) {
     throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
   }
+  const origin = Object.getOwnPropertyDescriptor(value, "origin");
   const username = Object.getOwnPropertyDescriptor(value, "username");
   const password = Object.getOwnPropertyDescriptor(value, "password");
   if (
+    origin === undefined ||
     username === undefined ||
     password === undefined ||
+    !("value" in origin) ||
     !("value" in username) ||
     !("value" in password) ||
+    origin.enumerable !== true ||
     username.enumerable !== true ||
     password.enumerable !== true ||
     typeof username.value !== "string" ||
@@ -163,6 +190,7 @@ function inspectCredentials(value) {
     throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
   }
   return Object.freeze({
+    origin: canonicalCredentialOrigin(origin.value),
     username: username.value,
     password: password.value,
   });
@@ -190,7 +218,7 @@ function exactStoredPayload(value) {
     keys.length === 2 &&
     keys.includes("version") &&
     keys.includes("ciphertext") &&
-    value.version === 1 &&
+    value.version === 2 &&
     typeof value.ciphertext === "string" &&
     value.ciphertext.length > 0 &&
     value.ciphertext.length <= MAX_STORED_BYTES &&
@@ -567,7 +595,7 @@ export class CredentialVault {
     try {
       await verifyRoot(this.#root, false);
       handle = await open(temporary, "wx", 0o600);
-      await handle.writeFile(JSON.stringify({ version: 1, ciphertext }), "utf8");
+      await handle.writeFile(JSON.stringify({ version: 2, ciphertext }), "utf8");
       await handle.chmod(0o600);
       await handle.sync();
       await handle.close();

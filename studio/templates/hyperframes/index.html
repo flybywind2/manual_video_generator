@@ -20,5 +20,16 @@
     <main id="root" data-composition-id="@@COMPOSITION_ID@@" data-width="1920" data-height="1080" data-fps="30" data-duration="@@DURATION_SECONDS@@" data-start="0" data-no-timeline>
 @@CLIPS@@
     </main>
+    <script>
+      "use strict";
+      for (const element of document.querySelectorAll("video[data-playback-rate]")) {
+        const rate = Number(element.dataset.playbackRate);
+        if (!Number.isFinite(rate) || rate < 0.9 || rate > 1.1) {
+          throw new Error("Invalid media playback rate");
+        }
+        element.defaultPlaybackRate = rate;
+        element.playbackRate = rate;
+      }
+    </script>
   </body>
 </html>

@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+
+import { SupertonicClient } from "./adapters/supertonic-client.js";
 
 const execFileAsync = promisify(execFile);
 const SAFE_REASONS = new Set([
@@ -22,7 +24,7 @@ class RuntimeProbeError extends Error {
 }
 
 const TOOL_SPECS = Object.freeze([
-  Object.freeze({ key: "opencode", command: "opencode", expected: "installed" }),
+  Object.freeze({ key: "opencode", command: "opencode", expectedVersionKey: "opencode" }),
   Object.freeze({
     key: "playwrightMcp",
     packageName: "@playwright/mcp",
@@ -44,8 +46,8 @@ const TOOL_SPECS = Object.freeze([
     packageName: "hyperframes",
     expectedVersionKey: "hyperframes",
   }),
-  Object.freeze({ key: "ffmpeg", command: "ffmpeg", expected: "installed" }),
-  Object.freeze({ key: "ffprobe", command: "ffprobe", expected: "installed" }),
+  Object.freeze({ key: "ffmpeg", command: "ffmpeg", expectedVersionKey: "ffmpeg" }),
+  Object.freeze({ key: "ffprobe", command: "ffprobe", expectedVersionKey: "ffprobe" }),
 ]);
 
 function freezeCheck(check) {
@@ -167,6 +169,26 @@ async function defaultLocate(_tool, { config, spec, candidate, findExecutable })
     return resolvePackageBin(config, spec.packageName);
   }
 
+  if (spec.key === "supertonic") {
+    const executable = path.join(
+      config.root,
+      ".runtime",
+      "supertonic",
+      "venv",
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "supertonic.exe" : "supertonic",
+    );
+    try {
+      const entry = await lstat(executable);
+      if (entry.isFile() && !entry.isSymbolicLink()) {
+        await access(executable, fsConstants.R_OK);
+        return { executable, args: [] };
+      }
+    } catch {
+      // A global exact package remains a supported discovery fallback.
+    }
+  }
+
   const executable = await findExecutable(candidate.command);
   if (!executable) {
     return null;
@@ -196,7 +218,11 @@ async function defaultVersion(tool, executable, { config, spec, location, runCom
     return runCommand(process.execPath, [executable, "--version"]);
   }
 
-  const probeArgs = tool === "ffmpeg" || tool === "ffprobe" ? ["-version"] : ["--version"];
+  const probeArgs = tool === "ffmpeg" || tool === "ffprobe"
+    ? ["-version"]
+    : tool === "supertonic"
+      ? ["version"]
+      : ["--version"];
   return runCommand(executable, [...location.args, ...probeArgs]);
 }
 
@@ -345,6 +371,56 @@ export async function inspectRuntime({
   Object.freeze(checks);
   return Object.freeze({
     ready: Object.values(checks).every((check) => check.status === "ready"),
+    checks,
+  });
+}
+
+export async function inspectServiceHealth({
+  config,
+  inspect = inspectRuntime,
+  createSupertonicClient = (options) => new SupertonicClient(options),
+} = {}) {
+  if (!config?.versions || typeof inspect !== "function" || typeof createSupertonicClient !== "function") {
+    throw new TypeError("service health configuration is required");
+  }
+  const runtime = await inspect({ config });
+  const expected = `supertonic-3@${config.versions.supertonic}`;
+  let sidecar;
+  try {
+    const client = createSupertonicClient({
+      baseUrl: "http://127.0.0.1:7788",
+      timeoutMs: 2_000,
+    });
+    if (typeof client?.health !== "function") {
+      throw new TypeError("invalid Supertonic health client");
+    }
+    const health = await client.health();
+    if (
+      health?.status !== "ok" ||
+      health.model !== "supertonic-3" ||
+      health.version !== config.versions.supertonic ||
+      health.sampleRate !== 44_100 ||
+      !Number.isSafeInteger(health.voicesLoaded) ||
+      health.voicesLoaded < 10
+    ) {
+      throw new TypeError("invalid Supertonic health response");
+    }
+    sidecar = freezeCheck({ status: "ready", expected, actual: expected });
+  } catch (error) {
+    const unreachable = ["SUPERTONIC_UNAVAILABLE", "SUPERTONIC_TIMEOUT"].includes(error?.code);
+    sidecar = freezeCheck({
+      status: "mismatch",
+      expected,
+      actual: null,
+      reason: unreachable ? "unreachable" : "invalid_response",
+    });
+  }
+  const checks = Object.freeze({
+    ...runtime.checks,
+    supertonicService: sidecar,
+  });
+  return Object.freeze({
+    ready: runtime.ready === true && sidecar.status === "ready",
     checks,
   });
 }

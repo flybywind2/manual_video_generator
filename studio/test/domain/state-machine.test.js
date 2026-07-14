@@ -10,6 +10,7 @@ test("manual authentication reaches execution only after plan approval", () => {
     ["created", "START_AUTHENTICATION", "authenticating"],
     ["authenticating", "AUTH_REQUIRED", "awaiting_manual_login"],
     ["awaiting_manual_login", "CONFIRM_LOGIN", "planning"],
+    ["awaiting_manual_login", "CONFIRM_REEXECUTION_LOGIN", "needs_review"],
     ["planning", "PLAN_READY", "plan_review"],
     ["plan_review", "APPROVE_PLAN", "approved"],
     ["approved", "START_EXECUTION", "executing"],
@@ -95,6 +96,13 @@ test("each fallible stage has an explicit named failure event", () => {
   }
 });
 
+test("a persisted render failure resumes only through its dedicated recovery event", () => {
+  assert.equal(transition("failed", "RETRY_RENDER"), "rendering");
+  assert.throws(() => transition("failed", "APPROVE_PREVIEW"), {
+    code: "INVALID_TRANSITION",
+  });
+});
+
 test("transition table and every state map are frozen", () => {
   assert.equal(Object.isFrozen(TRANSITIONS), true);
   for (const stateTransitions of Object.values(TRANSITIONS)) {
@@ -159,6 +167,17 @@ test("every active state has an explicit cancellation event", () => {
   assert.throws(() => transition("cancelled", "START_EXECUTION"), {
     code: "INVALID_TRANSITION",
   });
+});
+
+test("every active state can persist a safe background-operation rejection", () => {
+  for (const state of Object.keys(TRANSITIONS)) {
+    if (["cancelled", "completed", "failed"].includes(state)) continue;
+    assert.equal(transition(state, "OPERATION_REJECTED"), state);
+  }
+});
+
+test("failed render recovery can persist a rejection without losing failed state", () => {
+  assert.equal(transition("failed", "OPERATION_REJECTED"), "failed");
 });
 
 test("authentication expiry returns browser-dependent states to authentication", () => {

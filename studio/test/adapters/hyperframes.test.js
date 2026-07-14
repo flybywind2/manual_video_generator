@@ -4,6 +4,7 @@ import {
   link,
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
   rm,
   stat,
@@ -12,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -166,7 +167,9 @@ test("render uses fail-closed strict flags and publishes only an existing in-job
   assert.equal(result.bytes, 3);
   const engineOutput = calls[0].args[calls[0].args.indexOf("--output") + 1];
   assert.notEqual(engineOutput, renderPath);
-  assert.match(engineOutput, /[\\/]\.hyperframes-stage-[^\\/]+[\\/]render\.mp4$/u);
+  const stagingSegment = basename(dirname(engineOutput));
+  assert.match(engineOutput, /[\\/]\.hf-[^\\/]+[\\/]render\.mp4$/u);
+  assert.equal(stagingSegment.length <= 16, true);
   assert.deepEqual(calls[0].args.slice(1), [
     "render",
     projectPath,
@@ -293,6 +296,31 @@ test("nonzero lint/check/render exits are fail-closed", async (t) => {
   await assert.rejects(adapter.lint({ jobRoot, projectPath }), { code: "HYPERFRAMES_COMMAND_FAILED" });
   await assert.rejects(adapter.check({ jobRoot, projectPath }), { code: "HYPERFRAMES_COMMAND_FAILED" });
   await assert.rejects(adapter.render({ jobRoot, projectPath, outputPath: renderPath }), { code: "HYPERFRAMES_COMMAND_FAILED" });
+});
+
+test("failed renders remove nested HyperFrames work directories from the job", async (t) => {
+  const { jobRoot, projectPath, renderPath } = await jobProject(t);
+  const adapter = new HyperframesAdapter({
+    studioRoot,
+    run: async (options) => {
+      if (options.args.includes("render")) {
+        const outputPath = options.args[options.args.indexOf("--output") + 1];
+        const nestedWork = join(dirname(outputPath), "work-render", ".filter-complex-temp");
+        await mkdir(nestedWork, { recursive: true });
+        await writeFile(join(nestedWork, "partial.txt"), "partial", "utf8");
+      }
+      return { exitCode: 2, signal: null, stdout: "", stderr: "failed", lines: [] };
+    },
+  });
+
+  await assert.rejects(
+    adapter.render({ jobRoot, projectPath, outputPath: renderPath }),
+    { code: "HYPERFRAMES_COMMAND_FAILED" },
+  );
+  assert.deepEqual(
+    (await readdir(jobRoot)).filter((name) => name.startsWith(".hf-")),
+    [],
+  );
 });
 
 test("check rejects nested warnings even when HyperFrames reports top-level ok", async (t) => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,14 +7,19 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { digestPlan } from "../../src/domain/plan.js";
-import { mediaPlanDigest } from "../../src/media/composition.js";
+import { compileExecutionCalls } from "../../src/domain/execution-calls.js";
+import { JobStore } from "../../src/jobs/job-store.js";
+import { mediaPlanDigest, writeComposition } from "../../src/media/composition.js";
 import { createMediaProducer } from "../../src/media/producer.js";
+import { ProductionWorkflow } from "../../src/workflow/production.js";
 
 function approvedPlan() {
   return {
     schemaVersion: "1.1",
     targetUrl: "https://example.test/dashboard",
     targetOrigin: "https://example.test",
+    authOrigins: [],
+    resourceOrigins: [],
     successCriteria: ["프로필 화면이 표시됨"],
     forbiddenActions: ["user-data.change"],
     captureSettings: { width: 1920, height: 1080, fps: 30 },
@@ -87,7 +93,7 @@ async function fixture(t, overrides = {}) {
   );
   t.after(() => rm(root, { recursive: true, force: true }));
 
-  const plan = approvedPlan();
+  const plan = overrides.plan ?? approvedPlan();
   const planDigest = digestPlan(plan);
   const calls = [];
   const ffmpeg = {
@@ -142,6 +148,7 @@ async function fixture(t, overrides = {}) {
     return manifest;
   };
   const clientFactoryCalls = [];
+  const compositionWrites = [];
   const createSupertonicClient = (options) => {
     clientFactoryCalls.push(options);
     return { outputRoot: options.outputRoot, health() {}, synthesize() {} };
@@ -160,6 +167,10 @@ async function fixture(t, overrides = {}) {
     supertonicBaseUrl: overrides.supertonicBaseUrl ?? "http://127.0.0.1:7788",
     createSupertonicClient,
     generateNarration,
+    writeComposition: async (options) => {
+      compositionWrites.push(options);
+      return (overrides.writeComposition ?? writeComposition)(options);
+    },
     mediaPlanDigest: overrides.mediaPlanDigest,
     previewPort: 49_317,
   });
@@ -173,6 +184,7 @@ async function fixture(t, overrides = {}) {
     calls,
     narrationCalls,
     clientFactoryCalls,
+    compositionWrites,
   };
 }
 
@@ -193,6 +205,41 @@ async function preparedPreview(context) {
   return { job, report, narration, preview };
 }
 
+async function previewReviewStore(t, jobId, planDigest, preview) {
+  const root = await mkdtemp(join(tmpdir(), "manual-producer-state-"));
+  const store = new JobStore({ root, randomId: () => jobId });
+  t.after(async () => {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await store.create({
+    targetUrl: "https://example.test/dashboard",
+    prompt: "프로필 정보를 확인합니다.",
+    completionCondition: "프로필 화면이 표시됨",
+    authMode: "manual",
+    voice: "F2",
+  });
+  await store.transition(jobId, "START_AUTHENTICATION", {});
+  await store.transition(jobId, "AUTHENTICATED", {});
+  await store.transition(jobId, "PLAN_READY", { planDigest });
+  await store.transition(jobId, "APPROVE_PLAN", { planDigest });
+  await store.transition(jobId, "START_EXECUTION", { planDigest });
+  await store.transition(jobId, "EXECUTION_COMPLETED", {
+    planDigest,
+    report: { status: "completed" },
+  });
+  await store.transition(jobId, "NARRATION_COMPLETED", {
+    planDigest,
+    sceneCount: preview.mediaPlan.scenes.length,
+  });
+  await store.transition(jobId, "COMPOSITION_COMPLETED", {
+    planDigest,
+    preview,
+    previewDigest: preview.previewDigest,
+  });
+  return store;
+}
+
 test("transforms approved browser evidence into a bound draft preview and safe artifact manifest", async (t) => {
   const context = await fixture(t);
   const { narration, preview } = await preparedPreview(context);
@@ -202,6 +249,9 @@ test("transforms approved browser evidence into a bound draft preview and safe a
   assert.equal(preview.previewDigest, mediaPlanDigest(preview.mediaPlan));
   assert.equal(preview.previewArtifact, "preview.mp4");
   assert.equal(preview.captionsArtifact, "captions.vtt");
+  assert.match(preview.previewIntegritySha256, /^[a-f0-9]{64}$/u);
+  assert.equal(Number.isSafeInteger(preview.previewIntegrityBytes), true);
+  assert.equal(preview.previewIntegrityBytes > 0, true);
   assert.deepEqual(
     preview.mediaPlan.scenes.map((scene) => ({
       id: scene.id,
@@ -242,13 +292,374 @@ test("transforms approved browser evidence into a bound draft preview and safe a
   const artifacts = join(context.jobRoot, "artifacts");
   assert.deepEqual(
     JSON.parse(await readFile(join(artifacts, "manifest.json"), "utf8")),
-    { files: ["captions.vtt", "media-plan.json", "preview.json", "preview.mp4"] },
+    {
+      files: [
+        "captions.vtt",
+        "media-plan.json",
+        "preview-integrity.json",
+        "preview.json",
+        "preview.mp4",
+      ],
+    },
   );
+  const integrity = JSON.parse(
+    await readFile(join(artifacts, "preview-integrity.json"), "utf8"),
+  );
+  assert.equal(integrity.schemaVersion, "1.0");
+  assert.equal(integrity.planDigest, context.planDigest);
+  assert.equal(integrity.previewDigest, preview.previewDigest);
+  assert.deepEqual(
+    integrity.files.map(({ path }) => path),
+    [
+      "artifacts/captions.vtt",
+      "artifacts/preview.mp4",
+      "composition/index.html",
+      "composition/media/normalized.mp4",
+      "composition/narration/scene-001.wav",
+      "composition/narration/scene-002.wav",
+    ],
+  );
+  for (const record of integrity.files) {
+    const bytes = await readFile(join(context.jobRoot, ...record.path.split("/")));
+    assert.deepEqual(Reflect.ownKeys(record), ["path", "sha256", "bytes"]);
+    assert.equal(record.bytes, bytes.length);
+    assert.equal(
+      record.sha256,
+      createHash("sha256").update(bytes).digest("hex"),
+    );
+  }
   assert.match(await readFile(join(artifacts, "captions.vtt"), "utf8"), /WEBVTT[\s\S]*상단의 프로필 메뉴/u);
   assert.equal((await lstat(join(artifacts, "preview.mp4"))).nlink, 1);
   assert.equal(
     JSON.parse(await readFile(join(artifacts, "preview.json"), "utf8")).mediaPlanDigest,
     preview.previewDigest,
+  );
+});
+
+test("trims only the leading idle portion of a long wait-only scene", async (t) => {
+  const context = await fixture(t);
+  const report = {
+    ...executionReport(context.planDigest),
+    endedAt: "2026-07-15T00:00:07.200Z",
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:01.100Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:01.200Z",
+        endedAt: "2026-07-15T00:00:07.200Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+
+  assert.deepEqual(
+    preview.mediaPlan.scenes.map((scene) => ({
+      id: scene.id,
+      start: scene.source.startMs,
+      end: scene.source.endMs,
+      duration: scene.source.durationMs,
+      playbackRate: scene.source.playbackRate,
+    })),
+    [
+      {
+        id: "open-menu",
+        start: 100,
+        end: 1_100,
+        duration: 1_000,
+        playbackRate: 1,
+      },
+      {
+        id: "review-profile",
+        start: 5_550,
+        end: 7_200,
+        duration: 1_650,
+        playbackRate: 1.1,
+      },
+    ],
+  );
+});
+
+test("uses leading idle from the following wait-only scene for longer action narration", async (t) => {
+  const context = await fixture(t, {
+    async afterNarration({ manifest }) {
+      manifest.scenes[0].durationSeconds = 3.483;
+    },
+  });
+  const report = {
+    ...executionReport(context.planDigest),
+    endedAt: "2026-07-15T00:00:13.866Z",
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:02.603Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:02.617Z",
+        endedAt: "2026-07-15T00:00:13.866Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+
+  assert.deepEqual(
+    preview.mediaPlan.scenes.map((scene) => ({
+      id: scene.id,
+      start: scene.source.startMs,
+      end: scene.source.endMs,
+      duration: scene.source.durationMs,
+      playbackRate: scene.source.playbackRate,
+      drift: scene.driftMs,
+    })),
+    [
+      {
+        id: "open-menu",
+        start: 100,
+        end: 3_235,
+        duration: 3_135,
+        playbackRate: 0.900086,
+        drift: 0,
+      },
+      {
+        id: "review-profile",
+        start: 12_216,
+        end: 13_866,
+        duration: 1_650,
+        playbackRate: 1.1,
+        drift: 500,
+      },
+    ],
+  );
+});
+
+test("rebalances consecutive actions into the leading idle of the next wait scene", async (t) => {
+  const plan = approvedPlan();
+  plan.steps = [
+    plan.steps[0],
+    {
+      ...plan.steps[0],
+      id: "select-project",
+      action: "Manual Video 프로젝트 선택",
+      expected: "Manual Video 프로젝트가 선택됨",
+      narration: "목록에서 Manual Video 프로젝트를 찾아서 클릭합니다.",
+      calls: [
+        {
+          id: "select-project.click",
+          tool: "browser_click",
+          arguments: { target: "e23" },
+        },
+      ],
+    },
+    {
+      ...plan.steps[1],
+      id: "confirm-complete",
+      action: "완료 화면 확인",
+      expected: "완료 화면이 표시됨",
+      narration: "프로젝트 완료 처리가 완료될 때까지 기다립니다.",
+      calls: [
+        {
+          id: "confirm-complete.wait",
+          tool: "browser_wait_for",
+          arguments: { time: 10, text: "완료" },
+        },
+      ],
+    },
+  ];
+  const context = await fixture(t, {
+    plan,
+    async afterNarration({ manifest }) {
+      manifest.scenes[0].durationSeconds = 3.762;
+      manifest.scenes[1].durationSeconds = 4.11;
+      manifest.scenes[2].durationSeconds = 3.971;
+    },
+  });
+  const report = {
+    ...executionReport(context.planDigest),
+    endedAt: "2026-07-15T00:00:16.447Z",
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.032Z",
+        endedAt: "2026-07-15T00:00:02.595Z",
+      },
+      {
+        id: "select-project",
+        startedAt: "2026-07-15T00:00:02.610Z",
+        endedAt: "2026-07-15T00:00:05.150Z",
+      },
+      {
+        id: "confirm-complete",
+        startedAt: "2026-07-15T00:00:05.164Z",
+        endedAt: "2026-07-15T00:00:16.412Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+
+  assert.deepEqual(
+    preview.mediaPlan.scenes.map((scene) => ({
+      id: scene.id,
+      start: scene.source.startMs,
+      end: scene.source.endMs,
+      playbackRate: scene.source.playbackRate,
+      drift: scene.driftMs,
+    })),
+    [
+      {
+        id: "open-menu",
+        start: 32,
+        end: 3_418,
+        playbackRate: 0.900053,
+        drift: 0,
+      },
+      {
+        id: "select-project",
+        start: 3_418,
+        end: 7_117,
+        playbackRate: 0.9,
+        drift: 0,
+      },
+      {
+        id: "confirm-complete",
+        start: 11_494,
+        end: 16_412,
+        playbackRate: 1.1,
+        drift: 500,
+      },
+    ],
+  );
+});
+
+test("trims the leading coordinator dwell while retaining the completed action tail", async (t) => {
+  const context = await fixture(t);
+  const report = {
+    ...executionReport(context.planDigest),
+    endedAt: "2026-07-15T00:00:09.200Z",
+    toolCalls: compileExecutionCalls(context.plan).map(({ id, tool }) => ({ id, tool })),
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:08.100Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:08.200Z",
+        endedAt: "2026-07-15T00:00:09.200Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+
+  assert.deepEqual(
+    preview.mediaPlan.scenes.map((scene) => ({
+      id: scene.id,
+      start: scene.source.startMs,
+      end: scene.source.endMs,
+      playbackRate: scene.source.playbackRate,
+      drift: scene.driftMs,
+    })),
+    [
+      {
+        id: "open-menu",
+        start: 6_450,
+        end: 8_100,
+        playbackRate: 1.1,
+        drift: 500,
+      },
+      {
+        id: "review-profile",
+        start: 8_200,
+        end: 9_200,
+        playbackRate: 1,
+        drift: 0,
+      },
+    ],
+  );
+});
+
+test("does not hide unexplained drift in a long action scene", async (t) => {
+  const context = await fixture(t);
+  const report = {
+    ...executionReport(context.planDigest),
+    endedAt: "2026-07-15T00:00:07.200Z",
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:06.100Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:06.200Z",
+        endedAt: "2026-07-15T00:00:07.200Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+
+  await assert.rejects(
+    context.producer.compose({
+      jobId: context.jobId,
+      job,
+      report,
+      narration,
+    }),
+    (error) => error?.code === "MEDIA_DRIFT_EXCEEDED",
   );
 });
 
@@ -299,7 +710,7 @@ test("verifyPreview rejects preview metadata with fields outside the exact persi
   );
 });
 
-test("verifyPreview rejects fields outside the exact five-field preview object", async (t) => {
+test("verifyPreview rejects fields outside the exact integrity-bound preview object", async (t) => {
   const context = await fixture(t);
   const { preview } = await preparedPreview(context);
 
@@ -312,20 +723,191 @@ test("verifyPreview rejects fields outside the exact five-field preview object",
   );
 });
 
-test("verifyPreview requires the exact preview-stage artifact manifest", async (t) => {
+test("verifyPreview rejects a rewritten integrity manifest even when its forged hashes match", async (t) => {
   const context = await fixture(t);
   const { preview } = await preparedPreview(context);
-  const manifestPath = join(context.jobRoot, "artifacts", "manifest.json");
+  const target = join(context.jobRoot, "artifacts", "preview.mp4");
+  const changed = Buffer.from(await readFile(target));
+  changed[0] ^= 0xff;
+  await writeFile(target, changed);
+  const integrityPath = join(context.jobRoot, "artifacts", "preview-integrity.json");
+  const integrity = JSON.parse(await readFile(integrityPath, "utf8"));
+  const record = integrity.files.find(({ path }) => path === "artifacts/preview.mp4");
+  record.sha256 = createHash("sha256").update(changed).digest("hex");
+  record.bytes = changed.length;
+  await writeFile(integrityPath, `${JSON.stringify(integrity)}\n`, "utf8");
+
+  await assert.rejects(
+    context.producer.verifyPreview({ jobId: context.jobId, preview }),
+    { code: "PRODUCER_PREVIEW_STALE" },
+  );
+});
+
+test("verifyPreview rejects mutation of every HyperFrames input and reviewed artifact", async (t) => {
+  const protectedPaths = [
+    "artifacts/preview.mp4",
+    "artifacts/captions.vtt",
+    "composition/index.html",
+    "composition/media/normalized.mp4",
+    "composition/narration/scene-001.wav",
+    "composition/narration/scene-002.wav",
+  ];
+
+  for (const relativePath of protectedPaths) {
+    await t.test(relativePath, async (subtest) => {
+      const context = await fixture(subtest);
+      const { preview } = await preparedPreview(context);
+      const target = join(context.jobRoot, ...relativePath.split("/"));
+      const bytes = await readFile(target);
+      const changed = Buffer.from(bytes);
+      changed[0] ^= 0xff;
+      await writeFile(target, changed);
+
+      await assert.rejects(
+        context.producer.verifyPreview({ jobId: context.jobId, preview }),
+        { code: "PRODUCER_PREVIEW_STALE" },
+      );
+    });
+  }
+});
+
+test("verifyPreview requires the exact immutable preview integrity manifest", async (t) => {
+  const context = await fixture(t);
+  const { preview } = await preparedPreview(context);
+  const manifestPath = join(context.jobRoot, "artifacts", "preview-integrity.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   await writeFile(
     manifestPath,
-    JSON.stringify({ files: [...manifest.files, "unreviewed.mp4"] }),
+    JSON.stringify({ ...manifest, unreviewedArtifact: "unreviewed.mp4" }),
   );
 
   await assert.rejects(
     context.producer.verifyPreview({ jobId: context.jobId, preview }),
     { code: "PRODUCER_PREVIEW_INVALID" },
   );
+});
+
+test("final rendering regenerates and checks the approved composition before HyperFrames", async (t) => {
+  const context = await fixture(t, {
+    qualityGate: {
+      async probe({ expectedDurationMs }) {
+        return { fps: 30, durationMs: expectedDurationMs };
+      },
+    },
+  });
+  const { preview } = await preparedPreview(context);
+  assert.equal(context.compositionWrites.length, 1);
+
+  await context.producer.render({ jobId: context.jobId, preview });
+
+  assert.equal(context.compositionWrites.length, 2);
+  assert.deepEqual(
+    context.calls.map(([name]) => name),
+    [
+      "normalize",
+      "lint",
+      "check",
+      "preview",
+      "render:draft",
+      "stopPreview",
+      "lint",
+      "check",
+      "render:high",
+    ],
+  );
+});
+
+test("final artifact publication never replaces the immutable preview manifest", async (t) => {
+  const context = await fixture(t, {
+    qualityGate: {
+      async probe({ expectedDurationMs }) {
+        return { fps: 30, durationMs: expectedDurationMs };
+      },
+    },
+  });
+  const { preview } = await preparedPreview(context);
+  const integrityPath = join(context.jobRoot, "artifacts", "preview-integrity.json");
+  const before = await readFile(integrityPath, "utf8");
+
+  await context.producer.render({ jobId: context.jobId, preview });
+
+  assert.equal(await readFile(integrityPath, "utf8"), before);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(context.jobRoot, "artifacts", "manifest.json"), "utf8")),
+    {
+      files: [
+        "captions.vtt",
+        "final.mp4",
+        "media-plan.json",
+        "preview-integrity.json",
+        "preview.json",
+        "preview.mp4",
+        "quality.json",
+      ],
+    },
+  );
+  await context.producer.verifyPreview({ jobId: context.jobId, preview });
+});
+
+test("a persisted preview retries after RENDER_COMPLETED storage failure without recapture or media stages", async (t) => {
+  const context = await fixture(t, {
+    qualityGate: {
+      async probe({ expectedDurationMs }) {
+        return { fps: 30, durationMs: expectedDurationMs };
+      },
+    },
+  });
+  const { preview } = await preparedPreview(context);
+  const store = await previewReviewStore(
+    t,
+    context.jobId,
+    context.planDigest,
+    preview,
+  );
+  let completionWrites = 0;
+  const persistenceBoundary = {
+    load: (...args) => store.load(...args),
+    readEvents: (...args) => store.readEvents(...args),
+    compareAndTransition: (...args) => store.compareAndTransition(...args),
+    transition: async (jobId, eventName, data) => {
+      if (eventName === "RENDER_COMPLETED") {
+        completionWrites += 1;
+        if (completionWrites === 1) {
+          throw new Error("simulated RENDER_COMPLETED persistence failure");
+        }
+      }
+      return store.transition(jobId, eventName, data);
+    },
+  };
+  const workflow = new ProductionWorkflow({
+    jobStore: persistenceBoundary,
+    producer: context.producer,
+  });
+
+  await assert.rejects(
+    workflow.approvePreview(context.jobId, preview.previewDigest),
+    /RENDER_COMPLETED persistence failure/u,
+  );
+  assert.equal((await store.load(context.jobId)).state, "failed");
+  assert.equal(
+    JSON.parse(
+      await readFile(join(context.jobRoot, "artifacts", "manifest.json"), "utf8"),
+    ).files.includes("final.mp4"),
+    true,
+  );
+
+  const result = await workflow.retryRender(
+    context.jobId,
+    context.planDigest,
+    preview.previewDigest,
+  );
+
+  assert.equal(result.state, "completed");
+  assert.equal(completionWrites, 2);
+  assert.equal(context.narrationCalls.length, 1);
+  assert.equal(context.calls.filter(([name]) => name === "normalize").length, 1);
+  assert.equal(context.calls.filter(([name]) => name === "render:draft").length, 1);
+  assert.equal(context.calls.filter(([name]) => name === "render:high").length, 2);
 });
 
 test("caption editing is a pure draft and rebuild reuses the recording and narration", async (t) => {
@@ -510,6 +1092,7 @@ test("high render passes the media duration to QualityGate and publishes the fin
         "captions.vtt",
         "final.mp4",
         "media-plan.json",
+        "preview-integrity.json",
         "preview.json",
         "preview.mp4",
         "quality.json",

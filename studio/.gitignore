@@ -1,6 +1,7 @@
 node_modules/
 data/
 .runtime/
+.playwright-cli/
 *.log
 **/.hyperframes/
 **/hyperframes-render/
