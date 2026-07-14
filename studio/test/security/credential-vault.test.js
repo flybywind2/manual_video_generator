@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -168,6 +168,83 @@ test("rejects invalid credential shapes without invoking getters or PowerShell",
   assert.equal(calls, 0);
 });
 
+test("normalizes hostile option and credential reflection traps", async (t) => {
+  const root = await temporaryRoot(t);
+  const marker = "vault-proxy-private-marker";
+  const traps = ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"];
+
+  for (const trap of traps) {
+    const options = new Proxy(
+      { root, runPowerShell: fakeDpapi() },
+      {
+        [trap]() {
+          throw new Error(marker);
+        },
+      },
+    );
+    assert.throws(
+      () => new CredentialVault(options),
+      (error) => {
+        assert.equal(error.code, "UNSAFE_VAULT_ROOT");
+        assert.equal(error.message, "The credential vault root is unsafe.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
+
+  const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
+  for (const [index, trap] of traps.entries()) {
+    const credentials = new Proxy(
+      { username: USERNAME, password: PASSWORD },
+      {
+        [trap]() {
+          throw new Error(marker);
+        },
+      },
+    );
+    await assert.rejects(
+      vault.save(`proxy-${index}`, credentials),
+      (error) => {
+        assert.equal(error.code, "INVALID_CREDENTIALS");
+        assert.equal(error.message, "The credentials are invalid.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
+});
+
+test("normalizes hostile PowerShell result reflection traps", async (t) => {
+  const root = await temporaryRoot(t);
+  const marker = "runner-proxy-private-marker";
+  const traps = ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"];
+
+  for (const [index, trap] of traps.entries()) {
+    const vault = new CredentialVault({
+      root,
+      runPowerShell: async () =>
+        new Proxy(
+          { exitCode: 0, stderr: "", stdout: "QUFBQQ==" },
+          {
+            [trap]() {
+              throw new Error(marker);
+            },
+          },
+        ),
+    });
+    await assert.rejects(
+      vault.save(`runner-${index}`, { username: USERNAME, password: PASSWORD }),
+      (error) => {
+        assert.equal(error.code, "VAULT_ENCRYPT_FAILED");
+        assert.equal(error.message, "The credential operation failed safely.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
+});
+
 test("rejects a relative, symbolic-link, or junction vault root", async (t) => {
   assert.throws(
     () => new CredentialVault({ root: "relative-vault", runPowerShell: fakeDpapi() }),
@@ -190,6 +267,29 @@ test("rejects a relative, symbolic-link, or junction vault root", async (t) => {
     { code: "UNSAFE_VAULT_ROOT" },
   );
   assert.deepEqual(await readdir(target), []);
+});
+
+test("rejects an intermediate junction before creating directories outside it", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "manual-video-vault-prefix-"));
+  t.after(() => rm(parent, { force: true, recursive: true }));
+  const outside = join(parent, "outside");
+  const linkedPrefix = join(parent, "linked-prefix");
+  await mkdir(outside);
+  await symlink(
+    outside,
+    linkedPrefix,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const vault = new CredentialVault({
+    root: join(linkedPrefix, "nested", "vault"),
+    runPowerShell: fakeDpapi(),
+  });
+
+  await assert.rejects(
+    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    { code: "UNSAFE_VAULT_ROOT" },
+  );
+  assert.deepEqual(await readdir(outside), []);
 });
 
 test("rejects symbolic credential paths and leaves their target untouched", async (t) => {
@@ -289,4 +389,24 @@ test("publishes ciphertext atomically without leaving temporary files", async (t
   await vault.save("fixture", { username: USERNAME, password: PASSWORD });
 
   assert.deepEqual(await readdir(root), ["fixture.dpapi"]);
+});
+
+test("permission failure on the temporary file cannot publish a target", async (t) => {
+  const root = await temporaryRoot(t);
+  const probePath = join(dirname(root), "file-handle-probe");
+  const probe = await open(probePath, "wx", 0o600);
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  await rm(probePath);
+  t.mock.method(fileHandlePrototype, "chmod", async () => {
+    throw new Error("injected chmod failure");
+  });
+  const vault = new CredentialVault({ root, runPowerShell: fakeDpapi() });
+
+  await assert.rejects(
+    vault.save("fixture", { username: USERNAME, password: PASSWORD }),
+    { code: "VAULT_WRITE_FAILED" },
+  );
+  await assert.rejects(readFile(vault.pathFor("fixture")), { code: "ENOENT" });
+  assert.deepEqual(await readdir(root), []);
 });

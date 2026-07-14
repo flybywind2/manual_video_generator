@@ -5,6 +5,9 @@ const ARRAY_INDEX = /^(?:0|[1-9]\d*)$/u;
 const REGEXP_META = /[\\^$.*+?()[\]{}|]/gu;
 const MAX_DEPTH = 64;
 const MAX_NODES = 10_000;
+const MAX_CONFIGURATION_ITEMS = 128;
+const MAX_CONFIGURATION_ITEM_LENGTH = 4_096;
+const MAX_CONFIGURATION_TEXT = 65_536;
 
 function invalidConfiguration() {
   throw new TypeError(INVALID_CONFIGURATION);
@@ -35,6 +38,7 @@ function readStringList(configuration, name) {
   }
 
   const result = [];
+  let textLength = 0;
   for (let index = 0; index < values.length; index += 1) {
     const item = Object.getOwnPropertyDescriptor(values, String(index));
     if (
@@ -42,6 +46,14 @@ function readStringList(configuration, name) {
       !("value" in item) ||
       item.enumerable !== true ||
       typeof item.value !== "string"
+    ) {
+      invalidConfiguration();
+    }
+    textLength += item.value.length;
+    if (
+      values.length > MAX_CONFIGURATION_ITEMS ||
+      item.value.length > MAX_CONFIGURATION_ITEM_LENGTH ||
+      textLength > MAX_CONFIGURATION_TEXT
     ) {
       invalidConfiguration();
     }
@@ -89,37 +101,26 @@ function hexCharacterPattern(character) {
   return character;
 }
 
-function encodedPattern(value) {
-  let source = "";
-  for (let index = 0; index < value.length; index += 1) {
-    if (
-      value[index] === "%" &&
-      index + 2 < value.length &&
-      /^[0-9A-Fa-f]{2}$/u.test(value.slice(index + 1, index + 3))
-    ) {
-      source += `%${hexCharacterPattern(value[index + 1])}${hexCharacterPattern(value[index + 2])}`;
-      index += 2;
-    } else {
-      source += escapeLiteral(value[index]);
-    }
-  }
-  return source;
+function percentEncodedCodePoint(character) {
+  return [...Buffer.from(character, "utf8")]
+    .map((byte) => {
+      const hex = byte.toString(16).padStart(2, "0");
+      return `%${hexCharacterPattern(hex[0])}${hexCharacterPattern(hex[1])}`;
+    })
+    .join("");
 }
 
-function encodedVariants(secret) {
-  const variants = [];
-  try {
-    variants.push(encodeURIComponent(secret));
-  } catch {
-    // A malformed UTF-16 value can still be redacted in its original form.
+function mixedEncodingPattern(secret) {
+  let source = "";
+  for (const character of secret) {
+    const alternatives = [percentEncodedCodePoint(character)];
+    if (character === " ") {
+      alternatives.push("\\+");
+    }
+    alternatives.push(escapeLiteral(character));
+    source += `(?:${[...new Set(alternatives)].join("|")})`;
   }
-  try {
-    const encoded = new URLSearchParams([["value", secret]]).toString();
-    variants.push(encoded.slice(encoded.indexOf("=") + 1));
-  } catch {
-    // Keep the original exact replacement when form encoding is unavailable.
-  }
-  return variants;
+  return source;
 }
 
 function createSecretPattern(secrets) {
@@ -128,15 +129,10 @@ function createSecretPattern(secrets) {
     if (secret.length === 0) {
       continue;
     }
-    entries.push({ literalLength: secret.length, source: escapeLiteral(secret) });
-    for (const encoded of encodedVariants(secret)) {
-      if (encoded !== secret && encoded.length > 0) {
-        entries.push({
-          literalLength: encoded.length,
-          source: encodedPattern(encoded),
-        });
-      }
-    }
+    entries.push({
+      literalLength: Array.from(secret).length,
+      source: mixedEncodingPattern(secret),
+    });
   }
 
   entries.sort((left, right) => right.literalLength - left.literalLength);
@@ -248,13 +244,19 @@ function safeClone(value, replaceText, sensitiveKeys, seen, budget, depth) {
 }
 
 export function createRedactor(configuration = {}) {
-  const { secrets, sensitiveKeys: configuredKeys } = readConfiguration(
-    configuration,
-  );
-  const pattern = createSecretPattern(secrets);
-  const sensitiveKeys = new Set(
-    configuredKeys.filter((key) => key.length > 0).map(normalizeSensitiveKey),
-  );
+  let pattern;
+  let sensitiveKeys;
+  try {
+    const { secrets, sensitiveKeys: configuredKeys } = readConfiguration(
+      configuration,
+    );
+    pattern = createSecretPattern(secrets);
+    sensitiveKeys = new Set(
+      configuredKeys.filter((key) => key.length > 0).map(normalizeSensitiveKey),
+    );
+  } catch {
+    invalidConfiguration();
+  }
   const replaceText = (input) =>
     pattern === null ? input : input.replace(pattern, REDACTED);
 

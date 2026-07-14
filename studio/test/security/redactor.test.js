@@ -31,6 +31,29 @@ test("redacts URI and form encodings with independently cased percent hex", () =
   assert.equal(redactor.text("name%2B+box%2f%40"), REDACTED);
 });
 
+test("redacts encodeURI and arbitrary raw-percent-form mixtures per character", () => {
+  const redactor = createRedactor({
+    secrets: ["name/ box?value", "name/"],
+    sensitiveKeys: [],
+  });
+
+  for (const encoded of [
+    "name/%20box?value",
+    "n%61me/%20b%6Fx?value",
+    "name%2f+box%3Fvalue",
+    "%6eame/%20box%3fvalue",
+  ]) {
+    assert.equal(redactor.text(encoded), REDACTED);
+  }
+  assert.equal(
+    redactor.text("n%61me%2f+box%3fvalue|n%61me%2F"),
+    `${REDACTED}|${REDACTED}`,
+  );
+
+  const percent = createRedactor({ secrets: ["%"], sensitiveKeys: [] });
+  assert.equal(percent.text("%25"), REDACTED);
+});
+
 test("redacts case-insensitive sensitive keys throughout nested own data", () => {
   const redactor = createRedactor({
     secrets: [],
@@ -152,4 +175,42 @@ test("unsafe redactor configuration fails without reading or disclosing values",
     );
   }
   assert.equal(getterRan, false);
+});
+
+test("normalizes every hostile configuration reflection trap", () => {
+  const marker = "redactor-proxy-private-marker";
+  const traps = ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"];
+
+  for (const trap of traps) {
+    const configuration = new Proxy(
+      { secrets: ["safe"], sensitiveKeys: [] },
+      {
+        [trap]() {
+          throw new Error(marker);
+        },
+      },
+    );
+    assert.throws(
+      () => createRedactor(configuration),
+      (error) => {
+        assert.equal(error.message, "Invalid redactor configuration.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
+
+  const hostileSecrets = new Proxy(["safe"], {
+    ownKeys() {
+      throw new Error(marker);
+    },
+  });
+  assert.throws(
+    () => createRedactor({ secrets: hostileSecrets, sensitiveKeys: [] }),
+    (error) => {
+      assert.equal(error.message, "Invalid redactor configuration.");
+      assert.equal(String(error).includes(marker), false);
+      return true;
+    },
+  );
 });

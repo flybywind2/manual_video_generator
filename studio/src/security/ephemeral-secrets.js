@@ -248,7 +248,7 @@ async function verifyRoot(runtimeRoot, { create }) {
   return Object.freeze({ exists: true, root });
 }
 
-function validateCredentials(credentials) {
+function inspectCredentials(credentials) {
   if (
     credentials === null ||
     typeof credentials !== "object" ||
@@ -304,8 +304,31 @@ function validateCredentials(credentials) {
   });
 }
 
+function validateCredentials(credentials) {
+  try {
+    return inspectCredentials(credentials);
+  } catch {
+    throw ephemeralError(
+      "INVALID_EPHEMERAL_CREDENTIALS",
+      "The ephemeral credentials are invalid.",
+    );
+  }
+}
+
 function quoteDotenv(value) {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  if (!value.includes("'")) {
+    return `'${value}'`;
+  }
+  if (!value.includes("`")) {
+    return `\`${value}\``;
+  }
+  if (!value.includes('"') && !/\\[nr]/u.test(value)) {
+    return `"${value}"`;
+  }
+  throw ephemeralError(
+    "INVALID_EPHEMERAL_CREDENTIALS",
+    "The ephemeral credentials are invalid.",
+  );
 }
 
 function serializeDotenv(credentials) {
@@ -416,21 +439,50 @@ async function createOperationDirectory(root) {
   );
 }
 
-async function removeTree(root, target, { unlinkRootSymlink }) {
+function sameIdentity(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.birthtimeMs === right.birthtimeMs
+  );
+}
+
+async function exactRegularEntry(path, snapshot) {
+  const current = await safeLstat(path);
+  if (
+    current === undefined ||
+    current.isSymbolicLink() ||
+    !current.isFile() ||
+    !sameIdentity(snapshot, current)
+  ) {
+    return false;
+  }
+  const actual = await realpath(path);
+  return canonicalPath(actual) === canonicalPath(path);
+}
+
+async function exactDirectoryEntry(path, snapshot) {
+  const current = await safeLstat(path);
+  if (
+    current === undefined ||
+    current.isSymbolicLink() ||
+    !current.isDirectory() ||
+    !sameIdentity(snapshot, current)
+  ) {
+    return false;
+  }
+  const actual = await realpath(path);
+  return canonicalPath(actual) === canonicalPath(path);
+}
+
+async function removeStrictOperationDirectory(root, target) {
   ensureContained(root, target);
   const entry = await safeLstat(target);
   if (entry === undefined) {
-    return false;
+    return "missing";
   }
-  if (entry.isSymbolicLink()) {
-    if (unlinkRootSymlink) {
-      await unlink(target);
-      return true;
-    }
-    return false;
-  }
-  if (!entry.isDirectory()) {
-    return false;
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    return "skipped";
   }
   const actual = await realpath(target);
   if (
@@ -444,55 +496,92 @@ async function removeTree(root, target, { unlinkRootSymlink }) {
     );
   }
   const names = await readdir(target);
-  for (const name of names) {
-    const child = ensureContained(root, join(target, name));
-    const childEntry = await safeLstat(child);
-    if (childEntry === undefined) {
-      continue;
+  if (names.length === 0) {
+    if (!(await exactDirectoryEntry(target, entry))) {
+      return "skipped";
     }
-    if (childEntry.isSymbolicLink()) {
-      await unlink(child);
-    } else if (childEntry.isDirectory()) {
-      await removeTree(root, child, { unlinkRootSymlink: true });
-    } else if (childEntry.isFile()) {
-      await unlink(child);
-    } else {
-      throw ephemeralError(
-        "UNSAFE_EPHEMERAL_PATH",
-        "The ephemeral secret path is unsafe.",
-      );
-    }
+    await rmdir(target);
+    return "removed";
+  }
+  if (names.length !== 1 || names[0] !== DOTENV_FILE) {
+    return "skipped";
+  }
+
+  const secretPath = ensureContained(root, join(target, DOTENV_FILE));
+  const secretEntry = await safeLstat(secretPath);
+  if (
+    secretEntry === undefined ||
+    secretEntry.isSymbolicLink() ||
+    !secretEntry.isFile() ||
+    !(await exactRegularEntry(secretPath, secretEntry))
+  ) {
+    return "skipped";
+  }
+  await unlink(secretPath);
+  if (
+    (await readdir(target)).length !== 0 ||
+    !(await exactDirectoryEntry(target, entry))
+  ) {
+    return "skipped";
   }
   await rmdir(target);
-  return true;
+  return "removed";
 }
 
-function validateOptions(options) {
+function inspectOptions(options) {
   if (
     options === null ||
     typeof options !== "object" ||
-    Array.isArray(options)
+    Array.isArray(options) ||
+    (Object.getPrototypeOf(options) !== Object.prototype &&
+      Object.getPrototypeOf(options) !== null)
   ) {
-    throw ephemeralError(
-      "INVALID_EPHEMERAL_OPTIONS",
-      "The ephemeral secret options are invalid.",
-    );
+    throw new Error("invalid options");
   }
-  const signal = options.signal;
-  const applyAcl = options.applyAcl ?? defaultApplyAcl;
+  const keys = Reflect.ownKeys(options);
+  if (
+    keys.some(
+      (key) =>
+        typeof key !== "string" ||
+        (key !== "signal" && key !== "applyAcl"),
+    )
+  ) {
+    throw new Error("invalid options");
+  }
+  const values = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      throw new Error("invalid options");
+    }
+    values[key] = descriptor.value;
+  }
+  const signal = values.signal;
+  const applyAcl = values.applyAcl ?? defaultApplyAcl;
   if (
     (signal !== undefined &&
       (typeof signal !== "object" ||
-        typeof signal.aborted !== "boolean" ||
-        typeof signal.addEventListener !== "function")) ||
+        Object.getPrototypeOf(signal) !== AbortSignal.prototype)) ||
     typeof applyAcl !== "function"
   ) {
+    throw new Error("invalid options");
+  }
+  return Object.freeze({ applyAcl, signal });
+}
+
+function validateOptions(options) {
+  try {
+    return inspectOptions(options);
+  } catch {
     throw ephemeralError(
       "INVALID_EPHEMERAL_OPTIONS",
       "The ephemeral secret options are invalid.",
     );
   }
-  return Object.freeze({ applyAcl, signal });
 }
 
 export async function withEphemeralSecrets(
@@ -502,6 +591,7 @@ export async function withEphemeralSecrets(
   options = {},
 ) {
   const safeCredentials = validateCredentials(credentials);
+  const dotenvText = serializeDotenv(safeCredentials);
   if (typeof fn !== "function") {
     throw ephemeralError(
       "INVALID_EPHEMERAL_CALLBACK",
@@ -522,7 +612,7 @@ export async function withEphemeralSecrets(
     handle = await open(secretPath, "wx", 0o600);
     await applyAcl(Object.freeze({ kind: "file", path: secretPath }));
     assertNotAborted(signal);
-    await handle.writeFile(serializeDotenv(safeCredentials), "utf8");
+    await handle.writeFile(dotenvText, "utf8");
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -532,7 +622,10 @@ export async function withEphemeralSecrets(
     await handle?.close();
     if (operation !== undefined) {
       try {
-        await removeTree(root, operation, { unlinkRootSymlink: true });
+        const outcome = await removeStrictOperationDirectory(root, operation);
+        if (outcome === "skipped") {
+          throw new Error("unsafe cleanup structure");
+        }
       } catch {
         throw ephemeralError(
           "EPHEMERAL_CLEANUP_FAILED",
@@ -562,9 +655,7 @@ export async function scavengeEphemeralSecrets(runtimeRoot) {
     ) {
       continue;
     }
-    if (
-      await removeTree(verified.root, target, { unlinkRootSymlink: false })
-    ) {
+    if ((await removeStrictOperationDirectory(verified.root, target)) === "removed") {
       removed += 1;
     }
   }

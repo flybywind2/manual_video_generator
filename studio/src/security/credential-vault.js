@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  chmod,
   lstat,
   mkdir,
   open,
@@ -10,7 +9,7 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, parse, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const CREDENTIAL_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
@@ -106,7 +105,7 @@ function validateName(name) {
   return name;
 }
 
-function validateCredentials(value) {
+function inspectCredentials(value) {
   if (
     value === null ||
     typeof value !== "object" ||
@@ -149,6 +148,14 @@ function validateCredentials(value) {
     username: username.value,
     password: password.value,
   });
+}
+
+function validateCredentials(value) {
+  try {
+    return inspectCredentials(value);
+  } catch {
+    throw vaultError("INVALID_CREDENTIALS", "The credentials are invalid.");
+  }
 }
 
 function exactStoredPayload(value) {
@@ -204,12 +211,28 @@ async function readEntry(path) {
   }
 }
 
-async function verifyRoot(root, create) {
-  let entry = await readEntry(root);
-  if (entry === undefined && create) {
-    await mkdir(root, { mode: 0o700, recursive: true });
-    entry = await readEntry(root);
+function pathPrefixes(path) {
+  const parsed = parse(path);
+  const parts = path.slice(parsed.root.length).split(/[\\/]/u).filter(Boolean);
+  const prefixes = [];
+  let current = parsed.root;
+  for (const part of parts) {
+    current = join(current, part);
+    prefixes.push(current);
   }
+  return prefixes;
+}
+
+function sameIdentity(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.birthtimeMs === right.birthtimeMs
+  );
+}
+
+async function inspectDirectoryPrefix(prefix) {
+  const entry = await readEntry(prefix);
   if (
     entry === undefined ||
     entry.isSymbolicLink() ||
@@ -217,13 +240,40 @@ async function verifyRoot(root, create) {
   ) {
     throw vaultError("UNSAFE_VAULT_ROOT", "The credential vault root is unsafe.");
   }
-  let actual;
-  try {
-    actual = await realpath(root);
-  } catch {
+  const actual = await realpath(prefix);
+  if (canonicalPath(actual) !== canonicalPath(prefix)) {
     throw vaultError("UNSAFE_VAULT_ROOT", "The credential vault root is unsafe.");
   }
-  if (canonicalPath(actual) !== canonicalPath(root)) {
+  return entry;
+}
+
+async function verifyRoot(root, create) {
+  try {
+    const inspected = [];
+    for (const prefix of pathPrefixes(root)) {
+      let entry = await readEntry(prefix);
+      if (entry === undefined) {
+        if (!create) {
+          throw vaultError(
+            "UNSAFE_VAULT_ROOT",
+            "The credential vault root is unsafe.",
+          );
+        }
+        await mkdir(prefix, { mode: 0o700 });
+      }
+      entry = await inspectDirectoryPrefix(prefix);
+      inspected.push({ entry, prefix });
+    }
+    for (const snapshot of inspected) {
+      const current = await inspectDirectoryPrefix(snapshot.prefix);
+      if (!sameIdentity(snapshot.entry, current)) {
+        throw vaultError(
+          "UNSAFE_VAULT_ROOT",
+          "The credential vault root is unsafe.",
+        );
+      }
+    }
+  } catch {
     throw vaultError("UNSAFE_VAULT_ROOT", "The credential vault root is unsafe.");
   }
 }
@@ -318,12 +368,60 @@ async function renameReplacing(source, target) {
   }
 }
 
-export class CredentialVault {
-  #root;
-  #runPowerShell;
-  #timeoutMs;
+async function syncDirectory(path) {
+  const handle = await open(path, "r");
+  try {
+    try {
+      await handle.sync();
+    } catch (error) {
+      if (process.platform !== "win32" || error?.code !== "EPERM") {
+        throw error;
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+}
 
-  constructor({ root, runPowerShell = defaultRunPowerShell, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function inspectOptions(options) {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options) ||
+    (Object.getPrototypeOf(options) !== Object.prototype &&
+      Object.getPrototypeOf(options) !== null)
+  ) {
+    throw new Error("invalid options");
+  }
+  const allowed = new Set(["root", "runPowerShell", "timeoutMs"]);
+  const keys = Reflect.ownKeys(options);
+  if (
+    keys.some((key) => typeof key !== "string" || !allowed.has(key)) ||
+    !keys.includes("root")
+  ) {
+    throw new Error("invalid options");
+  }
+  const values = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      throw new Error("invalid options");
+    }
+    values[key] = descriptor.value;
+  }
+  return values;
+}
+
+function validateOptions(options) {
+  try {
+    const values = inspectOptions(options);
+    const root = values.root;
+    const runPowerShell = values.runPowerShell ?? defaultRunPowerShell;
+    const timeoutMs = values.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (
       typeof root !== "string" ||
       !isAbsolute(root) ||
@@ -332,9 +430,60 @@ export class CredentialVault {
       timeoutMs <= 0 ||
       timeoutMs > 30_000
     ) {
-      throw vaultError("UNSAFE_VAULT_ROOT", "The credential vault root is unsafe.");
+      throw new Error("invalid options");
     }
-    this.#root = resolve(root);
+    return Object.freeze({ root: resolve(root), runPowerShell, timeoutMs });
+  } catch {
+    throw vaultError("UNSAFE_VAULT_ROOT", "The credential vault root is unsafe.");
+  }
+}
+
+function validateRunnerResult(result, failureCode) {
+  try {
+    if (
+      result === null ||
+      typeof result !== "object" ||
+      Array.isArray(result) ||
+      (Object.getPrototypeOf(result) !== Object.prototype &&
+        Object.getPrototypeOf(result) !== null)
+    ) {
+      throw new Error("invalid result");
+    }
+    const keys = Reflect.ownKeys(result);
+    const values = {};
+    for (const key of keys) {
+      if (typeof key !== "string") {
+        throw new Error("invalid result");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(result, key);
+      if (descriptor === undefined || !("value" in descriptor)) {
+        throw new Error("invalid result");
+      }
+      values[key] = descriptor.value;
+    }
+    if (
+      values.exitCode !== 0 ||
+      values.timedOut === true ||
+      values.outputExceeded === true ||
+      typeof values.stdout !== "string" ||
+      Buffer.byteLength(values.stdout, "utf8") > MAX_PROCESS_OUTPUT_BYTES
+    ) {
+      throw new Error("invalid result");
+    }
+    return values.stdout.trim();
+  } catch {
+    throw vaultError(failureCode, "The credential operation failed safely.");
+  }
+}
+
+export class CredentialVault {
+  #root;
+  #runPowerShell;
+  #timeoutMs;
+
+  constructor(options = {}) {
+    const { root, runPowerShell, timeoutMs } = validateOptions(options);
+    this.#root = root;
     this.#runPowerShell = runPowerShell;
     this.#timeoutMs = timeoutMs;
   }
@@ -358,18 +507,7 @@ export class CredentialVault {
     } catch {
       throw vaultError(failureCode, "The credential operation failed safely.");
     }
-    if (
-      result === null ||
-      typeof result !== "object" ||
-      result.exitCode !== 0 ||
-      result.timedOut === true ||
-      result.outputExceeded === true ||
-      typeof result.stdout !== "string" ||
-      Buffer.byteLength(result.stdout, "utf8") > MAX_PROCESS_OUTPUT_BYTES
-    ) {
-      throw vaultError(failureCode, "The credential operation failed safely.");
-    }
-    return result.stdout.trim();
+    return validateRunnerResult(result, failureCode);
   }
 
   async save(name, credentials) {
@@ -407,18 +545,19 @@ export class CredentialVault {
       join(this.#root, `.credential-${randomUUID()}.tmp`),
     );
     let handle;
-    let committed = false;
+    let published = false;
     try {
       await verifyRoot(this.#root, false);
       handle = await open(temporary, "wx", 0o600);
       await handle.writeFile(JSON.stringify({ version: 1, ciphertext }), "utf8");
+      await handle.chmod(0o600);
       await handle.sync();
       await handle.close();
       handle = undefined;
       await verifyRoot(this.#root, false);
       await renameReplacing(temporary, target);
-      await chmod(target, 0o600);
-      committed = true;
+      published = true;
+      await syncDirectory(this.#root);
     } catch (error) {
       if (error instanceof CredentialVaultError) {
         throw error;
@@ -426,7 +565,7 @@ export class CredentialVault {
       throw vaultError("VAULT_WRITE_FAILED", "The credential could not be stored.");
     } finally {
       await handle?.close();
-      if (!committed) {
+      if (!published) {
         await rm(temporary, { force: true });
       }
     }

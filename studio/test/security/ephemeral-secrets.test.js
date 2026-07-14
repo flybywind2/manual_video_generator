@@ -13,14 +13,18 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import test from "node:test";
 
+import { createRedactor } from "../../src/security/redactor.js";
 import {
   scavengeEphemeralSecrets,
   withEphemeralSecrets,
 } from "../../src/security/ephemeral-secrets.js";
 
+const require = createRequire(import.meta.url);
+const { dotenv } = require("../../node_modules/playwright-core/lib/utilsBundle.js");
 const execFileAsync = promisify(execFile);
 const USERNAME = "redaction-user";
 const PASSWORD = "redaction-pass";
@@ -61,7 +65,7 @@ function deferred() {
   return { promise, reject, resolve };
 }
 
-test("applies directory and empty-file ACLs before writing quoted dotenv values", async (t) => {
+test("round-trips exact values through the bundled MCP dotenv parser after ACLs", async (t) => {
   const { runtimeRoot } = await temporaryStudio(t);
   const events = [];
   const credentials = {
@@ -79,10 +83,18 @@ test("applies directory and empty-file ACLs before writing quoted dotenv values"
       assert.match(dirname(path).split(/[\\/]/u).at(-1), OPERATION_NAME);
       assert.equal(path.includes(credentials.username), false);
       assert.equal(path.includes(credentials.password), false);
+      const parsed = dotenv.parse(await readFile(path));
+      assert.deepEqual(parsed, {
+        MCP_REDACT_PASSWORD: credentials.password,
+        MCP_REDACT_USERNAME: credentials.username,
+      });
+      const redactor = createRedactor({
+        secrets: Object.values(parsed),
+        sensitiveKeys: [],
+      });
       assert.equal(
-        await readFile(path, "utf8"),
-        'MCP_REDACT_USERNAME="user $ # = \\" \\\\ tail"\n' +
-          'MCP_REDACT_PASSWORD="pass=\'value\'\\\\end"\n',
+        redactor.text(`${credentials.username}|${credentials.password}`),
+        "[REDACTED]|[REDACTED]",
       );
       return "created";
     },
@@ -102,6 +114,35 @@ test("applies directory and empty-file ACLs before writing quoted dotenv values"
   assert.equal(result, "created");
   assert.deepEqual(events, ["directory-acl", "file-acl", "callback"]);
   assert.deepEqual(await readdir(runtimeRoot), []);
+});
+
+test("rejects values with no safe dotenv delimiter before creating plaintext", async (t) => {
+  const { runtimeRoot } = await temporaryStudio(t);
+  let aclCalls = 0;
+  let callbackCalls = 0;
+  const unrepresentable = `all ' " \` # =`;
+
+  await assert.rejects(
+    withEphemeralSecrets(
+      runtimeRoot,
+      { username: unrepresentable, password: PASSWORD },
+      async () => {
+        callbackCalls += 1;
+      },
+      {
+        applyAcl: async () => {
+          aclCalls += 1;
+        },
+      },
+    ),
+    {
+      code: "INVALID_EPHEMERAL_CREDENTIALS",
+      message: "The ephemeral credentials are invalid.",
+    },
+  );
+  assert.equal(aclCalls, 0);
+  assert.equal(callbackCalls, 0);
+  assert.equal(await pathExists(runtimeRoot), false);
 });
 
 test("rejects dotenv injection and non-allowlisted credential fields", async (t) => {
@@ -137,6 +178,63 @@ test("rejects dotenv injection and non-allowlisted credential fields", async (t)
     );
   }
   assert.equal(getterRan, false);
+  assert.equal(await pathExists(runtimeRoot), false);
+});
+
+test("normalizes hostile credential and option reflection traps", async (t) => {
+  const { runtimeRoot } = await temporaryStudio(t);
+  const marker = "ephemeral-proxy-private-marker";
+  const traps = ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"];
+
+  for (const trap of traps) {
+    const credentials = new Proxy(
+      { username: USERNAME, password: PASSWORD },
+      {
+        [trap]() {
+          throw new Error(marker);
+        },
+      },
+    );
+    await assert.rejects(
+      withEphemeralSecrets(
+        runtimeRoot,
+        credentials,
+        async () => undefined,
+        { applyAcl: async () => undefined },
+      ),
+      (error) => {
+        assert.equal(error.code, "INVALID_EPHEMERAL_CREDENTIALS");
+        assert.equal(error.message, "The ephemeral credentials are invalid.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
+
+  for (const trap of traps) {
+    const options = new Proxy(
+      { applyAcl: async () => undefined },
+      {
+        [trap]() {
+          throw new Error(marker);
+        },
+      },
+    );
+    await assert.rejects(
+      withEphemeralSecrets(
+        runtimeRoot,
+        { username: USERNAME, password: PASSWORD },
+        async () => undefined,
+        options,
+      ),
+      (error) => {
+        assert.equal(error.code, "INVALID_EPHEMERAL_OPTIONS");
+        assert.equal(error.message, "The ephemeral secret options are invalid.");
+        assert.equal(String(error).includes(marker), false);
+        return true;
+      },
+    );
+  }
   assert.equal(await pathExists(runtimeRoot), false);
 });
 
@@ -365,16 +463,27 @@ test("scavenges only strict stale operation directories without following links"
   const { base, runtimeRoot } = await temporaryStudio(t);
   await mkdir(runtimeRoot, { recursive: true });
   const empty = join(runtimeRoot, `op-${"a".repeat(32)}`);
-  const partial = join(runtimeRoot, `op-${"b".repeat(32)}`);
+  const exact = join(runtimeRoot, `op-${"b".repeat(32)}`);
   const strictFile = join(runtimeRoot, `op-${"c".repeat(32)}`);
   const linked = join(runtimeRoot, `op-${"d".repeat(32)}`);
+  const extra = join(runtimeRoot, `op-${"e".repeat(32)}`);
+  const nested = join(runtimeRoot, `op-${"f".repeat(32)}`);
+  const reparse = join(runtimeRoot, `op-${"1".repeat(32)}`);
   const outside = join(base, "outside-stale");
   await mkdir(empty);
-  await mkdir(partial);
-  await writeFile(join(partial, ".mcp-redaction.env"), "partial", "utf8");
+  await mkdir(exact);
+  await writeFile(join(exact, ".mcp-redaction.env"), "partial", "utf8");
+  await mkdir(extra);
+  await writeFile(join(extra, ".mcp-redaction.env"), "partial", "utf8");
+  await writeFile(join(extra, "unrelated.txt"), "keep-extra", "utf8");
+  await mkdir(nested);
+  await writeFile(join(nested, ".mcp-redaction.env"), "partial", "utf8");
+  await mkdir(join(nested, "nested"));
+  await mkdir(reparse);
+  await writeFile(join(reparse, ".mcp-redaction.env"), "partial", "utf8");
   await mkdir(outside);
   await writeFile(join(outside, "sentinel"), "outside", "utf8");
-  await symlink(outside, join(partial, "outside-link"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(outside, join(reparse, "outside-link"), process.platform === "win32" ? "junction" : "dir");
   await writeFile(strictFile, "unrelated", "utf8");
   await symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
   await mkdir(join(runtimeRoot, "op-not-strict"));
@@ -384,7 +493,10 @@ test("scavenges only strict stale operation directories without following links"
   assert.equal(await scavengeEphemeralSecrets(runtimeRoot), 2);
 
   assert.equal(await pathExists(empty), false);
-  assert.equal(await pathExists(partial), false);
+  assert.equal(await pathExists(exact), false);
+  assert.equal(await readFile(join(extra, "unrelated.txt"), "utf8"), "keep-extra");
+  assert.equal(await pathExists(nested), true);
+  assert.equal(await pathExists(reparse), true);
   assert.equal(await readFile(join(outside, "sentinel"), "utf8"), "outside");
   assert.equal(await readFile(strictFile, "utf8"), "unrelated");
   assert.equal(await pathExists(linked), true);
@@ -395,6 +507,9 @@ test("scavenges only strict stale operation directories without following links"
       "op-not-strict",
       `op-${"c".repeat(32)}`,
       `op-${"d".repeat(32)}`,
+      `op-${"e".repeat(32)}`,
+      `op-${"f".repeat(32)}`,
+      `op-${"1".repeat(32)}`,
       "unrelated",
     ].sort(),
   );
