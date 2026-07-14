@@ -1,5 +1,8 @@
 const SENSITIVE_DETAIL_KEY =
   /(?:authorization|cookie|credential|pass(?:word|phrase)?|secret|token)/iu;
+const PUBLIC_MESSAGE = "The operation could not be completed.";
+const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
+const PUBLIC_STAGE = /^[a-z][a-z0-9_]{0,63}$/u;
 
 function safeDetailValue(key, value) {
   if (SENSITIVE_DETAIL_KEY.test(key)) {
@@ -44,6 +47,8 @@ function safeDetails(details) {
 }
 
 export class StudioError extends Error {
+  #publicSnapshot;
+
   constructor(
     message,
     { code, stage = "unknown", retryable = false, details = {} } = {},
@@ -54,16 +59,25 @@ export class StudioError extends Error {
     this.stage = stage;
     this.retryable = Boolean(retryable);
     this.details = safeDetails(details);
+    this.#publicSnapshot = Object.freeze({
+      name: "StudioError",
+      publicMessage: PUBLIC_MESSAGE,
+      code:
+        typeof code === "string" && PUBLIC_CODE.test(code)
+          ? code
+          : "STUDIO_ERROR",
+      stage:
+        typeof stage === "string" && PUBLIC_STAGE.test(stage)
+          ? stage
+          : "unknown",
+      retryable: Boolean(retryable),
+      details: Object.freeze(
+        Object.keys(this.details).length === 0 ? {} : { redacted: true },
+      ),
+    });
   }
 
   toJSON() {
-    return {
-      name: this.name,
-      message: this.message,
-      code: this.code,
-      stage: this.stage,
-      retryable: this.retryable,
-      details: this.details,
-    };
+    return this.#publicSnapshot;
   }
 }

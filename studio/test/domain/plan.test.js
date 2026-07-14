@@ -180,6 +180,98 @@ test("approved digest is required to match the exact canonical plan", () => {
   });
 });
 
+test("digest-matching blocked plans remain reviewable but cannot pass execution approval", () => {
+  const blockedPlan = validPlan({
+    steps: [validStep({ action: "Submit the form", risk: "safe" })],
+  });
+  const canonical = canonicalPlan(blockedPlan);
+
+  assert.equal(canonical.steps[0].risk, "blocked");
+  assert.match(digestPlan(blockedPlan), /^[a-f0-9]{64}$/u);
+  assert.throws(
+    () => assertApprovedPlan(blockedPlan, digestPlan(blockedPlan)),
+    {
+      code: "BLOCKED_PLAN",
+      stage: "approved",
+      retryable: false,
+    },
+  );
+});
+
+test("forbidden action conflicts are normalized and block execution approval", () => {
+  const plan = validPlan({
+    forbiddenActions: ["change user data"],
+    steps: [
+      validStep({
+        action: "Open settings, then ＣＨＡＮＧＥ   USER\tDATA now",
+      }),
+    ],
+  });
+  const canonical = canonicalPlan(plan);
+
+  assert.equal(canonical.steps[0].risk, "blocked");
+  assert.throws(() => assertApprovedPlan(plan, digestPlan(plan)), {
+    code: "BLOCKED_PLAN",
+  });
+});
+
+test("forbidden action normalization is deterministic and respects token boundaries", () => {
+  const first = validPlan({
+    forbiddenActions: ["  Change   User Data  "],
+  });
+  const equivalent = validPlan({
+    forbiddenActions: ["ＣＨＡＮＧＥ　ＵＳＥＲ　ＤＡＴＡ"],
+  });
+
+  assert.deepEqual(
+    canonicalPlan(first).forbiddenActions,
+    ["user-data.change"],
+  );
+  assert.equal(digestPlan(first), digestPlan(equivalent));
+  assert.equal(
+    digestPlan(first),
+    digestPlan(validPlan({ forbiddenActions: ["user-data.change"] })),
+  );
+
+  const boundarySafe = canonicalPlan(
+    validPlan({
+      forbiddenActions: ["change user data"],
+      steps: [validStep({ action: "Review exchange user database" })],
+    }),
+  );
+  assert.equal(boundarySafe.steps[0].risk, "safe");
+});
+
+test("enumerated forbidden capabilities cover English inflection and Korean morphology", () => {
+  for (const [forbiddenAction, action] of [
+    ["change user data", "Changing user data"],
+    ["change user data", "Change the user data"],
+    ["change user data", "Change the user's data"],
+    ["change user data", "Update user data"],
+    ["사용자 데이터 변경", "사용자 데이터를 변경합니다"],
+    ["사용자 데이터 변경", "사용자의 데이터를 변경합니다"],
+    ["사용자 데이터 변경", "사용자 데이터를 변경해 주세요"],
+    ["user-data.change", "Change user data"],
+  ]) {
+    const plan = validPlan({
+      forbiddenActions: [forbiddenAction],
+      steps: [validStep({ action })],
+    });
+    assert.deepEqual(canonicalPlan(plan).forbiddenActions, [
+      "user-data.change",
+    ]);
+    assert.equal(canonicalPlan(plan).steps[0].risk, "blocked");
+    assert.throws(() => assertApprovedPlan(plan, digestPlan(plan)), {
+      code: "BLOCKED_PLAN",
+    });
+  }
+
+  assert.throws(
+    () => canonicalPlan(validPlan({ forbiddenActions: ["arbitrary free text"] })),
+    { code: "INVALID_PLAN" },
+  );
+});
+
 test("policy allows navigation within the approved target origin", () => {
   assert.equal(
     evaluateStepPolicy(
@@ -222,11 +314,190 @@ test("policy blocks host-only cross-origin navigation and allows the approved ho
   }
   assert.equal(
     evaluateStepPolicy(
-      validStep({ action: "Navigate to example.test/settings" }),
+      validStep({
+        action: "Navigate to example.test/settings",
+        navigationTarget: "https://example.test/settings",
+      }),
       "https://example.test",
     ),
     "safe",
   );
+});
+
+test("structured navigation target is optional, canonical, and origin constrained", () => {
+  const fiveFieldStep = canonicalPlan(validPlan()).steps[0];
+  assert.equal(Object.hasOwn(fiveFieldStep, "navigationTarget"), false);
+
+  const sameOrigin = canonicalPlan(
+    validPlan({
+      steps: [
+        validStep({
+          action: "Navigate to settings",
+          navigationTarget: "https://EXAMPLE.test:443/settings",
+        }),
+      ],
+    }),
+  );
+  assert.equal(
+    sameOrigin.steps[0].navigationTarget,
+    "https://example.test/settings",
+  );
+  assert.equal(sameOrigin.steps[0].risk, "safe");
+
+  const explicitNull = canonicalPlan(
+    validPlan({ steps: [validStep({ navigationTarget: null })] }),
+  );
+  assert.equal(explicitNull.steps[0].navigationTarget, null);
+
+  const crossOrigin = validPlan({
+    steps: [
+      validStep({
+        action: "Navigate to settings",
+        navigationTarget: "https://other.test/settings",
+      }),
+    ],
+  });
+  assert.equal(canonicalPlan(crossOrigin).steps[0].risk, "blocked");
+  assert.throws(
+    () => assertApprovedPlan(crossOrigin, digestPlan(crossOrigin)),
+    { code: "BLOCKED_PLAN" },
+  );
+
+  assert.throws(
+    () =>
+      canonicalPlan(
+        validPlan({
+          steps: [
+            validStep({
+              navigationTarget:
+                "https://user:secret@example.test/settings",
+            }),
+          ],
+        }),
+      ),
+    { code: "INVALID_PLAN" },
+  );
+});
+
+test("ambiguous host, route, and file navigation requires structured metadata", () => {
+  for (const action of [
+    "Navigate to intranet-admin/settings",
+    "Open manual.pdf preview",
+    "Navigate to example.test/settings",
+  ]) {
+    assert.equal(
+      evaluateStepPolicy(validStep({ action }), "https://example.test"),
+      "blocked",
+    );
+  }
+
+  assert.equal(
+    evaluateStepPolicy(
+      validStep({
+        action: "Navigate to intranet-admin/settings",
+        navigationTarget: "https://example.test/intranet-admin/settings",
+      }),
+      "https://example.test",
+    ),
+    "safe",
+  );
+  assert.equal(
+    evaluateStepPolicy(
+      validStep({
+        action: "Open manual.pdf preview",
+        navigationTarget: "https://example.test/manual.pdf",
+      }),
+      "https://example.test",
+    ),
+    "safe",
+  );
+});
+
+test("navigation text cannot contradict structured metadata", () => {
+  for (const action of [
+    "Open https://other.test/settings",
+    "Open //other.test/settings",
+    "Navigate to other.test/settings",
+  ]) {
+    assert.equal(
+      evaluateStepPolicy(
+        validStep({
+          action,
+          navigationTarget: "https://example.test/settings",
+        }),
+        "https://example.test",
+      ),
+      "blocked",
+    );
+  }
+
+  assert.equal(
+    evaluateStepPolicy(
+      validStep({
+        action: "Open https://example.test/settings",
+        navigationTarget: "https://example.test/dashboard",
+      }),
+      "https://example.test",
+    ),
+    "blocked",
+  );
+});
+
+test("navigation text is NFKC-normalized and rejects unsafe schemes", () => {
+  for (const action of [
+    "Navigate to javascript:alert(1)",
+    "Navigate to file:///C:/Windows/System32",
+    "Navigate to data:text/html,unsafe",
+    "Navigate to other．test/settings",
+    "Navigate to other。test/settings",
+    "Navigate to other｡test/settings",
+    "Navigate to 例え.テスト/settings",
+  ]) {
+    const plan = validPlan({ steps: [validStep({ action })] });
+    assert.equal(canonicalPlan(plan).steps[0].risk, "blocked");
+    assert.throws(() => assertApprovedPlan(plan, digestPlan(plan)), {
+      code: "BLOCKED_PLAN",
+    });
+  }
+});
+
+test("relative navigation must exactly match structured metadata", () => {
+  for (const [action, navigationTarget] of [
+    ["Navigate to /admin", undefined],
+    ["Navigate to /admin", "https://example.test/settings"],
+    ["Navigate to ?tab=admin", undefined],
+    ["Navigate to #admin", undefined],
+    ["Navigate to ../admin", undefined],
+    ["Navigate to ./admin", undefined],
+    ["Navigate to ../admin", "https://example.test/settings"],
+    ["Navigate to [/admin]", undefined],
+  ]) {
+    const step =
+      navigationTarget === undefined
+        ? validStep({ action })
+        : validStep({ action, navigationTarget });
+    assert.equal(
+      evaluateStepPolicy(step, "https://example.test"),
+      "blocked",
+    );
+  }
+
+  for (const [action, navigationTarget] of [
+    ["Navigate to /admin", "https://example.test/admin"],
+    ["Navigate to ?tab=admin", "https://example.test/?tab=admin"],
+    ["Navigate to #admin", "https://example.test/#admin"],
+    ["Navigate to ../admin", "https://example.test/admin"],
+    ["Navigate to ./admin", "https://example.test/admin"],
+    ["Navigate to [/admin]", "https://example.test/admin"],
+  ]) {
+    assert.equal(
+      evaluateStepPolicy(
+        validStep({ action, navigationTarget }),
+        "https://example.test",
+      ),
+      "safe",
+    );
+  }
 });
 
 test("policy accepts only own fields on plain or null-prototype steps", () => {

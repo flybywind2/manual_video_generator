@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  StudioError,
-  TRANSITIONS,
-  transition,
-} from "../../src/domain/state-machine.js";
+import * as workflow from "../../src/domain/state-machine.js";
+
+const { StudioError, TRANSITIONS, transition } = workflow;
 
 test("manual authentication reaches execution only after plan approval", () => {
   const path = [
@@ -103,6 +101,14 @@ test("unknown states and events have no implicit fallback", () => {
     code: "INVALID_TRANSITION",
     stage: "created",
   });
+  assert.throws(
+    () =>
+      transition(
+        { toString: () => "approved" },
+        { toString: () => "START_EXECUTION" },
+      ),
+    { code: "INVALID_TRANSITION", stage: "unknown" },
+  );
 });
 
 test("inherited properties cannot act as workflow events", () => {
@@ -118,4 +124,355 @@ test("inherited properties cannot act as workflow events", () => {
   } finally {
     delete Object.prototype.START_EXECUTION;
   }
+});
+
+test("every active state has an explicit cancellation event", () => {
+  const activeStates = [
+    "created",
+    "authenticating",
+    "awaiting_manual_login",
+    "planning",
+    "plan_review",
+    "approved",
+    "executing",
+    "needs_review",
+    "narrating",
+    "composing",
+    "preview_review",
+    "rendering",
+  ];
+
+  for (const state of activeStates) {
+    assert.equal(transition(state, "CANCEL_JOB"), "cancelled");
+  }
+  assert.equal(Object.isFrozen(TRANSITIONS.cancelled), true);
+  assert.throws(() => transition("cancelled", "START_EXECUTION"), {
+    code: "INVALID_TRANSITION",
+  });
+});
+
+test("authentication expiry returns browser-dependent states to authentication", () => {
+  const browserDependentStates = [
+    "awaiting_manual_login",
+    "planning",
+    "plan_review",
+    "approved",
+    "executing",
+    "needs_review",
+  ];
+
+  for (const state of browserDependentStates) {
+    assert.equal(
+      transition(state, "AUTHENTICATION_EXPIRED"),
+      "authenticating",
+    );
+  }
+  assert.throws(() => transition("narrating", "AUTHENTICATION_EXPIRED"), {
+    code: "INVALID_TRANSITION",
+  });
+});
+
+test("failure descriptors persist exact safe resume provenance", () => {
+  const planDigest = "a".repeat(64);
+  const resumableFailures = [
+    ["authenticating", "AUTHENTICATION_FAILED", "authenticating", null],
+    ["planning", "PLANNING_FAILED", "planning", null],
+    ["executing", "EXECUTION_FAILED", "approved", planDigest],
+    ["narrating", "NARRATION_FAILED", "narrating", planDigest],
+    ["composing", "COMPOSITION_FAILED", "composing", planDigest],
+    ["rendering", "RENDER_FAILED", "rendering", planDigest],
+  ];
+
+  for (const [index, [failedFrom, failedEvent, resumeFrom, digest]] of
+    resumableFailures.entries()) {
+    const eventSequence = index + 10;
+    const descriptor = workflow.createFailureDescriptor({
+      jobId: "job-123",
+      eventSequence,
+      planDigest: digest,
+      failedFrom,
+      failedEvent,
+    });
+    assert.equal(Object.isFrozen(descriptor), true);
+    assert.deepEqual(descriptor, {
+      jobId: "job-123",
+      eventSequence,
+      planDigest: digest,
+      failedFrom,
+      failedEvent,
+      resumeFrom,
+    });
+
+    const persisted = JSON.parse(JSON.stringify(descriptor));
+    assert.equal(
+      workflow.resumeFailure(persisted, {
+        currentState: "failed",
+        jobId: "job-123",
+        eventSequence,
+        planDigest: digest,
+        requestedResumeFrom: resumeFrom,
+      }),
+      resumeFrom,
+    );
+  }
+
+  const executionFailure = workflow.createFailureDescriptor({
+    jobId: "job-123",
+    eventSequence: 42,
+    planDigest,
+    failedFrom: "executing",
+    failedEvent: "EXECUTION_FAILED",
+  });
+  assert.equal(
+    workflow.resumeFailure(executionFailure, {
+      currentState: "failed",
+      jobId: "job-123",
+      eventSequence: 42,
+      planDigest,
+      requestedResumeFrom: "approved",
+    }),
+    "approved",
+  );
+  assert.equal(transition("approved", "START_EXECUTION"), "executing");
+});
+
+test("failure retry rejects forged provenance and direct execution bypass", () => {
+  const planDigest = "a".repeat(64);
+  assert.throws(
+    () =>
+      workflow.createFailureDescriptor({
+        jobId: "job-123",
+        eventSequence: 4,
+        planDigest,
+        failedFrom: { toString: () => "executing" },
+        failedEvent: "EXECUTION_FAILED",
+      }),
+    { code: "INVALID_FAILURE_DESCRIPTOR" },
+  );
+
+  const selfAttested = {
+    failedFrom: "executing",
+    failedEvent: "EXECUTION_FAILED",
+    resumeFrom: "approved",
+  };
+  assert.throws(
+    () =>
+      workflow.resumeFailure(selfAttested, {
+        currentState: "failed",
+        jobId: "job-123",
+        eventSequence: 4,
+        planDigest,
+        requestedResumeFrom: "approved",
+      }),
+    { code: "INVALID_FAILURE_DESCRIPTOR" },
+  );
+
+  const stored = workflow.createFailureDescriptor({
+    jobId: "job-123",
+    eventSequence: 4,
+    planDigest,
+    failedFrom: "executing",
+    failedEvent: "EXECUTION_FAILED",
+  });
+  const validContext = {
+    currentState: "failed",
+    jobId: "job-123",
+    eventSequence: 4,
+    planDigest,
+    requestedResumeFrom: "approved",
+  };
+  for (const forgedContext of [
+    { ...validContext, currentState: "executing" },
+    { ...validContext, jobId: "job-other" },
+    { ...validContext, eventSequence: 5 },
+    { ...validContext, planDigest: "b".repeat(64) },
+    { ...validContext, requestedResumeFrom: "executing" },
+  ]) {
+    assert.throws(() => workflow.resumeFailure(stored, forgedContext), {
+      code: "INVALID_FAILURE_DESCRIPTOR",
+    });
+  }
+
+  const inherited = Object.create({
+    ...stored,
+  });
+  assert.throws(() => workflow.resumeFailure(inherited, validContext), {
+    code: "INVALID_FAILURE_DESCRIPTOR",
+  });
+
+  Object.prototype.resumeFrom = "executing";
+  try {
+    assert.throws(
+      () =>
+        workflow.resumeFailure(
+          {
+            jobId: "job-123",
+            eventSequence: 4,
+            planDigest,
+            failedFrom: "executing",
+            failedEvent: "EXECUTION_FAILED",
+          },
+          validContext,
+        ),
+      { code: "INVALID_FAILURE_DESCRIPTOR" },
+    );
+  } finally {
+    delete Object.prototype.resumeFrom;
+  }
+
+  assert.throws(() => transition("failed", "START_EXECUTION"), {
+    code: "INVALID_TRANSITION",
+  });
+  assert.throws(() => transition("failed", "RETRY_EXECUTION"), {
+    code: "INVALID_TRANSITION",
+  });
+});
+
+test("reauthentication provenance restores only a validated safe state", () => {
+  const planDigest = "a".repeat(64);
+  const resumableStates = [
+    ["awaiting_manual_login", "awaiting_manual_login", null],
+    ["planning", "planning", null],
+    ["plan_review", "plan_review", null],
+    ["approved", "approved", planDigest],
+    ["executing", "needs_review", planDigest],
+    ["needs_review", "needs_review", planDigest],
+  ];
+
+  for (const [index, [expiredFrom, resumeFrom, digest]] of
+    resumableStates.entries()) {
+    const eventSequence = index + 30;
+    const descriptor = workflow.createReauthenticationDescriptor({
+      jobId: "job-123",
+      eventSequence,
+      planDigest: digest,
+      expiredFrom,
+    });
+    assert.equal(Object.isFrozen(descriptor), true);
+    assert.equal(
+      workflow.resumeAfterAuthentication(descriptor, {
+        currentState: "authenticating",
+        jobId: "job-123",
+        eventSequence,
+        planDigest: digest,
+        requestedResumeFrom: resumeFrom,
+      }),
+      resumeFrom,
+    );
+  }
+
+  const executionExpiry = workflow.createReauthenticationDescriptor({
+    jobId: "job-123",
+    eventSequence: 50,
+    planDigest,
+    expiredFrom: "executing",
+  });
+  assert.throws(
+    () =>
+      workflow.resumeAfterAuthentication(executionExpiry, {
+        currentState: "authenticating",
+        jobId: "job-123",
+        eventSequence: 50,
+        planDigest,
+        requestedResumeFrom: "executing",
+      }),
+    { code: "INVALID_REAUTHENTICATION_DESCRIPTOR" },
+  );
+});
+
+test("cancellation provenance resumes only from the stored safe stage", () => {
+  const planDigest = "a".repeat(64);
+  const resumableStates = [
+    ["created", "created", null],
+    ["authenticating", "authenticating", null],
+    ["awaiting_manual_login", "authenticating", null],
+    ["planning", "planning", null],
+    ["plan_review", "plan_review", null],
+    ["approved", "approved", planDigest],
+    ["executing", "approved", planDigest],
+    ["needs_review", "needs_review", planDigest],
+    ["narrating", "narrating", planDigest],
+    ["composing", "composing", planDigest],
+    ["preview_review", "preview_review", planDigest],
+    ["rendering", "rendering", planDigest],
+  ];
+
+  for (const [index, [cancelledFrom, resumeFrom, digest]] of
+    resumableStates.entries()) {
+    const eventSequence = index + 60;
+    const descriptor = workflow.createCancellationDescriptor({
+      jobId: "job-123",
+      eventSequence,
+      planDigest: digest,
+      cancelledFrom,
+    });
+    assert.equal(Object.isFrozen(descriptor), true);
+    assert.equal(
+      workflow.resumeCancellation(descriptor, {
+        currentState: "cancelled",
+        jobId: "job-123",
+        eventSequence,
+        planDigest: digest,
+        requestedResumeFrom: resumeFrom,
+      }),
+      resumeFrom,
+    );
+  }
+
+  const executionCancellation = workflow.createCancellationDescriptor({
+    jobId: "job-123",
+    eventSequence: 80,
+    planDigest,
+    cancelledFrom: "executing",
+  });
+  assert.throws(
+    () =>
+      workflow.resumeCancellation(executionCancellation, {
+        currentState: "cancelled",
+        jobId: "job-123",
+        eventSequence: 80,
+        planDigest,
+        requestedResumeFrom: "executing",
+      }),
+    { code: "INVALID_CANCELLATION_DESCRIPTOR" },
+  );
+});
+
+test("StudioError public serialization never exposes internal messages or detail values", () => {
+  const secret = "innocent-key-secret-value";
+  const error = new StudioError(`internal diagnostic: ${secret}`, {
+    code: `UNSAFE_${secret}`,
+    stage: secret,
+    retryable: true,
+    details: { context: secret },
+  });
+
+  const serialized = JSON.stringify(error);
+  const payload = JSON.parse(serialized);
+  assert.equal(serialized.includes(secret), false);
+  assert.equal(Object.hasOwn(payload, "message"), false);
+  assert.equal(payload.publicMessage, "The operation could not be completed.");
+  assert.equal(payload.code, "STUDIO_ERROR");
+  assert.equal(payload.stage, "unknown");
+  assert.deepEqual(payload.details, { redacted: true });
+
+  const trusted = new StudioError("internal diagnostic", {
+    code: "INVALID_PLAN",
+    stage: "planning",
+    retryable: false,
+  });
+  trusted.name = "TOPSECRET123";
+  trusted.code = "TOPSECRET123";
+  trusted.stage = "topsecret123";
+  trusted.retryable = "leaked-secret";
+  trusted.details = { context: "TOPSECRET123" };
+  const mutatedPayload = JSON.parse(JSON.stringify(trusted));
+  assert.deepEqual(mutatedPayload, {
+    name: "StudioError",
+    publicMessage: "The operation could not be completed.",
+    code: "INVALID_PLAN",
+    stage: "planning",
+    retryable: false,
+    details: {},
+  });
 });

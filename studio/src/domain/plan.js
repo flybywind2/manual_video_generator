@@ -1,7 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import { StudioError } from "./errors.js";
-import { evaluateStepPolicy } from "./policy.js";
+import {
+  canonicalForbiddenCapability,
+  evaluateStepPolicy,
+} from "./policy.js";
 
 const TOP_LEVEL_FIELDS = Object.freeze([
   "schemaVersion",
@@ -13,13 +16,14 @@ const TOP_LEVEL_FIELDS = Object.freeze([
   "steps",
 ]);
 const CAPTURE_FIELDS = Object.freeze(["width", "height", "fps"]);
-const STEP_FIELDS = Object.freeze([
+const STEP_REQUIRED_FIELDS = Object.freeze([
   "id",
   "action",
   "expected",
   "narration",
   "risk",
 ]);
+const STEP_OPTIONAL_FIELDS = Object.freeze(["navigationTarget"]);
 const VALID_RISKS = new Set(["safe", "review", "blocked"]);
 
 function invalidPlan(path, reason) {
@@ -42,9 +46,9 @@ function assertPlainObject(value, path) {
   }
 }
 
-function assertExactFields(value, allowedFields, path) {
+function assertExactFields(value, requiredFields, path, optionalFields = []) {
   assertPlainObject(value, path);
-  const allowed = new Set(allowedFields);
+  const allowed = new Set([...requiredFields, ...optionalFields]);
 
   for (const field of Object.keys(value)) {
     if (!allowed.has(field)) {
@@ -52,7 +56,7 @@ function assertExactFields(value, allowedFields, path) {
     }
   }
 
-  for (const field of allowedFields) {
+  for (const field of requiredFields) {
     if (!Object.hasOwn(value, field)) {
       invalidPlan(`${path}.${field}`, "required_field");
     }
@@ -169,7 +173,48 @@ function captureSettings(value) {
   return Object.freeze(normalized);
 }
 
-function normalizedSteps(value, targetOrigin) {
+function normalizedNavigationTarget(value, path) {
+  if (value === null) {
+    return null;
+  }
+
+  const navigationTarget = normalizedString(value, path, 2_048);
+  let parsed;
+  try {
+    parsed = new URL(navigationTarget);
+  } catch {
+    invalidPlan(path, "http_url_required");
+  }
+
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  ) {
+    invalidPlan(path, "safe_http_url_required");
+  }
+
+  return parsed.href;
+}
+
+function normalizedForbiddenActions(value) {
+  return Object.freeze(
+    normalizedStringArray(value, "plan.forbiddenActions").map(
+      (action, index) => {
+        const capability = canonicalForbiddenCapability(action);
+        if (capability === null) {
+          invalidPlan(
+            `plan.forbiddenActions[${index}]`,
+            "unsupported_forbidden_capability",
+          );
+        }
+        return capability;
+      },
+    ),
+  );
+}
+
+function normalizedSteps(value, targetOrigin, forbiddenActions) {
   if (!isDenseArray(value) || value.length < 1 || value.length > 30) {
     invalidPlan("plan.steps", "step_count_must_be_between_1_and_30");
   }
@@ -178,7 +223,12 @@ function normalizedSteps(value, targetOrigin) {
   return Object.freeze(
     value.map((candidate, index) => {
       const path = `plan.steps[${index}]`;
-      assertExactFields(candidate, STEP_FIELDS, path);
+      assertExactFields(
+        candidate,
+        STEP_REQUIRED_FIELDS,
+        path,
+        STEP_OPTIONAL_FIELDS,
+      );
 
       const id = normalizedString(candidate.id, `${path}.id`, 64);
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(id)) {
@@ -200,7 +250,13 @@ function normalizedSteps(value, targetOrigin) {
         narration: normalizedString(candidate.narration, `${path}.narration`, 4_000),
         risk: candidate.risk,
       };
-      step.risk = evaluateStepPolicy(step, targetOrigin);
+      if (Object.hasOwn(candidate, "navigationTarget")) {
+        step.navigationTarget = normalizedNavigationTarget(
+          candidate.navigationTarget,
+          `${path}.navigationTarget`,
+        );
+      }
+      step.risk = evaluateStepPolicy(step, targetOrigin, forbiddenActions);
       return Object.freeze(step);
     }),
   );
@@ -214,6 +270,7 @@ function normalizePlan(candidate) {
 
   const targetUrl = parseTargetUrl(candidate.targetUrl);
   const targetOrigin = parseTargetOrigin(candidate.targetOrigin, targetUrl);
+  const forbiddenActions = normalizedForbiddenActions(candidate.forbiddenActions);
   const normalized = {
     schemaVersion: "1.0",
     targetUrl: targetUrl.href,
@@ -224,11 +281,9 @@ function normalizePlan(candidate) {
         maximum: 20,
       }),
     ),
-    forbiddenActions: Object.freeze(
-      normalizedStringArray(candidate.forbiddenActions, "plan.forbiddenActions"),
-    ),
+    forbiddenActions,
     captureSettings: captureSettings(candidate.captureSettings),
-    steps: normalizedSteps(candidate.steps, targetOrigin),
+    steps: normalizedSteps(candidate.steps, targetOrigin, forbiddenActions),
   };
 
   return Object.freeze(normalized);
@@ -266,6 +321,15 @@ export function assertApprovedPlan(plan, expectedDigest) {
       stage: "approved",
       retryable: false,
       details: { reason: "approval_digest_mismatch" },
+    });
+  }
+
+  if (canonical.steps.some((step) => step.risk === "blocked")) {
+    throw new StudioError("The plan contains a blocked step.", {
+      code: "BLOCKED_PLAN",
+      stage: "approved",
+      retryable: false,
+      details: { reason: "blocked_step_present" },
     });
   }
 
