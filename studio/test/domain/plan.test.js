@@ -10,19 +10,27 @@ import {
 import { evaluateStepPolicy } from "../../src/domain/policy.js";
 
 function validStep(overrides = {}) {
+  const id = overrides.id ?? "step-01";
   return {
-    id: "step-01",
+    id,
     action: "설정 메뉴 열기",
     expected: "설정 화면이 표시됨",
     narration: "상단 탐색 영역에서 설정 메뉴를 선택합니다.",
     risk: "safe",
+    calls: overrides.calls ?? [
+      {
+        id: `${id}.click`,
+        tool: "browser_click",
+        arguments: { element: "설정 메뉴", target: "e11" },
+      },
+    ],
     ...overrides,
   };
 }
 
 function validPlan(overrides = {}) {
   return {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     targetUrl: "https://example.test/dashboard",
     targetOrigin: "https://example.test",
     successCriteria: ["설정 화면이 표시됨"],
@@ -145,6 +153,13 @@ test("canonical plan is normalized and digest ignores object insertion order", (
         expected: "설정 화면이 표시됨",
         action: "설정 메뉴 열기",
         id: "step-01",
+        calls: [
+          {
+            arguments: { target: "e11", element: "설정 메뉴" },
+            tool: "browser_click",
+            id: "step-01.click",
+          },
+        ],
       },
     ],
     captureSettings: { fps: 30, height: 1080, width: 1920 },
@@ -152,12 +167,61 @@ test("canonical plan is normalized and digest ignores object insertion order", (
     successCriteria: ["설정 화면이 표시됨"],
     targetOrigin: "https://example.test",
     targetUrl: "https://example.test/dashboard",
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
   };
 
   assert.deepEqual(canonicalPlan(first), canonicalPlan(reordered));
   assert.equal(digestPlan(first), digestPlan(reordered));
   assert.match(digestPlan(first), /^[a-f0-9]{64}$/u);
+});
+
+test("plan binds every step to exact bounded browser calls", () => {
+  const plan = canonicalPlan(validPlan());
+  assert.deepEqual(plan.steps[0].calls, [
+    {
+      id: "step-01.click",
+      tool: "browser_click",
+      arguments: { element: "설정 메뉴", target: "e11" },
+    },
+  ]);
+
+  for (const calls of [
+    [],
+    [{ id: "bad", tool: "browser_navigate", arguments: { url: "https://example.test" } }],
+    [{ id: "bad", tool: "browser_click", arguments: { target: "e11", filename: "escape.png" } }],
+    [{ id: "bad", tool: "browser_type", arguments: { target: "password", text: "secret" } }],
+    [{ id: "bad", tool: "browser_press_key", arguments: { key: "Enter" } }],
+  ]) {
+    assert.throws(
+      () => canonicalPlan(validPlan({ steps: [validStep({ calls })] })),
+      { code: "INVALID_PLAN" },
+    );
+  }
+});
+
+test("call ids are globally unique and exact call arguments are approval-digested", () => {
+  const second = validStep({
+    id: "step-02",
+    action: "도움말 메뉴 열기",
+    calls: [{ id: "step-02.click", tool: "browser_click", arguments: { target: "e12" } }],
+  });
+  const plan = validPlan({ steps: [validStep(), second] });
+  const changed = validPlan({
+    steps: [
+      validStep({
+        calls: [{ id: "step-01.click", tool: "browser_click", arguments: { element: "설정 메뉴", target: "e99" } }],
+      }),
+      second,
+    ],
+  });
+  assert.notEqual(digestPlan(plan), digestPlan(changed));
+
+  assert.throws(
+    () => canonicalPlan(validPlan({
+      steps: [validStep(), { ...second, calls: [{ id: "step-01.click", tool: "browser_click", arguments: { target: "e12" } }] }],
+    })),
+    { code: "INVALID_PLAN" },
+  );
 });
 
 test("approved digest is required to match the exact canonical plan", () => {
