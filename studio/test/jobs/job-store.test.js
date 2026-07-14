@@ -1192,6 +1192,12 @@ test("EventBus closes on bounded backpressure so persisted events can replay", a
   await store.transition("job-backpressure", "CONFIRM_LOGIN", {});
   assert.deepEqual(effects, []);
 
+  const closing = await Promise.race([
+    subscription.closing,
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 100)),
+  ]);
+  assert.deepEqual(closing, { reason: "backpressure" });
+
   releaseActive.resolve();
   assert.deepEqual(await subscription.closed, {
     reason: "backpressure",

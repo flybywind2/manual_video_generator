@@ -9,7 +9,7 @@
   "scripts": {
     "test": "node --test",
     "doctor": "node scripts/doctor.mjs",
-    "start": "node src/server.js",
+    "start": "node src/index.js",
     "verify": "npm test && npm run doctor",
     "smoke:live": "node scripts/smoke-live.mjs"
   },

@@ -62,12 +62,17 @@ export class EventBus {
     let lastDeliveredSequence = afterSequence;
     let unsubscribe;
     let closedResolved = false;
+    let closingResolved = false;
     const buffered = new Map();
     const queue = [];
     const idleWaiters = new Set();
     let resolveClosed;
     const closed = new Promise((resolve) => {
       resolveClosed = resolve;
+    });
+    let resolveClosing;
+    const closing = new Promise((resolve) => {
+      resolveClosing = resolve;
     });
 
     const finishIdle = () => {
@@ -102,6 +107,10 @@ export class EventBus {
       }
       isClosed = true;
       closeReason = reason;
+      if (!closingResolved) {
+        closingResolved = true;
+        resolveClosing(Object.freeze({ reason }));
+      }
       buffered.clear();
       for (const item of queue.splice(0)) {
         item.resolve(false);
@@ -218,6 +227,7 @@ export class EventBus {
 
     return Object.freeze({
       ready,
+      closing,
       closed,
       idle,
       close: () => closeInternal("client"),
