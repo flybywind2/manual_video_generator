@@ -1,0 +1,20 @@
+{
+  "name": "manual-video-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "doctor": "node scripts/doctor.mjs",
+    "start": "node src/server.js",
+    "verify": "npm test && npm run doctor",
+    "smoke:live": "node scripts/smoke-live.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.78",
+    "hyperframes": "0.7.57"
+  }
+}
