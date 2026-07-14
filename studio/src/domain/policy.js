@@ -3,8 +3,6 @@ const ENGLISH_IRREVERSIBLE =
 const KOREAN_IRREVERSIBLE =
   /(?:^|[^\p{L}\p{N}_])(?:삭제|전송|등록|구매)(?=$|[^\p{L}\p{N}_]|(?:하|합|해|했|할|한|시키|시킵|시켜|시켰|시킬|시킨))/u;
 const URL_TOKEN = /(?:https?:)?\/\/[^\s<>"'`]+/giu;
-const NAVIGATION_INTENT =
-  /\b(?:browse|go\s+to|navigate|open|visit)(?:s|d|ing)?\b|(?:열기|이동|접속|방문)/iu;
 const HOST_TOKEN =
   /(?:\[[0-9a-f:]+\]|localhost|(?:\d{1,3}\.){3}\d{1,3}|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})(?::\d{1,5})?(?:\/[^\s<>"'`]*)?/giu;
 const VALID_RISKS = new Set(["safe", "review", "blocked"]);
@@ -19,7 +17,11 @@ function approvedOrigin(value) {
     if (
       !["http:", "https:"].includes(parsed.protocol) ||
       parsed.username !== "" ||
-      parsed.password !== ""
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== "" ||
+      (value !== parsed.origin && value !== `${parsed.origin}/`)
     ) {
       return null;
     }
@@ -56,10 +58,6 @@ function containsUnapprovedOrigin(action, targetOrigin) {
 }
 
 function containsUnapprovedHostNavigation(action, targetOrigin) {
-  if (!NAVIGATION_INTENT.test(action)) {
-    return false;
-  }
-
   const origin = approvedOrigin(targetOrigin);
   if (origin === null) {
     return true;
@@ -80,15 +78,45 @@ function containsUnapprovedHostNavigation(action, targetOrigin) {
   return false;
 }
 
+function ownPolicyFields(step) {
+  try {
+    if (step === null || typeof step !== "object" || Array.isArray(step)) {
+      return null;
+    }
+
+    const prototype = Object.getPrototypeOf(step);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return null;
+    }
+
+    const action = Object.getOwnPropertyDescriptor(step, "action");
+    const risk = Object.getOwnPropertyDescriptor(step, "risk");
+    if (
+      action === undefined ||
+      risk === undefined ||
+      !("value" in action) ||
+      !("value" in risk) ||
+      typeof action.value !== "string" ||
+      action.value.trim() === "" ||
+      !VALID_RISKS.has(risk.value)
+    ) {
+      return null;
+    }
+
+    return { action: action.value, risk: risk.value };
+  } catch {
+    return null;
+  }
+}
+
 export function evaluateStepPolicy(step, targetOrigin) {
-  if (step === null || typeof step !== "object" || Array.isArray(step)) {
+  const fields = ownPolicyFields(step);
+  if (fields === null) {
     return "blocked";
   }
 
-  const action = typeof step.action === "string" ? step.action : "";
+  const { action, risk } = fields;
   if (
-    action === "" ||
-    !VALID_RISKS.has(step.risk) ||
     ENGLISH_IRREVERSIBLE.test(action) ||
     KOREAN_IRREVERSIBLE.test(action) ||
     containsUnapprovedOrigin(action, targetOrigin) ||
@@ -97,7 +125,5 @@ export function evaluateStepPolicy(step, targetOrigin) {
     return "blocked";
   }
 
-  return step.risk === "review" || step.risk === "blocked"
-    ? step.risk
-    : "safe";
+  return risk;
 }

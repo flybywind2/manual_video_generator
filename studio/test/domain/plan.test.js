@@ -209,13 +209,17 @@ test("policy blocks navigation to any other origin", () => {
 });
 
 test("policy blocks host-only cross-origin navigation and allows the approved host", () => {
-  assert.equal(
-    evaluateStepPolicy(
-      validStep({ action: "Navigate to other.test/settings" }),
-      "https://example.test",
-    ),
-    "blocked",
-  );
+  for (const action of [
+    "Navigate to other.test/settings",
+    "Load other.test/settings",
+    "Click the link to other.test/settings",
+    "other.test 링크 클릭",
+  ]) {
+    assert.equal(
+      evaluateStepPolicy(validStep({ action }), "https://example.test"),
+      "blocked",
+    );
+  }
   assert.equal(
     evaluateStepPolicy(
       validStep({ action: "Navigate to example.test/settings" }),
@@ -223,6 +227,58 @@ test("policy blocks host-only cross-origin navigation and allows the approved ho
     ),
     "safe",
   );
+});
+
+test("policy accepts only own fields on plain or null-prototype steps", () => {
+  const inherited = Object.create({
+    action: "Open https://example.test/settings",
+    risk: "safe",
+  });
+  assert.equal(
+    evaluateStepPolicy(inherited, "https://example.test"),
+    "blocked",
+  );
+
+  class Step {
+    constructor() {
+      this.action = "Open https://example.test/settings";
+      this.risk = "safe";
+    }
+  }
+  assert.equal(
+    evaluateStepPolicy(new Step(), "https://example.test"),
+    "blocked",
+  );
+  assert.equal(
+    evaluateStepPolicy({ action: "Open settings" }, "https://example.test"),
+    "blocked",
+  );
+
+  const nullPrototype = Object.assign(Object.create(null), {
+    action: "Open https://example.test/settings",
+    risk: "safe",
+  });
+  assert.equal(
+    evaluateStepPolicy(nullPrototype, "https://example.test"),
+    "safe",
+  );
+});
+
+test("policy requires targetOrigin to be an exact canonical HTTP(S) origin", () => {
+  for (const targetOrigin of [
+    "https://example.test/not-an-origin",
+    "https://user:secret@example.test",
+    "https://example.test?next=/settings",
+    "https://example.test#settings",
+  ]) {
+    assert.equal(
+      evaluateStepPolicy(
+        validStep({ action: "Open https://example.test/settings" }),
+        targetOrigin,
+      ),
+      "blocked",
+    );
+  }
 });
 
 test("policy fails closed when a step has an invalid risk", () => {
