@@ -28,6 +28,7 @@ export const TRANSITIONS = Object.freeze({
     APPROVE_PLAN: "approved",
     AUTHENTICATION_EXPIRED: "authenticating",
     CANCEL_JOB: "cancelled",
+    UPDATE_PLAN: "plan_review",
   }),
   approved: freeze({
     AUTHENTICATION_EXPIRED: "authenticating",

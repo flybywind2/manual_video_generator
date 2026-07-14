@@ -33,6 +33,10 @@ test("plan review cannot start narration or execution before explicit approval",
   });
 });
 
+test("plan edits are durable plan_review self transitions", () => {
+  assert.equal(transition("plan_review", "UPDATE_PLAN"), "plan_review");
+});
+
 test("invalid transitions expose only safe workflow context", () => {
   assert.throws(
     () => transition("plan_review", "START_NARRATION"),
