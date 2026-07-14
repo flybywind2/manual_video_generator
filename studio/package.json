@@ -10,6 +10,9 @@
     "test": "node --test",
     "doctor": "node scripts/doctor.mjs",
     "start": "node src/index.js",
+    "supertonic:ensure": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supertonic.ps1 -Ensure",
+    "supertonic:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supertonic.ps1 -Ensure -Start",
+    "smoke:supertonic": "node src/adapters/supertonic-client.js --smoke",
     "verify": "npm test && npm run doctor",
     "smoke:live": "node scripts/smoke-live.mjs"
   },
