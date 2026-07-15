@@ -173,6 +173,7 @@ test("render uses fail-closed strict flags and publishes only an existing in-job
   assert.deepEqual(calls[0].args.slice(1), [
     "render",
     projectPath,
+    "--quiet",
     "--composition",
     "index.html",
     "--output",

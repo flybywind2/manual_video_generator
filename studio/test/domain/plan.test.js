@@ -286,6 +286,31 @@ test("stable accessibility locators are exact, reviewable, and policy-inspected 
     parseStableAccessibilityLocator('getByRole("link", { name: "Manual Video 프로젝트" })'),
     { role: "link", name: "Manual Video 프로젝트", exact: false },
   );
+  assert.deepEqual(
+    parseStableAccessibilityLocator('getByText("주요재무", { exact: true })'),
+    { method: "getByText", name: "주요재무", exact: true },
+  );
+  assert.deepEqual(
+    parseStableAccessibilityLocator('getByText("주요재무")'),
+    { method: "getByText", name: "주요재무", exact: false },
+  );
+  assert.equal(
+    parseStableAccessibilityLocator('getByText("주요재무", { exact: false })'),
+    null,
+  );
+  for (const unstableTarget of [
+    'getByText(/주요재무/)',
+    'getByText("주요재무").nth(0)',
+    'getByText("주요재무").filter({ visible: true })',
+    'locator("text=주요재무")',
+    'text=주요재무',
+    'getByText(\'주요재무\')',
+    'getByText(" 주요재무")',
+    'getByText("주요재무", { exact: true, timeout: 1 })',
+  ]) {
+    assert.equal(parseStableAccessibilityLocator(unstableTarget), null);
+  }
+  assert.equal(parseStableAccessibilityLocator(`getByText("${"가".repeat(513)}")`), null);
   assert.equal(
     parseStableAccessibilityLocator('getByRole("link", { name: "Manual Video 프로젝트", exact: false })'),
     null,
@@ -327,7 +352,9 @@ test("stable accessibility locators are exact, reviewable, and policy-inspected 
 test("stable accessibility locator grammar is accepted by the pinned Playwright MCP parser", () => {
   const exact = 'getByRole("link", { name: "프로젝트 메뉴 열기", exact: true })';
   const partial = 'getByRole("link", { name: "Manual Video 프로젝트" })';
-  for (const target of [exact, partial]) {
+  const exactText = 'getByText("주요재무", { exact: true })';
+  const partialText = 'getByText("주요재무")';
+  for (const target of [exact, partial, exactText, partialText]) {
     assert.notEqual(
       playwrightIsomorphic.locatorOrSelectorAsSelector("javascript", target, "data-testid"),
       "",

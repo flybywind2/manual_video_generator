@@ -822,6 +822,7 @@ export function createExecutionWorkflow(options) {
         throw executionError("EXECUTION_CANCELLED", "Execution was cancelled.");
       }
       try {
+        const failure = safeOutputFailure(error);
         await settings.jobStore.transition(jobId, "EXECUTION_FAILED", {
           planDigest: restored.planDigest,
           reason: !stopped
@@ -830,6 +831,7 @@ export function createExecutionWorkflow(options) {
               ? "executor_output_rejected"
               : "execution_failed",
           ...(outputFailure === null ? {} : { outputFailure }),
+          ...(outputRejected ? {} : { failure }),
         });
       } catch {
         // A concurrent terminal transition remains authoritative.

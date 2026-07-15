@@ -70,6 +70,13 @@ const COMPARE_TRANSITION_FIELDS = Object.freeze([
   "eventName",
   "data",
 ]);
+const COMPARE_TRANSITION_OPTIONAL_FIELDS = Object.freeze([
+  "expectedPlanDigestSequence",
+]);
+const COMPARE_TRANSITION_ALLOWED_FIELDS = Object.freeze([
+  ...COMPARE_TRANSITION_FIELDS,
+  ...COMPARE_TRANSITION_OPTIONAL_FIELDS,
+]);
 const ROOT_LOCK_NAME = ".studio-owner.lock";
 const atomicWriteChains = new Map();
 const jobOperationChains = new Map();
@@ -104,20 +111,25 @@ function assertJobId(jobId) {
 
 function compareTransitionInput(value) {
   try {
+    const keys = value === null || typeof value !== "object"
+      ? []
+      : Reflect.ownKeys(value);
     if (
       value === null ||
       typeof value !== "object" ||
       Array.isArray(value) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
-      Reflect.ownKeys(value).length !== COMPARE_TRANSITION_FIELDS.length ||
-      !Reflect.ownKeys(value).every(
-        (key) => typeof key === "string" && COMPARE_TRANSITION_FIELDS.includes(key),
-      )
+      keys.length < COMPARE_TRANSITION_FIELDS.length ||
+      keys.length > COMPARE_TRANSITION_ALLOWED_FIELDS.length ||
+      !keys.every(
+        (key) => typeof key === "string" && COMPARE_TRANSITION_ALLOWED_FIELDS.includes(key),
+      ) ||
+      !COMPARE_TRANSITION_FIELDS.every((field) => Object.hasOwn(value, field))
     ) {
       throw new Error("fields");
     }
     const values = Object.create(null);
-    for (const field of COMPARE_TRANSITION_FIELDS) {
+    for (const field of keys) {
       const descriptor = Object.getOwnPropertyDescriptor(value, field);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
         throw new Error("property");
@@ -129,6 +141,10 @@ function compareTransitionInput(value) {
       !Object.hasOwn(TRANSITIONS, values.expectedState) ||
       !Number.isSafeInteger(values.expectedEventSequence) ||
       values.expectedEventSequence < 1 ||
+      (values.expectedPlanDigestSequence !== undefined &&
+        (!Number.isSafeInteger(values.expectedPlanDigestSequence) ||
+          values.expectedPlanDigestSequence < 1 ||
+          values.expectedPlanDigestSequence > values.expectedEventSequence)) ||
       typeof values.expectedPlanDigest !== "string" ||
       !/^[a-f0-9]{64}$/u.test(values.expectedPlanDigest) ||
       typeof values.eventName !== "string" ||
@@ -140,6 +156,8 @@ function compareTransitionInput(value) {
       expectedState: values.expectedState,
       expectedEventSequence: values.expectedEventSequence,
       expectedPlanDigest: values.expectedPlanDigest,
+      expectedPlanDigestSequence:
+        values.expectedPlanDigestSequence ?? values.expectedEventSequence,
       eventName: values.eventName,
       data: clonePublicData(values.data),
     });
@@ -1351,9 +1369,12 @@ export class JobStore {
     return this.#serialize(validId, async () => {
       const { job: current, events } = await this.#loadInternal(validId);
       const latest = events.at(-1);
-      const digestProperty = latest === undefined
+      const digestEvent = events.find(
+        ({ sequence }) => sequence === comparison.expectedPlanDigestSequence,
+      );
+      const digestProperty = digestEvent === undefined
         ? undefined
-        : Object.getOwnPropertyDescriptor(latest.data, "planDigest");
+        : Object.getOwnPropertyDescriptor(digestEvent.data, "planDigest");
       const actualDigest =
         digestProperty && "value" in digestProperty
           ? digestProperty.value

@@ -2,6 +2,11 @@ import { latestValidPlanDigest } from "../domain/recovery-provenance.js";
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const RENDER_ENTRY_EVENTS = new Set(["APPROVE_PREVIEW", "RETRY_RENDER"]);
+const COMPOSITION_INVALIDATING_EVENTS = new Set([
+  "EDIT_COMPOSITION",
+  "EDIT_NARRATION",
+  "COMPOSITION_COMPLETED",
+]);
 const RESTART_RECOVERY = Object.freeze({
   created: Object.freeze({
     event: "CANCEL_JOB",
@@ -107,12 +112,32 @@ function renderBinding(events) {
     : null;
 }
 
+function recoverableComposition(events) {
+  let executionIndex = -1;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.event === "EXECUTION_COMPLETED") {
+      executionIndex = index;
+      break;
+    }
+  }
+  return executionIndex >= 0 && !events
+    .slice(executionIndex + 1)
+    .some(({ event }) => COMPOSITION_INVALIDATING_EVENTS.has(event));
+}
+
 function interruptionData(state, spec, events) {
   if (state === "rendering") {
     const binding = renderBinding(events);
     if (binding !== null) {
       return Object.freeze({ reason: spec.reason, ...binding });
     }
+    const planDigest = latestValidPlanDigest(events);
+    return Object.freeze({
+      reason: `${spec.reason}_unrecoverable`,
+      ...(planDigest === undefined ? {} : { planDigest }),
+    });
+  }
+  if (state === "composing" && !recoverableComposition(events)) {
     const planDigest = latestValidPlanDigest(events);
     return Object.freeze({
       reason: `${spec.reason}_unrecoverable`,

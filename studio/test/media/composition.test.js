@@ -91,6 +91,39 @@ test("compiled clips use escaped text, relative in-job media, and separate muted
   assert.doesNotMatch(html, /(?:src|href)="\.\.\//u);
 });
 
+test("multi-scene overlays use distinct tracks so strict HyperFrames lint stays warning-free", async () => {
+  const scenes = Array.from({ length: 5 }, (_, index) => ({
+    id: `step-${index + 1}`,
+    sourceStartMs: index * 2_000,
+    sourceEndMs: (index + 1) * 2_000,
+    caption: `장면 ${index + 1} 안내`,
+    chapter: `장면 ${index + 1}`,
+    highlight: { x: 100, y: 120, width: 300, height: 80 },
+  }));
+  const mediaPlan = createMediaPlan({
+    recordingPath: "composition/media/normalized.mp4",
+    scenes,
+    narrations: scenes.map((scene) => ({
+      sceneId: scene.id,
+      path: `composition/narration/${scene.id}.wav`,
+      durationMs: 1_900,
+      text: scene.caption,
+    })),
+  });
+  const html = compileComposition({
+    template: await readFile(templatePath, "utf8"),
+    mediaPlan,
+    projectPath: "composition",
+  });
+  const tracks = (className) => [...html.matchAll(
+    new RegExp(`class="${className} clip"[^>]*data-track-index="(\\d+)"`, "gu"),
+  )].map((match) => match[1]);
+
+  assert.deepEqual(tracks("action-highlight"), ["20", "21", "22", "23", "24"]);
+  assert.deepEqual(tracks("chapter-card"), ["40", "41", "42", "43", "44"]);
+  assert.deepEqual(tracks("caption"), ["60", "61", "62", "63", "64"]);
+});
+
 test("fixed template applies the validated playback rate before HyperFrames discovers media", async () => {
   const html = compileComposition({
     template: await readFile(templatePath, "utf8"),

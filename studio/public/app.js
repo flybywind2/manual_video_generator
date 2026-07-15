@@ -24,6 +24,7 @@ const WORKFLOW_EVENT_NAMES = Object.freeze([
   "APPROVE_PREVIEW",
   "RENDER_COMPLETED",
   "RENDER_FAILED",
+  "RETRY_COMPOSITION",
   "RETRY_RENDER",
   "OPERATION_REJECTED",
   "CANCEL_JOB",
@@ -65,6 +66,7 @@ const EVENT_LABELS = Object.freeze({
   NARRATION_FAILED: "내레이션 생성 단계에서 멈췄습니다.",
   COMPOSITION_FAILED: "미리보기 구성 단계에서 멈췄습니다.",
   RENDER_FAILED: "최종 렌더 단계에서 멈췄습니다.",
+  RETRY_COMPOSITION: "저장된 녹화로 미리보기 구성을 다시 시작했습니다.",
   RETRY_RENDER: "승인한 미리보기로 최종 렌더를 다시 시작했습니다.",
   OPERATION_REJECTED: "요청을 처리하지 못했습니다. 최신 상태를 확인해 주세요.",
 });
@@ -99,6 +101,7 @@ const API_PATHS = Object.freeze({
   reapproveExecution: (id) => `/api/jobs/${encodeURIComponent(id)}/execution/reapprove`,
   mediaPlan: (id) => `/api/jobs/${encodeURIComponent(id)}/media-plan`,
   approvePreview: (id) => `/api/jobs/${encodeURIComponent(id)}/preview/approve`,
+  retryComposition: (id) => `/api/jobs/${encodeURIComponent(id)}/composition/retry`,
   retry: (id) => `/api/jobs/${encodeURIComponent(id)}/retry`,
   cancel: (id) => `/api/jobs/${encodeURIComponent(id)}/cancel`,
   credential: (id) => `/api/credentials/${encodeURIComponent(id)}`,
@@ -205,7 +208,7 @@ function safeArtifactName(name) {
   return parts.join("/");
 }
 
-export function readWorkflowEvent(value) {
+export function readWorkflowEvent(value, approvedPlanDigest = null) {
   if (!isPlainRecord(value) || typeof value.event !== "string" || !isPlainRecord(value.data)) {
     return {};
   }
@@ -249,6 +252,29 @@ export function readWorkflowEvent(value) {
   if (value.event === "RENDER_COMPLETED") {
     const outputArtifact = safeArtifactName(data.outputArtifact);
     return outputArtifact === null ? {} : { outputArtifact };
+  }
+  const compositionPlanDigest = DIGEST.test(data.planDigest ?? "")
+    ? data.planDigest
+    : value.event === "COMPOSITION_FAILED" &&
+        data.reason === "production_failed" &&
+        !Object.hasOwn(data, "planDigest") &&
+        DIGEST.test(approvedPlanDigest ?? "")
+      ? approvedPlanDigest
+      : null;
+  if (
+    value.event === "COMPOSITION_FAILED" &&
+    [
+      "production_failed",
+      "composition_retry_failed",
+      "interrupted_composition",
+    ].includes(data.reason) &&
+    compositionPlanDigest !== null
+  ) {
+    return {
+      compositionRecovery: {
+        planDigest: compositionPlanDigest,
+      },
+    };
   }
   if (
     value.event === "RENDER_FAILED" &&
@@ -482,6 +508,10 @@ export function createStudioApi({
       method: "POST",
       body: { previewDigest },
     }),
+    retryComposition: (jobId, planDigest) => request(API_PATHS.retryComposition(jobId), {
+      method: "POST",
+      body: { planDigest },
+    }),
     retryRender: (jobId, planDigest, previewDigest) => request(API_PATHS.retry(jobId), {
       method: "POST",
       body: { planDigest, previewDigest },
@@ -572,6 +602,7 @@ function initStudio(documentValue) {
     saveMediaEdit: byId("save-media-edit-button"),
     mediaEditStatus: byId("media-edit-status"),
     recoveryPanel: byId("recovery-panel"),
+    retryComposition: byId("retry-composition-button"),
     retryRender: byId("retry-render-button"),
     completedPanel: byId("completed-panel"),
     videoLink: byId("download-video-link"),
@@ -587,6 +618,7 @@ function initStudio(documentValue) {
     planDigest: null,
     executionMismatch: null,
     previewDigest: null,
+    compositionRecovery: null,
     renderRecovery: null,
     subscription: null,
     cursor: createWorkflowCursor(),
@@ -661,7 +693,8 @@ function initStudio(documentValue) {
     elements.planPanel.hidden = state !== "plan_review";
     elements.executionPanel.hidden = !["approved", "executing", "needs_review", "narrating", "composing"].includes(state);
     elements.previewPanel.hidden = !["preview_review", "rendering"].includes(state);
-    elements.recoveryPanel.hidden = state !== "failed" || memory.renderRecovery === null;
+    elements.recoveryPanel.hidden = state !== "failed" ||
+      (memory.compositionRecovery === null && memory.renderRecovery === null);
     elements.completedPanel.hidden = state !== "completed";
   };
 
@@ -697,7 +730,12 @@ function initStudio(documentValue) {
     elements.execute.textContent = state === "needs_review"
       ? executionReview.label
       : "브라우저 녹화 시작";
-    elements.retryRender.disabled = state !== "failed" || memory.renderRecovery === null;
+    const compositionRetryAvailable = state === "failed" && memory.compositionRecovery !== null;
+    const renderRetryAvailable = state === "failed" && memory.renderRecovery !== null;
+    elements.retryComposition.hidden = !compositionRetryAvailable;
+    elements.retryComposition.disabled = !compositionRetryAvailable;
+    elements.retryRender.hidden = !renderRetryAvailable;
+    elements.retryRender.disabled = !renderRetryAvailable;
     elements.approvePreview.disabled = state !== "preview_review";
     syncMediaEditAvailability();
 
@@ -767,7 +805,7 @@ function initStudio(documentValue) {
         : "WORKFLOW_OPERATION_REJECTED";
       showError(new StudioApiError(code));
     }
-    const payload = readWorkflowEvent(event);
+    const payload = readWorkflowEvent(event, memory.planDigest);
     if (payload.plan && payload.planDigest) setPlan(payload.plan, payload.planDigest);
     if (payload.executionMismatch) memory.executionMismatch = payload.executionMismatch;
     if (payload.previewDigest && payload.previewArtifact) {
@@ -784,7 +822,20 @@ function initStudio(documentValue) {
       syncMediaEditAvailability();
     }
     if (payload.outputArtifact) setCompletedArtifacts(payload.outputArtifact);
-    if (payload.renderRecovery) memory.renderRecovery = payload.renderRecovery;
+    if (payload.compositionRecovery) {
+      memory.compositionRecovery = payload.compositionRecovery;
+      memory.renderRecovery = null;
+    }
+    if (payload.renderRecovery) {
+      memory.renderRecovery = payload.renderRecovery;
+      memory.compositionRecovery = null;
+    }
+    if (["RETRY_COMPOSITION", "COMPOSITION_COMPLETED"].includes(event.event)) {
+      memory.compositionRecovery = null;
+    }
+    if (["RETRY_RENDER", "RENDER_COMPLETED"].includes(event.event)) {
+      memory.renderRecovery = null;
+    }
     if (decision.renderState && Object.hasOwn(STATE_VIEW, event.state ?? "")) renderState(event.state);
   };
 
@@ -900,6 +951,7 @@ function initStudio(documentValue) {
       memory.planDigest = null;
       memory.executionMismatch = null;
       memory.previewDigest = null;
+      memory.compositionRecovery = null;
       memory.renderRecovery = null;
       memory.cursor = createWorkflowCursor();
       elements.jobReference.textContent = `작업 ${created.id} · ${created.request?.targetUrl ?? request.targetUrl}`;
@@ -982,6 +1034,13 @@ function initStudio(documentValue) {
     elements.approvePreview,
     () => api.approvePreview(memory.jobId, memory.previewDigest),
   ));
+  elements.retryComposition.addEventListener("click", () => runAction(
+    elements.retryComposition,
+    () => api.retryComposition(
+      memory.jobId,
+      memory.compositionRecovery?.planDigest,
+    ),
+  ));
   elements.retryRender.addEventListener("click", () => runAction(
     elements.retryRender,
     () => api.retryRender(
@@ -1001,6 +1060,7 @@ function initStudio(documentValue) {
     memory.jobId = null;
     memory.authMode = null;
     memory.executionMismatch = null;
+    memory.compositionRecovery = null;
     memory.renderRecovery = null;
     memory.cursor = createWorkflowCursor();
     elements.workspace.hidden = true;

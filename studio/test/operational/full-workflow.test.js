@@ -184,6 +184,7 @@ test("real coordinator workflows reach completed across all approval gates", asy
     if (agent === "manual-video-planner") {
       return {
         finalText: JSON.stringify(plan()),
+        sessionId: "ses_fullworkflow001",
         toolEvents: [{
           tool: "playwright_browser_snapshot",
           status: "completed",

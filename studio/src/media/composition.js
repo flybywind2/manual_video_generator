@@ -369,7 +369,7 @@ function projectAssetUrl(projectPath, targetPath) {
     .join("/");
 }
 
-function sceneClips(scene, recordingUrl, narrationUrl) {
+function sceneClips(scene, recordingUrl, narrationUrl, sceneIndex) {
   const outputStart = seconds(scene.output.startMs);
   const outputDuration = seconds(scene.output.durationMs);
   const narrationStart = seconds(scene.caption.startMs);
@@ -378,12 +378,12 @@ function sceneClips(scene, recordingUrl, narrationUrl) {
   const lines = [
     `      <video id="video-${scene.id}" class="browser-video clip" src="${recordingUrl}" playsinline preload="auto" muted data-start="${outputStart}" data-duration="${outputDuration}" data-media-start="${seconds(scene.source.startMs)}" data-playback-rate="${playbackRate(scene.source.playbackRate)}" data-volume="0" data-track-index="0"></video>`,
     `      <audio id="narration-${scene.id}" class="narration-audio clip" src="${narrationUrl}" preload="auto" data-start="${narrationStart}" data-duration="${narrationDuration}" data-volume="1" data-track-index="10"></audio>`,
-    `      <div id="chapter-${scene.id}" class="chapter-card clip" data-start="${outputStart}" data-duration="${chapterDuration}" data-track-index="30">${escapeHtml(scene.chapter)}</div>`,
-    `      <div id="caption-${scene.id}" class="caption clip" data-start="${narrationStart}" data-duration="${narrationDuration}" data-track-index="40">${escapeHtml(scene.caption.text)}</div>`,
+    `      <div id="chapter-${scene.id}" class="chapter-card clip" data-start="${outputStart}" data-duration="${chapterDuration}" data-track-index="${40 + sceneIndex}">${escapeHtml(scene.chapter)}</div>`,
+    `      <div id="caption-${scene.id}" class="caption clip" data-start="${narrationStart}" data-duration="${narrationDuration}" data-track-index="${60 + sceneIndex}">${escapeHtml(scene.caption.text)}</div>`,
   ];
   if (scene.highlight !== null) {
     lines.push(
-      `      <div id="highlight-${scene.id}" class="action-highlight clip" data-start="${outputStart}" data-duration="${outputDuration}" data-track-index="20" style="left:${scene.highlight.x}px;top:${scene.highlight.y}px;width:${scene.highlight.width}px;height:${scene.highlight.height}px"></div>`,
+      `      <div id="highlight-${scene.id}" class="action-highlight clip" data-start="${outputStart}" data-duration="${outputDuration}" data-track-index="${20 + sceneIndex}" style="left:${scene.highlight.x}px;top:${scene.highlight.y}px;width:${scene.highlight.width}px;height:${scene.highlight.height}px"></div>`,
     );
   }
   return lines.join("\n");
@@ -405,11 +405,12 @@ export function compileComposition({ template, mediaPlan, projectPath }) {
   const manifest = normalizedManifest(mediaPlan);
   const recordingUrl = projectAssetUrl(project, manifest.recordingPath);
   const clips = manifest.scenes
-    .map((scene) =>
+    .map((scene, sceneIndex) =>
       sceneClips(
         scene,
         recordingUrl,
         projectAssetUrl(project, scene.narration.path),
+        sceneIndex,
       ),
     )
     .join("\n");

@@ -622,6 +622,7 @@ export class HyperframesAdapter {
         args: [
           "render",
           project.projectPath,
+          "--quiet",
           "--composition",
           "index.html",
           "--output",

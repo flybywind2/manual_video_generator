@@ -65,7 +65,7 @@ export class StudioService {
       ? null
       : validateWorkflow(
           productionWorkflow,
-          ["preparePreview", "updateMediaPlan", "approvePreview", "retryRender", "cancel"],
+          ["preparePreview", "updateMediaPlan", "approvePreview", "retryComposition", "retryRender", "cancel"],
           "production",
         );
     if (jobStore !== null && typeof jobStore?.load !== "function") {
@@ -277,6 +277,15 @@ export class StudioService {
       this.#required(this.#production, "production").approvePreview(
         jobId,
         expectedPreviewDigest,
+        options,
+      ));
+  }
+
+  retryComposition(jobId, expectedPlanDigest, options = {}) {
+    return this.#serialize(jobId, () =>
+      this.#required(this.#production, "production").retryComposition(
+        jobId,
+        expectedPlanDigest,
         options,
       ));
   }

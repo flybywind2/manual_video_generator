@@ -75,6 +75,7 @@ const INTERACTIVE_ARIA_ROLES = new Set([
 ]);
 const SENSITIVE_TARGET = /(?:password|passcode|credential|secret|비밀번호)/iu;
 const STABLE_ROLE_LOCATOR = /^getByRole\("([a-z][a-z0-9-]{0,63})", \{ name: ("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")(, exact: true)? \}\)$/u;
+const STABLE_TEXT_LOCATOR = /^getByText\(("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")(, \{ exact: true \})?\)$/u;
 const MAX_CANONICAL_PLAN_CODE_UNITS = 6_000;
 const MAX_APPROVED_ORIGINS = 16;
 
@@ -174,11 +175,13 @@ function exactCallString(value, path, maximum, { preserve = false } = {}) {
 
 export function parseStableAccessibilityLocator(value) {
   if (typeof value !== "string") return null;
-  const match = STABLE_ROLE_LOCATOR.exec(value);
-  if (match === null || !INTERACTIVE_ARIA_ROLES.has(match[1])) return null;
+  const roleMatch = STABLE_ROLE_LOCATOR.exec(value);
+  const textMatch = STABLE_TEXT_LOCATOR.exec(value);
+  if (roleMatch === null && textMatch === null) return null;
+  if (roleMatch !== null && !INTERACTIVE_ARIA_ROLES.has(roleMatch[1])) return null;
   let name;
   try {
-    name = JSON.parse(match[2]);
+    name = JSON.parse(roleMatch?.[2] ?? textMatch[1]);
   } catch {
     return null;
   }
@@ -191,7 +194,10 @@ export function parseStableAccessibilityLocator(value) {
   ) {
     return null;
   }
-  return Object.freeze({ role: match[1], name, exact: match[3] !== undefined });
+  if (roleMatch !== null) {
+    return Object.freeze({ role: roleMatch[1], name, exact: roleMatch[3] !== undefined });
+  }
+  return Object.freeze({ method: "getByText", name, exact: textMatch[2] !== undefined });
 }
 
 function optionalBoolean(value, path) {

@@ -263,6 +263,44 @@ test("startup durably fails every interrupted non-idle stage after reopening", a
   );
 });
 
+test("startup marks an interrupted preview composition edit as unrecoverable", async (t) => {
+  const root = join(
+    tmpdir(),
+    `manual-restart-edited-composition-${process.pid}-${Date.now()}-${Math.random()}`,
+  );
+  await mkdir(root, { recursive: true });
+  const jobId = "job-interrupted-edited-composition";
+  const first = new JobStore({ root, randomId: () => jobId });
+  let restarted;
+  t.after(async () => {
+    await restarted?.close().catch(() => undefined);
+    await first.close().catch(() => undefined);
+    await rm(root, { force: true, recursive: true });
+  });
+  await advanceToPreviewReview(first, jobId);
+  await first.transition(jobId, "EDIT_COMPOSITION", {
+    planDigest: PLAN_DIGEST,
+    previewDigest: PREVIEW_DIGEST,
+  });
+  await first.close();
+
+  restarted = new JobStore({ root });
+  const recovered = await reconcileInterruptedJobs(restarted);
+
+  assert.deepEqual(recovered, [{
+    jobId,
+    from: "composing",
+    to: "failed",
+    reason: "interrupted_composition_unrecoverable",
+  }]);
+  const failure = (await restarted.readEvents(jobId)).at(-1);
+  assert.equal(failure.event, "COMPOSITION_FAILED");
+  assert.deepEqual(failure.data, {
+    reason: "interrupted_composition_unrecoverable",
+    planDigest: PLAN_DIGEST,
+  });
+});
+
 test("startup converts an interrupted render into a durable retryable failure", async (t) => {
   const root = join(
     tmpdir(),

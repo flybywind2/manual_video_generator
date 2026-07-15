@@ -145,6 +145,7 @@ test("the workflow surface includes every review gate and final artifact action"
     "approve-plan-button",
     "execute-button",
     "approve-preview-button",
+    "retry-composition-button",
     "retry-render-button",
     "download-video-link",
   ]) {
@@ -259,6 +260,7 @@ test("the API client isolates every workflow endpoint and JSON request", async (
     captionText: "새 캡션",
   }, digest);
   await api.approvePreview("job-1", digest);
+  await api.retryComposition("job-1", digest);
   await api.retryRender("job-1", digest, "b".repeat(64));
   await api.cancel("job-1");
   await api.saveCredential("team-login", {
@@ -277,6 +279,7 @@ test("the API client isolates every workflow endpoint and JSON request", async (
     ["/api/jobs/job-1/execution/reapprove", "POST"],
     ["/api/jobs/job-1/media-plan", "PUT"],
     ["/api/jobs/job-1/preview/approve", "POST"],
+    ["/api/jobs/job-1/composition/retry", "POST"],
     ["/api/jobs/job-1/retry", "POST"],
     ["/api/jobs/job-1/cancel", "POST"],
     ["/api/credentials/team-login", "PUT"],
@@ -303,10 +306,13 @@ test("the API client isolates every workflow endpoint and JSON request", async (
   });
   assert.deepEqual(JSON.parse(calls[9].init.body), {
     planDigest: digest,
+  });
+  assert.deepEqual(JSON.parse(calls[10].init.body), {
+    planDigest: digest,
     previewDigest: "b".repeat(64),
   });
-  assert.equal(calls[10].init.body, undefined);
-  assert.deepEqual(JSON.parse(calls[11].init.body), {
+  assert.equal(calls[11].init.body, undefined);
+  assert.deepEqual(JSON.parse(calls[12].init.body), {
     origin: "https://login.example.test",
     username: "operator",
     password: "one-use-value",
@@ -345,6 +351,24 @@ test("workflow event payloads are read only from exact digest-bound contracts", 
     data: { outputArtifact: "video/final.mp4" },
   }), { outputArtifact: "video/final.mp4" });
   assert.deepEqual(readWorkflowEvent({
+    event: "COMPOSITION_FAILED",
+    data: {
+      reason: "production_failed",
+      planDigest,
+    },
+  }), {
+    compositionRecovery: { planDigest },
+  });
+  assert.deepEqual(readWorkflowEvent({
+    event: "COMPOSITION_FAILED",
+    data: {
+      reason: "interrupted_composition",
+      planDigest,
+    },
+  }), {
+    compositionRecovery: { planDigest },
+  });
+  assert.deepEqual(readWorkflowEvent({
     event: "RENDER_FAILED",
     data: {
       reason: "interrupted_render",
@@ -370,6 +394,16 @@ test("workflow event payloads are read only from exact digest-bound contracts", 
     event: "RENDER_COMPLETED",
     data: { outputArtifact: "https://attacker.invalid/final.mp4" },
   }), {});
+  assert.deepEqual(readWorkflowEvent({
+    event: "COMPOSITION_FAILED",
+    data: { reason: "production_failed", planDigest: "not-a-digest" },
+  }), {});
+  assert.deepEqual(readWorkflowEvent({
+    event: "COMPOSITION_FAILED",
+    data: { reason: "production_failed" },
+  }, planDigest), {
+    compositionRecovery: { planDigest },
+  });
   assert.deepEqual(readWorkflowEvent({
     event: "RENDER_FAILED",
     data: { planDigest, previewDigest: "not-a-digest" },
@@ -401,16 +435,21 @@ test("manual mismatch review announces a fresh login and reexecution while autom
   assert.equal(executionReviewView("manual", null).disabled, true);
 });
 
-test("the UI stores authoritative mismatch provenance for reapproval and exposes render retry", async () => {
+test("the UI stores authoritative recovery provenance and exposes composition and render retry", async () => {
   const [html, javascript] = await Promise.all([source("index.html"), source("app.js")]);
 
   assert.match(html, /id="recovery-panel"[^>]*hidden/u);
+  assert.match(html, /id="retry-composition-button"[^>]*disabled/u);
   assert.match(html, /id="retry-render-button"/u);
   assert.match(javascript, /memory\.executionMismatch\s*=\s*payload\.executionMismatch/u);
   assert.match(javascript, /state === "needs_review"\s*\?\s*api\.reapproveExecution/u);
   assert.match(javascript, /memory\.executionMismatch\?\.mismatchSequence/u);
   assert.match(javascript, /"CONFIRM_REEXECUTION_LOGIN"/u);
   assert.match(javascript, /api\.retryRender\(\s*memory\.jobId/u);
+  assert.match(javascript, /memory\.compositionRecovery\s*=\s*payload\.compositionRecovery/u);
+  assert.match(javascript, /readWorkflowEvent\(event,\s*memory\.planDigest\)/u);
+  assert.match(javascript, /api\.retryComposition\(\s*memory\.jobId/u);
+  assert.match(javascript, /"RETRY_COMPOSITION"/u);
   assert.match(javascript, /"RETRY_RENDER"/u);
 });
 

@@ -314,6 +314,151 @@ test("runOpenCode uses only the selected absolute binary and the exact approved 
   ]);
 });
 
+test("runOpenCode resumes only the requested session with exact option ordering", async () => {
+  const studioRoot = path.resolve(".");
+  const opencodePath = path.resolve("C:\\tools\\opencode.exe");
+  let captured;
+
+  const result = await runOpenCode({
+    opencodePath,
+    baseUrl: "http://127.0.0.1:4096",
+    studioRoot,
+    agent: "manual-video-planner",
+    prompt: "Repair the rejected plan.",
+    sessionId: sessionID,
+    env: {},
+    validateServerContract: async () => ({ valid: true }),
+    processRunner: async (options) => {
+      captured = options.args;
+      for (const line of successfulLines()) {
+        await options.onLine({ stream: "stdout", text: line });
+      }
+      return { exitCode: 0, signal: null };
+    },
+  });
+
+  assert.deepEqual(captured, [
+    "run",
+    "--pure",
+    "--format",
+    "json",
+    "--attach",
+    "http://127.0.0.1:4096",
+    "--dir",
+    studioRoot,
+    "--agent",
+    "manual-video-planner",
+    "--session",
+    sessionID,
+    "--",
+    "Repair the rejected plan.",
+  ]);
+  assert.equal(result.sessionId, sessionID);
+});
+
+test("runOpenCode rejects a continuation that returns a different session", async () => {
+  const returnedSession = "ses_abcdefghij";
+  let emittedLines = 0;
+
+  await assert.rejects(
+    runOpenCode({
+      opencodePath: path.resolve("C:\\tools\\opencode.exe"),
+      baseUrl: "http://127.0.0.1:4096",
+      studioRoot: path.resolve("."),
+      agent: "manual-video-planner",
+      prompt: "Repair the rejected plan.",
+      sessionId: sessionID,
+      env: {},
+      validateServerContract: async () => ({ valid: true }),
+      processRunner: async (options) => {
+        for (const line of successfulLines()) {
+          emittedLines += 1;
+          await options.onLine({
+            stream: "stdout",
+            text: line.replaceAll(sessionID, returnedSession),
+          });
+        }
+        return { exitCode: 0, signal: null };
+      },
+    }),
+    (error) => error.code === "OPENCODE_SESSION_MISMATCH",
+  );
+  assert.equal(emittedLines, 1);
+});
+
+test("runOpenCode rejects unsafe continuation session identifiers before spawning", async () => {
+  const common = {
+    opencodePath: path.resolve("C:\\tools\\opencode.exe"),
+    baseUrl: "http://127.0.0.1:4096",
+    studioRoot: path.resolve("."),
+    agent: "manual-video-planner",
+    prompt: "plan",
+    env: {},
+    validateServerContract: async () => ({ valid: true }),
+  };
+  let invoked = false;
+
+  for (const sessionId of [
+    "",
+    "session-without-prefix",
+    "--agent",
+    "ses_contains space",
+    "ses_path/escape",
+    "ses_null\0suffix",
+    `ses_${"a".repeat(253)}`,
+    7,
+  ]) {
+    await assert.rejects(
+      runOpenCode({
+        ...common,
+        sessionId,
+        processRunner: async () => { invoked = true; },
+      }),
+      (error) => error.code === "INVALID_OPENCODE_OPTIONS",
+    );
+  }
+  assert.equal(invoked, false);
+});
+
+test("runOpenCode includes continuation options in the conservative command budget", async () => {
+  const opencodePath = path.resolve("C:\\tools\\opencode.exe");
+  const studioRoot = path.resolve(".");
+  const prefix = [
+    "run", "--pure", "--format", "json", "--attach", "http://127.0.0.1:4096",
+    "--dir", studioRoot, "--agent", "manual-video-planner", "--", "",
+  ];
+  const units = (command, args) =>
+    2 * command.length + 2 + args.reduce(
+      (total, argument) => total + 2 * argument.length + 3,
+      0,
+    );
+  const prompt = "p".repeat(Math.floor((24_000 - units(opencodePath, prefix)) / 2));
+  let invocations = 0;
+  const common = {
+    opencodePath,
+    baseUrl: "http://127.0.0.1:4096",
+    studioRoot,
+    agent: "manual-video-planner",
+    prompt,
+    env: {},
+    validateServerContract: async () => ({ valid: true }),
+    processRunner: async (options) => {
+      invocations += 1;
+      for (const line of successfulLines()) {
+        await options.onLine({ stream: "stdout", text: line });
+      }
+      return { exitCode: 0, signal: null };
+    },
+  };
+
+  await runOpenCode(common);
+  await assert.rejects(
+    runOpenCode({ ...common, sessionId: sessionID }),
+    (error) => error.code === "INVALID_OPENCODE_OPTIONS",
+  );
+  assert.equal(invocations, 1);
+});
+
 test("runOpenCode terminates option parsing before an option-shaped user prompt", async () => {
   for (const prompt of ["--version", "--agent=build", "--dangerously-skip-permissions"]) {
     let captured;

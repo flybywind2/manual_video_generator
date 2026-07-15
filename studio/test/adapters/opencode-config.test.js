@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ const studioRoot = path.resolve(".");
 const configPath = path.join(studioRoot, "opencode.json");
 const plannerPath = path.join(studioRoot, ".opencode", "agents", "manual-video-planner.md");
 const executorPath = path.join(studioRoot, ".opencode", "agents", "manual-video-executor.md");
+const opencodeServerPath = path.join(studioRoot, "src", "adapters", "opencode-server.js");
 const mcpCapabilityToken = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 const plannerTools = Object.freeze([
   "playwright_browser_snapshot",
@@ -151,7 +153,10 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(planner.body, /must exactly equal.*coordinator-supplied/iu);
   assert.match(planner.body, /exact ordered `calls`/iu);
   assert.match(planner.body, /browser_(?:click|fill_form|press_key|type|wait_for)/iu);
+  assert.match(planner.body, /Each step must have between 1 and 10 calls/iu);
   assert.match(planner.body, /getByRole.*exact: true/isu);
+  assert.match(planner.body, /getByText.*visible.*label.*exact: true/isu);
+  assert.match(planner.body, /regex.*chaining.*CSS.*XPath.*`text=`/isu);
   assert.match(planner.body, /never put ephemeral `eN` or `fNeN`/iu);
 
   const executor = parseFrontMatter(await readFile(executorPath, "utf8"));
@@ -165,6 +170,26 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(executor.body, /schemaVersion.*1\.0/isu);
   assert.match(executor.body, /exact supplied call queue/iu);
   assert.match(executor.body, /toolCalls.*steps/isu);
+});
+
+test("trusted project digest matches the exact OpenCode config and agent prompts", async () => {
+  const files = [
+    ["opencode.json", configPath],
+    [".opencode/agents/manual-video-planner.md", plannerPath],
+    [".opencode/agents/manual-video-executor.md", executorPath],
+  ];
+  const hash = createHash("sha256");
+  for (const [relative, file] of files) {
+    const source = (await readFile(file, "utf8")).replace(/\r\n?|\n/gu, "\n");
+    hash.update(relative, "utf8");
+    hash.update(Buffer.from([0]));
+    hash.update(source, "utf8");
+    hash.update(Buffer.from([0]));
+  }
+  const serverSource = await readFile(opencodeServerPath, "utf8");
+  const trusted = serverSource.match(/const TRUSTED_PROJECT_DIGEST = "([a-f0-9]{64})";/u);
+  assert.ok(trusted);
+  assert.equal(trusted[1], hash.digest("hex"));
 });
 
 async function selectedOpenCode() {

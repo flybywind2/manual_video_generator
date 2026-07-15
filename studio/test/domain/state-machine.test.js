@@ -96,7 +96,8 @@ test("each fallible stage has an explicit named failure event", () => {
   }
 });
 
-test("a persisted render failure resumes only through its dedicated recovery event", () => {
+test("persisted media failures resume only through their dedicated recovery events", () => {
+  assert.equal(transition("failed", "RETRY_COMPOSITION"), "composing");
   assert.equal(transition("failed", "RETRY_RENDER"), "rendering");
   assert.throws(() => transition("failed", "APPROVE_PREVIEW"), {
     code: "INVALID_TRANSITION",

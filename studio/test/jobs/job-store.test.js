@@ -262,6 +262,41 @@ test("compareAndTransition atomically binds state, sequence, and latest plan dig
   assert.equal(events.at(-1).sequence, ready.eventSequence + 1);
 });
 
+test("compareAndTransition can atomically bind a digest from an earlier event", async (t) => {
+  const root = await temporaryRoot(t);
+  const store = new JobStore({
+    root,
+    randomId: () => "job-compare-anchored-plan",
+  });
+  await store.create(request());
+  await store.transition("job-compare-anchored-plan", "START_AUTHENTICATION", {
+    authMode: "manual",
+  });
+  await store.transition("job-compare-anchored-plan", "AUTH_REQUIRED", {});
+  await store.transition("job-compare-anchored-plan", "CONFIRM_LOGIN", {});
+  const originalDigest = "a".repeat(64);
+  const ready = await store.transition("job-compare-anchored-plan", "PLAN_READY", {
+    planDigest: originalDigest,
+    revision: 0,
+  });
+  const rejected = await store.transition("job-compare-anchored-plan", "OPERATION_REJECTED", {
+    code: "PLANNING_REJECTED",
+    retryable: true,
+  });
+
+  const updated = await store.compareAndTransition("job-compare-anchored-plan", {
+    expectedState: "plan_review",
+    expectedEventSequence: rejected.eventSequence,
+    expectedPlanDigest: originalDigest,
+    expectedPlanDigestSequence: ready.eventSequence,
+    eventName: "UPDATE_PLAN",
+    data: { planDigest: "b".repeat(64), revision: 1 },
+  });
+
+  assert.equal(updated.state, "plan_review");
+  assert.equal(updated.eventSequence, rejected.eventSequence + 1);
+});
+
 test("atomic JSON replacement never exposes a partial document and uses unique temporaries", async (t) => {
   const root = await temporaryRoot(t);
   const target = join(root, "atomic.json");

@@ -303,11 +303,12 @@
         <section id="recovery-panel" class="review-panel" aria-labelledby="recovery-title" hidden>
           <div class="panel-number">05</div>
           <div class="panel-content">
-            <p class="panel-kicker">안전한 렌더 복구</p>
-            <h3 id="recovery-title">승인한 미리보기로 렌더를 다시 시작할 수 있습니다.</h3>
-            <p>브라우저를 다시 조작하거나 녹화하지 않고, 저장된 미리보기와 무결성 정보를 검증한 뒤 최종 영상만 다시 만듭니다.</p>
+            <p class="panel-kicker">안전한 제작 복구</p>
+            <h3 id="recovery-title">완료된 브라우저 녹화를 보존해 실패한 제작 단계만 다시 시작할 수 있습니다.</h3>
+            <p>미리보기 구성은 저장된 녹화로 다시 만들고, 최종 렌더는 승인한 미리보기와 무결성 정보를 검증해 다시 시작합니다.</p>
             <div class="panel-actions">
-              <button id="retry-render-button" class="button button-primary" type="button">최종 렌더 다시 시도</button>
+              <button id="retry-composition-button" class="button button-primary" type="button" hidden disabled>미리보기 구성 다시 시도</button>
+              <button id="retry-render-button" class="button button-primary" type="button" hidden disabled>최종 렌더 다시 시도</button>
             </div>
           </div>
         </section>

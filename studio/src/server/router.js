@@ -1179,6 +1179,7 @@ export function createRouter({
       "approvePlan",
       "execute",
       "reapproveExecution",
+      "retryComposition",
       "retryJob",
       "cancelJob",
       "updateMediaPlan",
@@ -1254,7 +1255,7 @@ export function createRouter({
         return;
       }
 
-      const workflowMatch = /^\/api\/jobs\/([^/]+)\/(login\/manual\/confirm|plan|plan\/approve|execute|execution\/reapprove|retry|cancel|media-plan|preview\/approve)$/u.exec(pathname);
+      const workflowMatch = /^\/api\/jobs\/([^/]+)\/(login\/manual\/confirm|plan|plan\/approve|execute|execution\/reapprove|composition\/retry|retry|cancel|media-plan|preview\/approve)$/u.exec(pathname);
       if (workflowMatch) {
         if (context.studioService === null) throw new HttpError(503, "WORKFLOW_UNAVAILABLE");
         const jobId = decodeComponent(workflowMatch[1]);
@@ -1294,6 +1295,18 @@ export function createRouter({
           scheduleWorkflow(context, jobId, (signal) =>
             context.studioService.reapproveExecution(jobId, recovery, { signal }));
           accepted(response, jobId, "reapprove_execution");
+          return;
+        }
+        if (action === "composition/retry") {
+          assertMethod(request, ["POST"]);
+          const digest = digestBody(
+            await readJson(request, context.maxJsonBytes),
+            "planDigest",
+            "INVALID_RETRY_REQUEST",
+          );
+          scheduleWorkflow(context, jobId, (signal) =>
+            context.studioService.retryComposition(jobId, digest, { signal }));
+          accepted(response, jobId, "retry_composition");
           return;
         }
         if (action === "retry") {

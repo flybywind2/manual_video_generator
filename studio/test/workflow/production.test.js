@@ -32,7 +32,7 @@ async function setup(t, jobId) {
   await store.transition(jobId, "START_EXECUTION", { planDigest: DIGEST });
   await store.transition(jobId, "EXECUTION_COMPLETED", {
     planDigest: DIGEST,
-    report: { status: "completed" },
+    report: { status: "completed", planDigest: DIGEST },
   });
   return store;
 }
@@ -222,6 +222,127 @@ test("render retry keeps the original failure anchor behind rejection self-event
   const retry = (await store.readEvents(jobId)).find(({ event }) => event === "RETRY_RENDER");
   assert.equal(retry.sequence, currentSequence + 1);
   assert.equal(retry.data.retryOfSequence, failure.sequence);
+});
+
+test("composition retry reuses the persisted execution report without browser recapture", async (t) => {
+  const jobId = "job-production-retry-composition";
+  const store = await setup(t, jobId);
+  const calls = [];
+  let composeAttempts = 0;
+  const durableProducer = producer({
+    async narrate({ report }) {
+      calls.push(["narrate", report.planDigest]);
+      return { sceneCount: 1, planDigest: report.planDigest };
+    },
+    async compose({ report, narration }) {
+      composeAttempts += 1;
+      calls.push(["compose", report.planDigest, narration.sceneCount]);
+      if (composeAttempts === 1) throw new Error("strict lint warning");
+      return preview();
+    },
+  });
+  const firstProcess = new ProductionWorkflow({ jobStore: store, producer: durableProducer });
+  await assert.rejects(
+    firstProcess.preparePreview(jobId, {
+      report: { status: "completed", planDigest: DIGEST },
+    }),
+    /strict lint warning/u,
+  );
+
+  const failure = (await store.readEvents(jobId)).at(-1);
+  assert.equal(failure.event, "COMPOSITION_FAILED");
+  assert.equal(failure.data.planDigest, DIGEST);
+
+  const restartedProcess = new ProductionWorkflow({ jobStore: store, producer: durableProducer });
+  const result = await restartedProcess.retryComposition(jobId, DIGEST);
+
+  assert.equal(result.state, "preview_review");
+  assert.equal(result.previewDigest, PREVIEW_DIGEST);
+  assert.deepEqual(calls, [
+    ["narrate", DIGEST],
+    ["compose", DIGEST, 1],
+    ["narrate", DIGEST],
+    ["compose", DIGEST, 1],
+  ]);
+  assert.deepEqual(
+    (await store.readEvents(jobId)).slice(-2).map(({ event }) => event),
+    ["RETRY_COMPOSITION", "COMPOSITION_COMPLETED"],
+  );
+});
+
+test("composition retry recovers a legacy latest failure bound by the preceding narration event", async (t) => {
+  const jobId = "job-production-retry-legacy-composition";
+  const store = await setup(t, jobId);
+  await store.transition(jobId, "NARRATION_COMPLETED", {
+    planDigest: DIGEST,
+    sceneCount: 1,
+  });
+  await store.transition(jobId, "COMPOSITION_FAILED", {
+    reason: "production_failed",
+  });
+  const workflow = new ProductionWorkflow({ jobStore: store, producer: producer() });
+
+  const result = await workflow.retryComposition(jobId, DIGEST);
+
+  assert.equal(result.state, "preview_review");
+  const retry = (await store.readEvents(jobId)).find(
+    ({ event }) => event === "RETRY_COMPOSITION",
+  );
+  assert.equal(retry.data.retryOfSequence, 9);
+  assert.equal(retry.data.planDigest, DIGEST);
+});
+
+test("composition retry recovers an initial composition interrupted by restart", async (t) => {
+  const jobId = "job-production-retry-interrupted-composition";
+  const store = await setup(t, jobId);
+  await store.transition(jobId, "NARRATION_COMPLETED", {
+    planDigest: DIGEST,
+    sceneCount: 1,
+  });
+  await store.transition(jobId, "COMPOSITION_FAILED", {
+    reason: "interrupted_composition",
+    planDigest: DIGEST,
+  });
+  const workflow = new ProductionWorkflow({ jobStore: store, producer: producer() });
+
+  const result = await workflow.retryComposition(jobId, DIGEST);
+
+  assert.equal(result.state, "preview_review");
+  assert.deepEqual(
+    (await store.readEvents(jobId)).slice(-2).map(({ event }) => event),
+    ["RETRY_COMPOSITION", "COMPOSITION_COMPLETED"],
+  );
+});
+
+test("composition retry rejects an interrupted preview edit instead of discarding the edit", async (t) => {
+  const jobId = "job-production-retry-interrupted-edit";
+  const store = await setup(t, jobId);
+  const initial = new ProductionWorkflow({ jobStore: store, producer: producer() });
+  await initial.preparePreview(jobId, {
+    report: { status: "completed", planDigest: DIGEST },
+  });
+  await store.transition(jobId, "EDIT_COMPOSITION", {
+    planDigest: DIGEST,
+    previewDigest: PREVIEW_DIGEST,
+  });
+  await store.transition(jobId, "COMPOSITION_FAILED", {
+    reason: "interrupted_composition",
+    planDigest: DIGEST,
+  });
+  const calls = [];
+  const workflow = new ProductionWorkflow({
+    jobStore: store,
+    producer: producer({
+      async narrate() { calls.push("narrate"); },
+      async compose() { calls.push("compose"); return preview(); },
+    }),
+  });
+
+  await assert.rejects(
+    workflow.retryComposition(jobId, DIGEST),
+    { code: "PRODUCTION_RECOVERY_INVALID" },
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("caption edits invalidate review first, rebuild without recapture, and bind a new preview", async (t) => {

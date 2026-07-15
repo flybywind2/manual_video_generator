@@ -101,12 +101,14 @@ async function createPlanningStore(
 function workflowHarness(store, finalText, { toolEvents } = {}) {
   const calls = { attachAgents: [], runs: [] };
   const outputs = Array.isArray(finalText) ? [...finalText] : [finalText];
-  const reports = toolEvents ?? [
+  const defaultToolEvents = [
     Object.freeze({
       status: "completed",
       tool: "playwright_browser_snapshot",
     }),
   ];
+  const reports = toolEvents ?? defaultToolEvents;
+  const plannerSessionId = "ses_planning_0123456789";
   const openCodeServer = {
     async withAttachOptions(agent, callback) {
       calls.attachAgents.push(agent);
@@ -120,8 +122,17 @@ function workflowHarness(store, finalText, { toolEvents } = {}) {
   };
   const runOpenCode = async (options) => {
     calls.runs.push(options);
-    const output = outputs[Math.min(calls.runs.length - 1, outputs.length - 1)];
-    return Object.freeze({ finalText: output, toolEvents: reports });
+    const reportIndex = calls.runs.length - 1;
+    const output = outputs[Math.min(reportIndex, outputs.length - 1)];
+    if (output instanceof Error) throw output;
+    const attemptToolEvents = Array.isArray(reports[0])
+      ? reports[Math.min(reportIndex, reports.length - 1)]
+      : reports;
+    return Object.freeze({
+      finalText: output,
+      sessionId: options.sessionId ?? plannerSessionId,
+      toolEvents: attemptToolEvents,
+    });
   };
   const workflow = createPlanningWorkflow({
     jobStore: store,
@@ -162,7 +173,10 @@ test("planning uses the attached planner and durably stores the canonical plan a
   assert.match(calls.runs[0].prompt, /narration.*60.*code units/iu);
   assert.match(calls.runs[0].prompt, /forbiddenActions.*user-data\.change.*purchase\.create/su);
   assert.match(calls.runs[0].prompt, /browser_click.*target.*element/su);
+  assert.match(calls.runs[0].prompt, /Each step must have between 1 and 10 calls/iu);
   assert.match(calls.runs[0].prompt, /getByRole.*exact: true/su);
+  assert.match(calls.runs[0].prompt, /getByText.*visible.*label.*exact: true/isu);
+  assert.match(calls.runs[0].prompt, /regex.*chaining.*CSS.*XPath.*text=/isu);
   const authority = JSON.parse(calls.runs[0].prompt.split("\n").at(-1));
   assert.deepEqual(authority.authOrigins, AUTH_ORIGINS);
   assert.deepEqual(authority.resourceOrigins, RESOURCE_ORIGINS);
@@ -349,6 +363,30 @@ test("planning makes one evidence-bound repair after a rejected planner object",
   assert.equal(calls.runs[1].prompt.includes("wrong shape"), false);
 });
 
+test("planning continues the evidence-bearing session when a repair omits a new snapshot", async (t) => {
+  const jobId = "job-plansessionrepair";
+  const { store } = await createPlanningStore(t, jobId);
+  const snapshot = Object.freeze({
+    status: "completed",
+    tool: "playwright_browser_snapshot",
+  });
+  const { calls, workflow } = workflowHarness(
+    store,
+    [
+      JSON.stringify({ ...validPlan(), successCriteria: "wrong shape" }),
+      JSON.stringify(validPlan()),
+    ],
+    { toolEvents: [[snapshot], []] },
+  );
+
+  const result = await workflow.createPlan(jobId);
+
+  assert.equal(result.job.state, "plan_review");
+  assert.equal(calls.runs[0].sessionId, undefined);
+  assert.equal(calls.runs[1].sessionId, "ses_planning_0123456789");
+  assert.match(calls.runs[1].prompt, /completed snapshot.*same planner session/iu);
+});
+
 test("planning repairs a schema-valid response that was not grounded in a completed snapshot", async (t) => {
   const jobId = "job-plansnapshot0001";
   const { store } = await createPlanningStore(t, jobId);
@@ -360,8 +398,68 @@ test("planning repairs a schema-valid response that was not grounded in a comple
 
   await assert.rejects(workflow.createPlan(jobId), { code: "PLANNING_FAILED" });
   assert.equal(calls.runs.length, 2);
+  assert.equal(calls.runs[1].sessionId, "ses_planning_0123456789");
   assert.match(calls.runs[1].prompt, /PLANNING_SNAPSHOT_REQUIRED/u);
   assert.equal((await store.load(jobId)).state, "failed");
+});
+
+test("planning preserves every safe rejection descriptor when the session still fails", async (t) => {
+  const jobId = "job-planfailurehistory";
+  const { store } = await createPlanningStore(t, jobId);
+  const snapshot = Object.freeze({
+    status: "completed",
+    tool: "playwright_browser_snapshot",
+  });
+  const { workflow } = workflowHarness(
+    store,
+    [
+      JSON.stringify({ ...validPlan(), successCriteria: "wrong shape" }),
+      "Commentary before JSON.\n{}",
+    ],
+    { toolEvents: [[snapshot], []] },
+  );
+
+  await assert.rejects(workflow.createPlan(jobId), { code: "PLANNING_FAILED" });
+
+  const failure = (await store.readEvents(jobId)).at(-1);
+  assert.deepEqual(failure.data.attemptFailures, [
+    {
+      code: "INVALID_PLAN",
+      path: "plan.successCriteria",
+      reason: "invalid_array_length",
+    },
+    {
+      code: "PLANNING_OUTPUT_INVALID",
+      reason: "json_parse_other_text",
+    },
+  ]);
+});
+
+test("planning preserves an OpenCode continuation mismatch as a session failure", async (t) => {
+  const jobId = "job-plansessionmismatch";
+  const { store } = await createPlanningStore(t, jobId);
+  const mismatch = Object.assign(new Error("wrong session"), {
+    code: "OPENCODE_SESSION_MISMATCH",
+  });
+  const { workflow } = workflowHarness(store, [
+    JSON.stringify({ ...validPlan(), successCriteria: "wrong shape" }),
+    mismatch,
+  ]);
+
+  await assert.rejects(workflow.createPlan(jobId), { code: "PLANNING_FAILED" });
+
+  const failure = (await store.readEvents(jobId)).at(-1);
+  assert.deepEqual(failure.data.outputFailure, {
+    code: "PLANNING_SESSION_INVALID",
+  });
+  assert.deepEqual(failure.data.attemptFailures, [
+    {
+      code: "INVALID_PLAN",
+      path: "plan.successCriteria",
+      reason: "invalid_array_length",
+    },
+    { code: "PLANNING_SESSION_INVALID" },
+  ]);
 });
 
 test("planning passes the coordinator shutdown signal to OpenCode", async (t) => {

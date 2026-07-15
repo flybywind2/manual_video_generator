@@ -17,6 +17,7 @@ const MAX_PLANNER_TEXT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_COMPLETION_CONDITION = "요청한 최종 화면이 보이면 완료";
 const MAX_APPROVED_ORIGINS = 16;
 const MAX_PLANNING_ATTEMPTS = 2;
+const OPENCODE_SESSION_ID = /^ses_[A-Za-z0-9_-]{1,252}$/u;
 const REQUIRED_FORBIDDEN_ACTIONS = Object.freeze([
   "user-data.change",
   "record.delete",
@@ -164,6 +165,9 @@ function targetAuthority(request) {
 }
 
 function plannerRejection(error) {
+  if (error?.code === "OPENCODE_SESSION_MISMATCH") {
+    return Object.freeze({ code: "PLANNING_SESSION_INVALID" });
+  }
   if (
     error?.code === "INVALID_PLAN" &&
     typeof error?.details?.path === "string" &&
@@ -192,13 +196,18 @@ function plannerRejection(error) {
   return Object.freeze({ code: "PLANNING_OUTPUT_REJECTED" });
 }
 
-function plannerPrompt(authority, rejection = null) {
+function plannerPrompt(authority, rejection = null, snapshotAvailable = false) {
   const instructions = [
     "Return exactly one JSON object with no Markdown or commentary.",
-    "Your first action in this run MUST be the playwright_browser_snapshot tool. Do not return JSON until that snapshot completed successfully.",
+    snapshotAvailable
+      ? "A completed snapshot is already available in the same planner session. Ground the repair in that evidence and refresh it only if the page changed."
+      : "Your first action in this run MUST be the playwright_browser_snapshot tool. Do not return JSON until that snapshot completed successfully.",
     "Use the snapshot to identify accessible roles and names, but never put ephemeral eN or fNeN snapshot refs in the plan.",
     'Every interactive target must use this stable role/name locator grammar with double quotes: getByRole("link", { name: "Exact accessible name", exact: true }).',
+    'Prefer getByRole. Only when an observed clickable visible label has no usable interactive ARIA role, use this strict fallback: getByText("Visible label", { exact: true }).',
     "Use exact: true for a full observed accessible name. For a future same-origin element whose requested label is an unambiguous partial accessible name, omit the exact property; runtime strict uniqueness still fails closed on zero or multiple matches.",
+    'For that future visible-label fallback, use getByText("Unambiguous partial label") without the exact property.',
+    "Never use regex locators, locator chaining, CSS, XPath, text= selectors, raw locator(), or snapshot refs.",
     "Every interactive target in a step after an earlier navigationTarget MUST omit the exact property because that future full accessible name was not observed.",
     "Never click or type during planning. If the requested label is ambiguous, return a blocked step.",
     "The locator role, accessible name, and exact flag are reviewable and digest-bound.",
@@ -210,6 +219,7 @@ function plannerPrompt(authority, rejection = null) {
     `forbiddenActions must be exactly ${JSON.stringify(REQUIRED_FORBIDDEN_ACTIONS)}.`,
     "captureSettings must be exactly {\"width\":1920,\"height\":1080,\"fps\":30}.",
     "Every step must contain id,action,expected,narration,risk,calls.",
+    "Each step must have between 1 and 10 calls.",
     "For every non-blocked plan, the final step expected field MUST equal completionCondition exactly.",
     "Plan every safe action needed to reach completionCondition; an intermediate menu or loading screen is never completion.",
     "When completionCondition is literal visible page text, end the final step with browser_wait_for using that exact text; otherwise use only safe calls appropriate to the described final state.",
@@ -217,7 +227,7 @@ function plannerPrompt(authority, rejection = null) {
     "risk must be exactly one of safe, review, or blocked; it is never a prose explanation.",
     "Omit navigationTarget unless a same-origin route change is intended; then use the complete expected same-origin URL.",
     "Every call must contain id,tool,arguments and use only the planner-approved exact browser call contract.",
-    "browser_click arguments require target and may contain element,doubleClick,button,modifiers; target must be the stable getByRole locator.",
+    "browser_click arguments require target and may contain element,doubleClick,button,modifiers; target must be the stable getByRole locator or the strict getByText visible-label fallback.",
     "browser_type arguments require target,text and may contain element,submit,slowly; if submit is present it must be false.",
     "browser_fill_form arguments are exactly {fields:[{name,type,target,value,element?}]}; every target must be the stable getByRole locator.",
     "browser_press_key arguments are exactly {key}; Enter is forbidden.",
@@ -227,7 +237,9 @@ function plannerPrompt(authority, rejection = null) {
   ];
   if (rejection !== null) {
     instructions.push(
-      "Previous planner object was rejected. Start over from a fresh completed snapshot and do not copy the rejected object.",
+      snapshotAvailable
+        ? "Previous planner object was rejected. Repair it in this same evidence-bearing session without introducing unobserved targets."
+        : "Previous planner object was rejected. First obtain a completed snapshot, then repair it without introducing unobserved targets.",
       `Safe rejection descriptor: ${JSON.stringify(rejection)}`,
     );
   }
@@ -245,12 +257,13 @@ function plannerPrompt(authority, rejection = null) {
   return instructions.join("\n");
 }
 
-function assertCompletedPlanningSnapshot(report) {
-  if (
-    !Array.isArray(report?.toolEvents) ||
-    !report.toolEvents.some((event) =>
-      event?.tool === "playwright_browser_snapshot" && event?.status === "completed")
-  ) {
+function hasCompletedPlanningSnapshot(report) {
+  return Array.isArray(report?.toolEvents) && report.toolEvents.some((event) =>
+    event?.tool === "playwright_browser_snapshot" && event?.status === "completed");
+}
+
+function assertCompletedPlanningSnapshot(snapshotAvailable) {
+  if (!snapshotAvailable) {
     throw planningError(
       "PLANNING_SNAPSHOT_REQUIRED",
       "The planner must inspect the authenticated browser before proposing actions.",
@@ -466,7 +479,10 @@ export function createPlanningWorkflow(options) {
       const authority = targetAuthority(current.request);
       let plan;
       let planDigest;
+      const attemptFailures = [];
       try {
+        let plannerSessionId = null;
+        let snapshotAvailable = false;
         let prompt = plannerPrompt(authority);
         for (let attempt = 0; attempt < MAX_PLANNING_ATTEMPTS; attempt += 1) {
           const report = await settings.openCodeServer.withAttachOptions(
@@ -477,24 +493,45 @@ export function createPlanningWorkflow(options) {
               agent: "manual-video-planner",
               prompt,
               signal,
+              ...(plannerSessionId === null ? {} : { sessionId: plannerSessionId }),
             }),
           );
+          if (
+            !OPENCODE_SESSION_ID.test(report?.sessionId ?? "") ||
+            (plannerSessionId !== null && report.sessionId !== plannerSessionId)
+          ) {
+            throw planningError(
+              "PLANNING_SESSION_INVALID",
+              "The planner repair session is invalid.",
+            );
+          }
+          plannerSessionId = report.sessionId;
+          snapshotAvailable ||= hasCompletedPlanningSnapshot(report);
           try {
-            assertCompletedPlanningSnapshot(report);
+            assertCompletedPlanningSnapshot(snapshotAvailable);
             plan = parsePlannerText(report?.finalText, authority);
             planDigest = digestPlan(plan);
             break;
           } catch (error) {
+            const rejection = plannerRejection(error);
+            attemptFailures.push(rejection);
             if (attempt + 1 >= MAX_PLANNING_ATTEMPTS) throw error;
-            prompt = plannerPrompt(authority, plannerRejection(error));
+            prompt = plannerPrompt(authority, rejection, snapshotAvailable);
           }
         }
       } catch (error) {
         const outputFailure = plannerRejection(error);
+        if (
+          attemptFailures.length === 0 ||
+          JSON.stringify(attemptFailures.at(-1)) !== JSON.stringify(outputFailure)
+        ) {
+          attemptFailures.push(outputFailure);
+        }
         try {
           await settings.jobStore.transition(jobId, "PLANNING_FAILED", {
             reason: "planner_output_rejected",
             outputFailure,
+            attemptFailures,
           });
         } catch {
           // The original durable state remains authoritative.

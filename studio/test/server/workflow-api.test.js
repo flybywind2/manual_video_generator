@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
 
+import { createApp } from "../../src/server/app.js";
 import { startTestStudio } from "../fixtures/login-site.js";
 
 function request(overrides = {}) {
@@ -45,6 +47,8 @@ function fakeService(calls) {
       calls.push(["reapprove", id, recovery, options?.signal]),
     retryJob: async (id, recovery, options) =>
       calls.push(["retry", id, recovery, options?.signal]),
+    retryComposition: async (id, digest, options) =>
+      calls.push(["retry-composition", id, digest, options?.signal]),
     cancelJob: async (id) => {
       calls.push(["cancel", id]);
       return { id, state: "cancelled" };
@@ -57,6 +61,26 @@ function fakeService(calls) {
       calls.push(["approve-preview", id, digest, options?.signal]),
   };
 }
+
+test("startup rejects a studio service missing composition recovery", () => {
+  const { retryComposition: _missing, ...studioService } = fakeService([]);
+
+  assert.throws(
+    () => createApp({
+      jobStore: {
+        root: resolve("data/jobs"),
+        create: async () => undefined,
+        load: async () => undefined,
+      },
+      eventBus: { subscribe: () => undefined },
+      healthCheck: async () => ({ ready: true, checks: {} }),
+      jobsRoot: resolve("data/jobs"),
+      publicRoot: resolve("public"),
+      studioService,
+    }),
+    { name: "TypeError", message: "studioService is invalid" },
+  );
+});
 
 test("job creation accepts the complete product request and schedules authentication", async (t) => {
   const calls = [];
@@ -249,6 +273,42 @@ test("mismatch reapproval and render retry are digest-bound supervised operation
     ["reapprove", "job-recover", { planDigest, mismatchSequence }, controller.signal],
     ["retry", "job-recover", { planDigest, previewDigest }, controller.signal],
   ]);
+});
+
+test("composition retry is a digest-bound supervised operation", async (t) => {
+  const calls = [];
+  const pending = [];
+  const controller = new AbortController();
+  const { baseUrl } = await startTestStudio(t, {
+    studioService: fakeService(calls),
+    scheduleBackground(operation) {
+      const tracked = Promise.resolve().then(() => operation(controller.signal));
+      pending.push(tracked);
+      return tracked;
+    },
+  });
+  const planDigest = "a".repeat(64);
+
+  const response = await send(
+    baseUrl,
+    "/api/jobs/job-recover/composition/retry",
+    "POST",
+    { planDigest },
+  );
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    accepted: true,
+    jobId: "job-recover",
+    operation: "retry_composition",
+  });
+  await Promise.all(pending);
+  assert.deepEqual(calls, [[
+    "retry-composition",
+    "job-recover",
+    planDigest,
+    controller.signal,
+  ]]);
 });
 
 test("mismatch reapproval requires an exact digest and positive safe mismatch sequence", async (t) => {

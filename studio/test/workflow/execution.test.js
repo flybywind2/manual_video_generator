@@ -161,7 +161,11 @@ function harness(store, jobId, finalValue, overrides = {}) {
     openCodeStops: 0,
   };
   const browserRuntime = {
-    active: { jobId: overrides.runtimeJobId ?? jobId, generation: 7, phase: "planning" },
+    active: {
+      jobId: overrides.runtimeJobId ?? jobId,
+      generation: 7,
+      phase: overrides.runtimePhase ?? "planning",
+    },
     installApproval(input) {
       calls.approvals.push(structuredClone(input));
       this.active = { jobId, generation: 7, phase: "execution" };
@@ -461,6 +465,24 @@ test("execution rejects stale approval before installing gateway authority", asy
   assert.equal((await fixture.store.load(jobId)).state, "approved");
   assert.equal(calls.approvals.length, 0);
   assert.deepEqual(executionLock.snapshot(), { activeJobId: null, queuedJobId: null });
+});
+
+test("pre-execution runtime failures persist a safe diagnostic code", async (t) => {
+  const jobId = "job-execdiagnostic0001";
+  const fixture = await approvedStore(t, jobId);
+  const { workflow } = harness(
+    fixture.store,
+    jobId,
+    completedReport(jobId, fixture.plan, fixture.planDigest),
+    { runtimePhase: "quarantined" },
+  );
+
+  await assert.rejects(workflow.execute(jobId, fixture.planDigest), {
+    code: "EXECUTION_FAILED",
+  });
+  const failed = (await fixture.store.readEvents(jobId)).at(-1);
+  assert.equal(failed.event, "EXECUTION_FAILED");
+  assert.deepEqual(failed.data.failure, { code: "EXECUTION_BROWSER_INACTIVE" });
 });
 
 test("a validated mismatch stops all runtimes and enters needs_review", async (t) => {

@@ -86,6 +86,7 @@ export const TRANSITIONS = Object.freeze({
   completed: freeze({}),
   failed: freeze({
     OPERATION_REJECTED: "failed",
+    RETRY_COMPOSITION: "composing",
     RETRY_RENDER: "rendering",
   }),
 });

@@ -9,6 +9,7 @@ const OPTION_KEYS = new Set([
   "baseUrl",
   "studioRoot",
   "agent",
+  "sessionId",
   "prompt",
   "env",
   "signal",
@@ -19,6 +20,7 @@ const OPTION_KEYS = new Set([
   "validateServerContract",
 ]);
 const AGENTS = new Set(["manual-video-planner", "manual-video-executor"]);
+const SESSION_ID = /^ses_[A-Za-z0-9_-]{1,252}$/u;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const MAX_WINDOWS_COMMAND_UNITS = 24_000;
 const MAX_DIAGNOSTIC_BYTES = 1024 * 1024;
@@ -186,6 +188,7 @@ function inspectOptions(options) {
   const baseUrl = dataValue(options, "baseUrl", true);
   const studioRoot = dataValue(options, "studioRoot", true);
   const agent = dataValue(options, "agent", true);
+  const sessionId = dataValue(options, "sessionId");
   const prompt = dataValue(options, "prompt", true);
   const env = sanitizeOpenCodeEnvironment(dataValue(options, "env", true));
   const signal = dataValue(options, "signal");
@@ -209,6 +212,8 @@ function inspectOptions(options) {
     !path.isAbsolute(studioRoot) ||
     typeof agent !== "string" ||
     !AGENTS.has(agent) ||
+    (sessionId !== undefined &&
+      (typeof sessionId !== "string" || !SESSION_ID.test(sessionId))) ||
     typeof prompt !== "string" ||
     prompt.length === 0 ||
     prompt.includes("\0") ||
@@ -236,7 +241,9 @@ function inspectOptions(options) {
   }
   const commandArguments = [
     "run", "--pure", "--format", "json", "--attach", parsed.origin,
-    "--dir", studioRoot, "--agent", agent, "--", prompt,
+    "--dir", studioRoot, "--agent", agent,
+    ...(sessionId === undefined ? [] : ["--session", sessionId]),
+    "--", prompt,
   ];
   if (conservativeCommandUnits(opencodePath, commandArguments) > MAX_WINDOWS_COMMAND_UNITS) {
     throw new Error("command line too large");
@@ -246,6 +253,7 @@ function inspectOptions(options) {
     baseUrl: parsed.origin,
     studioRoot,
     agent,
+    sessionId,
     prompt,
     env,
     signal,
@@ -280,6 +288,7 @@ export async function runOpenCode(options) {
     settings.studioRoot,
     "--agent",
     settings.agent,
+    ...(settings.sessionId === undefined ? [] : ["--session", settings.sessionId]),
     "--",
     settings.prompt,
   ]);
@@ -336,6 +345,16 @@ export async function runOpenCode(options) {
           throw clientError("OPENCODE_STREAM_INVALID", "The OpenCode output stream is invalid.");
         }
         const parsed = parser.push(text);
+        if (parsed.kind === "event" && settings.sessionId !== undefined) {
+          const eventSessionId = dataValue(parsed.event, "sessionID") ??
+            dataValue(parsed.event, "sessionId");
+          if (eventSessionId !== settings.sessionId) {
+            throw clientError(
+              "OPENCODE_SESSION_MISMATCH",
+              "OpenCode returned a different session.",
+            );
+          }
+        }
         if (parsed.kind === "event" && parsed.event.type === "tool_use") {
           const tool = parsed.event.part?.tool;
           if (typeof tool !== "string" || !AGENT_TOOLS[settings.agent].has(tool)) {
@@ -367,6 +386,12 @@ export async function runOpenCode(options) {
   }
   if (!report.completed || !report.sessionId) {
     throw clientError("OPENCODE_INCOMPLETE", "OpenCode did not complete its session.");
+  }
+  if (settings.sessionId !== undefined && report.sessionId !== settings.sessionId) {
+    throw clientError(
+      "OPENCODE_SESSION_MISMATCH",
+      "OpenCode returned a different session.",
+    );
   }
   return Object.freeze({
     ...report,

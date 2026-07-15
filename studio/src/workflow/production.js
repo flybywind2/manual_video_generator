@@ -72,6 +72,71 @@ function validatePreview(value) {
   return value;
 }
 
+function compositionRecoveryBinding(events, failure) {
+  if (
+    !Array.isArray(events) ||
+    failure?.event !== "COMPOSITION_FAILED" ||
+    !new Set([
+      "production_failed",
+      "composition_retry_failed",
+      "interrupted_composition",
+    ]).has(
+      failure?.data?.reason,
+    )
+  ) {
+    throw productionError(
+      "PRODUCTION_RECOVERY_INVALID",
+      "The composition recovery request is invalid.",
+    );
+  }
+  let narration = null;
+  let execution = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!Number.isSafeInteger(event?.sequence) || event.sequence >= failure.sequence) {
+      continue;
+    }
+    if (narration === null && event.event === "NARRATION_COMPLETED") {
+      narration = event;
+    }
+    if (event.event === "EXECUTION_COMPLETED") {
+      execution = event;
+      break;
+    }
+  }
+  const failureHasDigest = DIGEST.test(failure?.data?.planDigest ?? "");
+  const anchoredPlanDigest = failureHasDigest
+    ? failure.data.planDigest
+    : narration?.data?.planDigest;
+  const planDigestSequence = failureHasDigest
+    ? failure.sequence
+    : narration?.sequence;
+  const report = execution?.data?.report;
+  if (
+    !DIGEST.test(anchoredPlanDigest ?? "") ||
+    !Number.isSafeInteger(planDigestSequence) ||
+    !sameDigest(narration?.data?.planDigest, anchoredPlanDigest) ||
+    !sameDigest(execution?.data?.planDigest, anchoredPlanDigest) ||
+    report?.status !== "completed" ||
+    !sameDigest(report?.planDigest, anchoredPlanDigest) ||
+    events.some((event) =>
+      event.sequence > execution.sequence &&
+      event.sequence < failure.sequence &&
+      new Set(["EDIT_COMPOSITION", "EDIT_NARRATION", "COMPOSITION_COMPLETED"])
+        .has(event.event))
+  ) {
+    throw productionError(
+      "PRODUCTION_RECOVERY_INVALID",
+      "The composition recovery request is invalid.",
+    );
+  }
+  return Object.freeze({
+    planDigest: anchoredPlanDigest,
+    planDigestSequence,
+    report,
+  });
+}
+
 async function latestPreview(jobStore, jobId) {
   const events = await jobStore.readEvents(jobId, 0);
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -184,8 +249,98 @@ export class ProductionWorkflow {
           await this.#jobStore.transition(
             jobId,
             stage === "narrating" ? "NARRATION_FAILED" : "COMPOSITION_FAILED",
-            { reason: "production_failed" },
+            {
+              reason: "production_failed",
+              planDigest: options.report.planDigest,
+            },
           ).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+  }
+
+  async retryComposition(jobIdInput, expectedPlanDigest, options = {}) {
+    const jobId = validJobId(jobIdInput);
+    const planDigest = validDigest(expectedPlanDigest, "PLAN_DIGEST_MISMATCH");
+    const externalSignal = signalOption(options);
+    const [current, events] = await Promise.all([
+      this.#jobStore.load(jobId),
+      this.#jobStore.readEvents(jobId, 0),
+    ]);
+    const failure = findRecoveryAnchor(events, {
+      anchorEvent: "COMPOSITION_FAILED",
+      currentEventSequence: current.eventSequence,
+      currentState: "failed",
+    });
+    const binding = compositionRecoveryBinding(events, failure);
+    const descriptor = createFailureDescriptor({
+      jobId,
+      eventSequence: failure?.sequence,
+      planDigest: binding.planDigest,
+      failedFrom: "composing",
+      failedEvent: failure?.event,
+    });
+    const resumeFrom = resumeFailure(descriptor, {
+      currentState: current.state,
+      jobId,
+      eventSequence: failure?.sequence,
+      planDigest,
+      requestedResumeFrom: "composing",
+    });
+    if (resumeFrom !== "composing" || !sameDigest(binding.planDigest, planDigest)) {
+      throw productionError(
+        "PRODUCTION_RECOVERY_INVALID",
+        "The composition recovery request is invalid.",
+      );
+    }
+
+    return this.#run(jobId, externalSignal, async (signal) => {
+      await this.#jobStore.compareAndTransition(jobId, {
+        expectedState: "failed",
+        expectedEventSequence: current.eventSequence,
+        expectedPlanDigest: planDigest,
+        expectedPlanDigestSequence: binding.planDigestSequence,
+        eventName: "RETRY_COMPOSITION",
+        data: {
+          planDigest,
+          retryOfSequence: failure.sequence,
+        },
+      });
+      try {
+        const narration = await this.#producer.narrate({
+          jobId,
+          job: current,
+          report: binding.report,
+          signal,
+        });
+        const preview = validatePreview(await this.#producer.compose({
+          jobId,
+          job: current,
+          report: binding.report,
+          narration,
+          signal,
+        }));
+        if (!sameDigest(preview.planDigest, planDigest)) {
+          throw productionError(
+            "PRODUCTION_PLAN_MISMATCH",
+            "The media plan is not bound to the execution report.",
+          );
+        }
+        const job = await this.#jobStore.transition(jobId, "COMPOSITION_COMPLETED", {
+          planDigest: preview.planDigest,
+          preview,
+          previewDigest: preview.previewDigest,
+        });
+        return Object.freeze({ state: job.state, ...preview });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const latest = await this.#jobStore.load(jobId).catch(() => null);
+        if (latest?.state === "composing") {
+          await this.#jobStore.transition(jobId, "COMPOSITION_FAILED", {
+            reason: "composition_retry_failed",
+            planDigest,
+          }).catch(() => undefined);
         }
         throw error;
       }

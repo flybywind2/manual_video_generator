@@ -69,6 +69,7 @@ function service(overrides = {}) {
     execute: async () => {},
     reapproveExecution: async () => {},
     retryJob: async () => {},
+    retryComposition: async () => {},
     cancelJob: async () => {},
     updateMediaPlan: async () => {},
     approvePreview: async () => {},

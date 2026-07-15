@@ -32,6 +32,7 @@ function workflow(overrides = {}) {
       preparePreview: async () => ({ state: "preview_review" }),
       updateMediaPlan: async () => ({}),
       approvePreview: async () => ({ state: "completed" }),
+      retryComposition: async () => ({ state: "preview_review" }),
       retryRender: async () => ({ state: "completed" }),
       cancel: async () => ({ state: "cancelled" }),
       ...overrides.production,
@@ -223,6 +224,36 @@ test("retryJob resumes a render from its bound persisted media without executing
     "job-service-render-retry",
     "a".repeat(64),
     "b".repeat(64),
+    options,
+  ]]);
+});
+
+test("retryComposition resumes persisted media without executing the browser", async () => {
+  const calls = [];
+  const studio = service({
+    execution: {
+      execute: async () => calls.push("unexpected-browser-execution"),
+    },
+    production: {
+      retryComposition: async (jobId, planDigest, options) => {
+        calls.push(["retry-composition", jobId, planDigest, options]);
+        return { state: "preview_review", previewArtifact: "preview.mp4" };
+      },
+    },
+  });
+  const options = { signal: new AbortController().signal };
+
+  const result = await studio.retryComposition(
+    "job-service-composition-retry",
+    "a".repeat(64),
+    options,
+  );
+
+  assert.equal(result.state, "preview_review");
+  assert.deepEqual(calls, [[
+    "retry-composition",
+    "job-service-composition-retry",
+    "a".repeat(64),
     options,
   ]]);
 });
