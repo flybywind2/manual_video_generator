@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -191,7 +191,10 @@ async function fixture(t, overrides = {}) {
     mediaPlanDigest: overrides.mediaPlanDigest,
     previewPort: 49_317,
   };
-  const createProducer = () => createMediaProducer(producerOptions);
+  const createProducer = (producerOverrides = {}) => createMediaProducer({
+    ...producerOptions,
+    ...producerOverrides,
+  });
   const producer = createProducer();
 
   return {
@@ -1079,6 +1082,73 @@ test("verifyPreview rejects missing, stale, and swapped source highlight binding
       { code: "PRODUCER_PREVIEW_INVALID" },
     );
   });
+});
+
+test("verifyPreview fingerprints the same source highlight bytes it validates", async (t) => {
+  const context = await fixture(t);
+  const { preview } = await preparedPreview(context);
+  const sourcePath = join(context.jobRoot, "artifacts", "source-highlights.json");
+  const approvedBytes = await readFile(sourcePath);
+  const forgedBinding = JSON.parse(approvedBytes.toString("utf8"));
+  forgedBinding.scenes[0].highlights[0].sourceAtMs += 1;
+  await writeFile(sourcePath, `${JSON.stringify(forgedBinding)}\n`, "utf8");
+
+  let digestCalls = 0;
+  const verifier = context.createProducer({
+    mediaPlanDigest(value) {
+      digestCalls += 1;
+      if (digestCalls === 2) writeFileSync(sourcePath, approvedBytes);
+      return mediaPlanDigest(value);
+    },
+  });
+
+  await assert.rejects(
+    verifier.verifyPreview({ jobId: context.jobId, preview }),
+    { code: "PRODUCER_PREVIEW_STALE" },
+  );
+});
+
+test("preview publication binds integrity to the exact source highlight bytes atomically written", async (t) => {
+  const context = await fixture(t);
+  const report = executionReport(context.planDigest);
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const artifactsPath = join(context.jobRoot, "artifacts");
+  const sourcePath = join(artifactsPath, "source-highlights.json");
+
+  let sourceWatcher;
+  const swapped = new Promise((resolve, reject) => {
+    sourceWatcher = watch(artifactsPath, (_event, fileName) => {
+      if (fileName?.toString() !== "source-highlights.json") return;
+      sourceWatcher.close();
+      try {
+        const forgedBinding = JSON.parse(readFileSync(sourcePath, "utf8"));
+        forgedBinding.scenes[0].highlights[0].sourceAtMs += 1;
+        writeFileSync(sourcePath, `${JSON.stringify(forgedBinding)}\n`, "utf8");
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+  t.after(() => sourceWatcher?.close());
+
+  await Promise.all([
+    assert.rejects(
+      context.producer.compose({
+        jobId: context.jobId,
+        job,
+        report,
+        narration,
+      }),
+      { code: "UNSAFE_MEDIA_PATH" },
+    ),
+    swapped,
+  ]);
 });
 
 test("final rendering regenerates and checks the approved composition before HyperFrames", async (t) => {

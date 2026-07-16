@@ -322,14 +322,19 @@ async function atomicWrite(root, targetPath, bytes) {
   const temporary = join(parent.path, `.${basename(target)}.${randomUUID()}.tmp`);
   let handle;
   let published = false;
+  let fingerprint;
   try {
-    handle = await open(temporary, "wx", 0o600);
+    handle = await open(temporary, "wx+", 0o600);
     await handle.writeFile(bytes);
     await handle.sync();
-    const staged = await handle.stat();
-    await handle.close();
-    handle = undefined;
-    if (!staged.isFile() || staged.nlink !== 1) throw invalidPath("unsafe_staged_file");
+    const staged = await handle.stat({ bigint: true });
+    if (
+      !staged.isFile() ||
+      staged.nlink !== 1n ||
+      staged.size !== BigInt(bytes.length)
+    ) {
+      throw invalidPath("unsafe_staged_file");
+    }
     const parentAfter = await lstat(parent.path).catch(() => null);
     if (
       !parentAfter?.isDirectory() ||
@@ -350,21 +355,53 @@ async function atomicWrite(root, targetPath, bytes) {
       throw invalidPath("publish_target_changed");
     }
     await rename(temporary, target);
-    const final = await lstat(target);
+    const before = await handle.stat({ bigint: true });
+    const namedBefore = await lstat(target, { bigint: true }).catch(() => null);
     if (
-      !final.isFile() ||
-      final.isSymbolicLink() ||
-      final.nlink !== 1 ||
-      !sameIdentity(staged, final) ||
+      namedBefore === null ||
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size !== BigInt(bytes.length) ||
+      !sameBigIntSnapshot(before, namedBefore) ||
       !strictChild(root, await realpath(target))
     ) {
       throw invalidPath("unsafe_published_file");
     }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1_024);
+    let position = 0;
+    while (position < bytes.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, bytes.length - position),
+        position,
+      );
+      if (bytesRead < 1) throw invalidPath("published_file_truncated");
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    const [after, namedAfter] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(target, { bigint: true }).catch(() => null),
+    ]);
+    const sha256 = hash.digest("hex");
+    if (
+      namedAfter === null ||
+      !sameBigIntSnapshot(before, after) ||
+      !sameBigIntSnapshot(after, namedAfter) ||
+      !strictChild(root, await realpath(target)) ||
+      !equalDigest(sha256, createHash("sha256").update(bytes).digest("hex"))
+    ) {
+      throw invalidPath("published_file_changed");
+    }
+    fingerprint = Object.freeze({ sha256, bytes: bytes.length });
     published = true;
   } finally {
     await handle?.close().catch(() => undefined);
     if (!published) await rm(temporary, { force: true }).catch(() => undefined);
   }
+  return fingerprint;
 }
 
 function jsonBytes(value) {
@@ -391,6 +428,11 @@ function jsonBytes(value) {
 
 async function atomicJson(root, target, value) {
   await atomicWrite(root, target, jsonBytes(value));
+}
+
+async function atomicJsonFingerprint(root, target, value, logicalPath) {
+  const fingerprint = await atomicWrite(root, target, jsonBytes(value));
+  return Object.freeze({ path: logicalPath, ...fingerprint });
 }
 
 async function readJson(root, target) {
@@ -1181,26 +1223,35 @@ function parsePreviewIntegrity(value, mediaPlan, planDigest, previewDigest) {
   return Object.freeze(records);
 }
 
-async function fingerprintPaths(layout, mediaPlan) {
+async function fingerprintPaths(layout, mediaPlan, fingerprints = new Map()) {
   const records = [];
   for (const logicalPath of integrityPaths(mediaPlan)) {
-    records.push(await fingerprintRegular(
-      layout.jobRoot,
-      join(layout.jobRoot, ...logicalPath.split("/")),
-      logicalPath,
-    ));
+    records.push(
+      fingerprints.get(logicalPath) ?? await fingerprintRegular(
+        layout.jobRoot,
+        join(layout.jobRoot, ...logicalPath.split("/")),
+        logicalPath,
+      ),
+    );
   }
   return Object.freeze(records);
 }
 
-async function verifyIntegrity(layout, mediaPlan, manifest, planDigest, previewDigest) {
+async function verifyIntegrity(
+  layout,
+  mediaPlan,
+  manifest,
+  planDigest,
+  previewDigest,
+  fingerprints,
+) {
   const expected = parsePreviewIntegrity(
     manifest,
     mediaPlan,
     planDigest,
     previewDigest,
   );
-  const actual = await fingerprintPaths(layout, mediaPlan);
+  const actual = await fingerprintPaths(layout, mediaPlan, fingerprints);
   for (let index = 0; index < expected.length; index += 1) {
     if (
       expected[index].path !== actual[index].path ||
@@ -1696,10 +1747,11 @@ export class MediaProducer {
       throw invalidPath("preview_file_changed_before_publication");
     }
     await atomicJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json"), mediaPlan);
-    await atomicJson(
+    const sourceFingerprint = await atomicJsonFingerprint(
       layout.jobRoot,
       join(layout.artifactsPath, SOURCE_HIGHLIGHTS_FILE),
       sourceBinding,
+      `artifacts/${SOURCE_HIGHLIGHTS_FILE}`,
     );
     await atomicWrite(layout.jobRoot, join(layout.artifactsPath, "captions.vtt"), captionsVtt(mediaPlan));
     const beforeIntegrity = await requireRegular(layout.jobRoot, previewPath, {
@@ -1712,7 +1764,11 @@ export class MediaProducer {
       schemaVersion: "1.0",
       planDigest,
       previewDigest: digest,
-      files: await fingerprintPaths(layout, mediaPlan),
+      files: await fingerprintPaths(
+        layout,
+        mediaPlan,
+        new Map([[sourceFingerprint.path, sourceFingerprint]]),
+      ),
     });
     const afterFingerprint = await requireRegular(layout.jobRoot, previewPath, {
       minimumBytes: 1,
@@ -1839,10 +1895,14 @@ export class MediaProducer {
         "event_media_plan",
       );
     }
-    const [mediaPlan, metadata, sourceBindingCandidate] = await Promise.all([
+    const [mediaPlan, metadata, sourceBindingRead] = await Promise.all([
       readJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json")),
       readJson(layout.jobRoot, join(layout.artifactsPath, "preview.json")),
-      readJson(layout.jobRoot, join(layout.artifactsPath, SOURCE_HIGHLIGHTS_FILE)),
+      readJsonFingerprint(
+        layout.jobRoot,
+        join(layout.artifactsPath, SOURCE_HIGHLIGHTS_FILE),
+        `artifacts/${SOURCE_HIGHLIGHTS_FILE}`,
+      ),
     ]);
     exactPreviewMetadata(metadata);
     const digest = this.#mediaPlanDigest(mediaPlan);
@@ -1867,7 +1927,7 @@ export class MediaProducer {
       );
     }
     const sourceBinding = validateSourceHighlightBinding(
-      sourceBindingCandidate,
+      sourceBindingRead.value,
       mediaPlan,
       {
         jobId: layout.jobId,
@@ -1886,6 +1946,7 @@ export class MediaProducer {
       integrityRead.value,
       preview.planDigest,
       preview.previewDigest,
+      new Map([[sourceBindingRead.fingerprint.path, sourceBindingRead.fingerprint]]),
     );
     if (
       !equalDigest(
