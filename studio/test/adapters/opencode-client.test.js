@@ -54,7 +54,7 @@ function successfulLines() {
   ];
 }
 
-test("parseOpenCodeLines accepts the active 1.4.1 envelope and normalizes final text and tools", () => {
+test("parseOpenCodeLines enforces the version-independent synthetic event contract", () => {
   const report = parseOpenCodeLines([
     ...successfulLines(),
     "OpenCode diagnostic without JSON",
@@ -77,7 +77,7 @@ test("parseOpenCodeLines accepts the active 1.4.1 envelope and normalizes final 
   assert.equal(Object.isFrozen(report), true);
 });
 
-test("parseOpenCodeLines rejects unknown pinned-version JSON events", () => {
+test("parseOpenCodeLines rejects unknown JSON event envelopes", () => {
   assert.throws(
     () => parseOpenCodeLines([event("future_event", { type: "future", value: 1 })]),
     (error) => error.code === "OPENCODE_EVENT_UNKNOWN",

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+
+import { resolveOpenCodeInstallation } from "../../src/runtime/opencode-installation.js";
 
 const execFileAsync = promisify(execFile);
 const studioRoot = path.resolve(".");
@@ -192,16 +194,39 @@ test("trusted project digest matches the exact OpenCode config and agent prompts
   assert.equal(trusted[1], hash.digest("hex"));
 });
 
-async function selectedOpenCode() {
-  const { stdout } = await execFileAsync("where.exe", ["opencode"], {
+async function supportedOpenCode(expectedVersion) {
+  const selection = expectedVersion === "1.17.19"
+    ? {
+        path: path.join(
+          studioRoot,
+          ".runtime",
+          "opencode-1.17.19-probe",
+          "node_modules",
+          "opencode-ai",
+          "bin",
+          "opencode.exe",
+        ),
+        version: expectedVersion,
+      }
+    : await resolveOpenCodeInstallation({
+        environment: process.env,
+        mode: "check",
+        runtimeRoot: path.join(studioRoot, ".runtime", "opencode"),
+        studioRoot,
+      });
+  const executable = await realpath(selection.path);
+  const stat = await lstat(executable);
+  assert.equal(stat.isFile(), true);
+  assert.equal(stat.isSymbolicLink(), false);
+  assert.equal(path.extname(executable).toLowerCase(), ".exe");
+  const result = await execFileAsync(executable, ["--version"], {
     encoding: "utf8",
-    timeout: 5_000,
+    timeout: 10_000,
     windowsHide: true,
   });
-  const executable = stdout.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.toLowerCase().endsWith(".exe"));
-  assert.ok(executable && path.isAbsolute(executable));
-  const version = await execFileAsync(executable, ["--version"], { encoding: "utf8", timeout: 10_000, windowsHide: true });
-  assert.match(`${version.stdout}${version.stderr}`, /(?:^|\D)1\.4\.1(?:\D|$)/u);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, `${expectedVersion}\n`);
+  assert.equal(selection.version, expectedVersion);
   return executable;
 }
 
@@ -249,56 +274,58 @@ async function debugJson(executable, args, fixture) {
   return JSON.parse(result.stdout);
 }
 
-test("actual OpenCode 1.4.1 resolves the isolated config and both primary agents without model drift", {
-  skip: process.platform !== "win32",
-  timeout: 120_000,
-}, async (t) => {
-  const executable = await selectedOpenCode();
-  const fixture = await isolatedProject(t);
-  const resolved = await debugJson(executable, ["debug", "config", "--pure"], fixture);
-  assert.equal(resolved.model, undefined);
-  assert.equal(resolved.small_model, undefined);
-  assert.deepEqual(Object.keys(resolved.mcp), ["playwright"]);
-  assert.equal(resolved.mcp.playwright.url, "http://127.0.0.1:8931/mcp");
-  assert.deepEqual(resolved.mcp.playwright.headers, {
-    Authorization: `Bearer ${mcpCapabilityToken}`,
+for (const expectedVersion of ["1.17.19", "1.18.2"]) {
+  test(`actual OpenCode ${expectedVersion} resolves the isolated config and both primary agents without model drift`, {
+    skip: process.platform !== "win32",
+    timeout: 120_000,
+  }, async (t) => {
+    const executable = await supportedOpenCode(expectedVersion);
+    const fixture = await isolatedProject(t);
+    const resolved = await debugJson(executable, ["debug", "config", "--pure"], fixture);
+    assert.equal(resolved.model, undefined);
+    assert.equal(resolved.small_model, undefined);
+    assert.deepEqual(Object.keys(resolved.mcp), ["playwright"]);
+    assert.equal(resolved.mcp.playwright.url, "http://127.0.0.1:8931/mcp");
+    assert.deepEqual(resolved.mcp.playwright.headers, {
+      Authorization: `Bearer ${mcpCapabilityToken}`,
+    });
+    assert.equal(resolved.permission["*"], "deny");
+
+    for (const name of ["manual-video-planner", "manual-video-executor"]) {
+      const agent = await debugJson(executable, ["debug", "agent", name, "--pure"], fixture);
+      assert.equal(agent.name, name);
+      assert.equal(agent.mode, "primary");
+      assert.equal(agent.model, undefined);
+    }
   });
-  assert.equal(resolved.permission["*"], "deny");
 
-  for (const name of ["manual-video-planner", "manual-video-executor"]) {
-    const agent = await debugJson(executable, ["debug", "agent", name, "--pure"], fixture);
-    assert.equal(agent.name, name);
-    assert.equal(agent.mode, "primary");
-    assert.equal(agent.model, undefined);
-  }
-});
-
-test("actual isolated agents reject native and unsafe browser tools", {
-  skip: process.platform !== "win32",
-  timeout: 120_000,
-}, async (t) => {
-  const executable = await selectedOpenCode();
-  const fixture = await isolatedProject(t);
-  for (const tool of [
-    "bash",
-    "edit",
-    "webfetch",
-    "websearch",
-    "external_directory",
-    "playwright_browser_run_code_unsafe",
-    "playwright_browser_evaluate",
-    "playwright_browser_file_upload",
-  ]) {
-    await assert.rejects(
-      execFileAsync(
-        executable,
-        ["debug", "agent", "manual-video-executor", "--tool", tool, "--params", "{}", "--pure"],
-        { cwd: fixture.root, env: fixture.env, encoding: "utf8", timeout: 30_000, windowsHide: true, maxBuffer: 256 * 1024 },
-      ),
-      (error) => {
-        const safe = `${error.stdout ?? ""}${error.stderr ?? ""}`;
-        return !safe.includes("automatic-password") && /(?:disabled|denied|not found|not_found)/iu.test(safe);
-      },
-    );
-  }
-});
+  test(`actual OpenCode ${expectedVersion} isolated agents reject native and unsafe browser tools`, {
+    skip: process.platform !== "win32",
+    timeout: 120_000,
+  }, async (t) => {
+    const executable = await supportedOpenCode(expectedVersion);
+    const fixture = await isolatedProject(t);
+    for (const tool of [
+      "bash",
+      "edit",
+      "webfetch",
+      "websearch",
+      "external_directory",
+      "playwright_browser_run_code_unsafe",
+      "playwright_browser_evaluate",
+      "playwright_browser_file_upload",
+    ]) {
+      await assert.rejects(
+        execFileAsync(
+          executable,
+          ["debug", "agent", "manual-video-executor", "--tool", tool, "--params", "{}", "--pure"],
+          { cwd: fixture.root, env: fixture.env, encoding: "utf8", timeout: 30_000, windowsHide: true, maxBuffer: 256 * 1024 },
+        ),
+        (error) => {
+          const safe = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+          return !safe.includes("automatic-password") && /(?:disabled|denied|not found|not_found)/iu.test(safe);
+        },
+      );
+    }
+  });
+}

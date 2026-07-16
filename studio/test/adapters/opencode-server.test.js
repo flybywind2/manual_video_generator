@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { runOpenCode } from "../../src/adapters/opencode-client.js";
 import { OpenCodeServer } from "../../src/adapters/opencode-server.js";
 import { resolveOpenCodeInstallation } from "../../src/runtime/opencode-installation.js";
 
 const sourceStudioRoot = path.resolve(".");
+const execFileAsync = promisify(execFile);
 const MCP_CAPABILITY_TOKEN = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 const OTHER_MCP_CAPABILITY_TOKEN = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
 
@@ -18,13 +21,45 @@ function jobOptions(jobId, additional = {}) {
   return { jobId, mcpCapabilityToken: MCP_CAPABILITY_TOKEN, ...additional };
 }
 
-async function selectedOpenCode() {
-  return resolveOpenCodeInstallation({
-    environment: process.env,
-    mode: "check",
-    runtimeRoot: path.join(sourceStudioRoot, ".runtime", "opencode"),
-    studioRoot: sourceStudioRoot,
+async function supportedOpenCode(expectedVersion) {
+  const selection = expectedVersion === "1.17.19"
+    ? {
+        path: path.join(
+          sourceStudioRoot,
+          ".runtime",
+          "opencode-1.17.19-probe",
+          "node_modules",
+          "opencode-ai",
+          "bin",
+          "opencode.exe",
+        ),
+        source: "version-probe",
+        version: expectedVersion,
+      }
+    : await resolveOpenCodeInstallation({
+        environment: process.env,
+        mode: "check",
+        runtimeRoot: path.join(sourceStudioRoot, ".runtime", "opencode"),
+        studioRoot: sourceStudioRoot,
+      });
+  const executable = await realpath(selection.path);
+  const stat = await lstat(executable);
+  assert.equal(stat.isFile(), true);
+  assert.equal(stat.isSymbolicLink(), false);
+  assert.equal(path.extname(executable).toLowerCase(), ".exe");
+  const result = await execFileAsync(executable, ["--version"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true,
   });
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, `${expectedVersion}\n`);
+  assert.equal(selection.version, expectedVersion);
+  return { ...selection, path: executable };
+}
+
+async function selectedOpenCode() {
+  return supportedOpenCode("1.18.2");
 }
 
 async function trustedStudioFixture(t, { crlf = false, mutateExecutor = false } = {}) {
@@ -43,6 +78,129 @@ async function trustedStudioFixture(t, { crlf = false, mutateExecutor = false } 
     await writeFile(path.join(root, relative), source, "utf8");
   }
   return root;
+}
+
+async function isolatedServeFixture(t) {
+  const root = await trustedStudioFixture(t);
+  const home = path.join(root, ".isolated-home");
+  const appData = path.join(home, "AppData", "Roaming");
+  const localData = path.join(home, "AppData", "Local");
+  const xdgConfig = path.join(home, ".config");
+  const xdgData = path.join(home, ".local", "share");
+  const xdgCache = path.join(home, ".cache");
+  const xdgState = path.join(home, ".local", "state");
+  for (const directory of [home, appData, localData, xdgConfig, xdgData, xdgCache, xdgState]) {
+    await mkdir(directory, { recursive: true });
+  }
+  const username = "manual-contract";
+  const password = "serve-contract-password";
+  const env = {
+    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+    WINDIR: process.env.WINDIR ?? process.env.SystemRoot ?? "C:\\Windows",
+    COMSPEC: process.env.COMSPEC ?? "C:\\Windows\\System32\\cmd.exe",
+    Path: process.env.Path ?? "",
+    PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD",
+    TEMP: process.env.TEMP ?? os.tmpdir(),
+    TMP: process.env.TMP ?? os.tmpdir(),
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: appData,
+    LOCALAPPDATA: localData,
+    XDG_CONFIG_HOME: xdgConfig,
+    XDG_DATA_HOME: xdgData,
+    XDG_CACHE_HOME: xdgCache,
+    XDG_STATE_HOME: xdgState,
+    MANUAL_STUDIO_MCP_TOKEN: MCP_CAPABILITY_TOKEN,
+    NO_PROXY: "127.0.0.1,localhost,[::1]",
+    OPENCODE_DISABLE_CLAUDE_CODE: "1",
+    OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+    OPENCODE_SERVER_USERNAME: username,
+    OPENCODE_SERVER_PASSWORD: password,
+  };
+  return { env, password, root, username };
+}
+
+async function stopOwnedProcess(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "close").catch(() => undefined);
+  child.kill();
+  await Promise.race([
+    closed,
+    new Promise((resolvePromise) => setTimeout(resolvePromise, 5_000)),
+  ]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([
+      closed,
+      new Promise((resolvePromise) => setTimeout(resolvePromise, 5_000)),
+    ]);
+  }
+}
+
+async function startActualServe(t, executable, fixture) {
+  const child = spawn(
+    executable,
+    ["serve", "--pure", "--hostname", "127.0.0.1", "--port", "0"],
+    {
+      cwd: fixture.root,
+      env: fixture.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  t.after(() => stopOwnedProcess(child));
+  let stdout = "";
+  let stderr = "";
+  const baseUrl = await new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("error", onError);
+      child.off("close", onClose);
+      if (error) rejectPromise(error);
+      else resolvePromise(value);
+    };
+    const inspect = () => {
+      const match = `${stdout}\n${stderr}`.match(
+        /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/iu,
+      );
+      if (match) finish(undefined, `http://127.0.0.1:${match[1]}`);
+    };
+    const retain = (current, chunk) => `${current}${chunk}`.slice(-256 * 1024);
+    child.stdout.on("data", (chunk) => {
+      stdout = retain(stdout, chunk.toString("utf8"));
+      inspect();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = retain(stderr, chunk.toString("utf8"));
+      inspect();
+    });
+    const onError = () => finish(new Error("actual OpenCode serve failed"));
+    const onClose = () => finish(new Error("actual OpenCode serve exited before readiness"));
+    child.once("error", onError);
+    child.once("close", onClose);
+    const timer = setTimeout(() => finish(new Error("actual OpenCode serve timed out")), 45_000);
+  });
+  return { baseUrl, child };
+}
+
+async function actualServeJson(baseUrl, pathname, fixture) {
+  const url = new URL(pathname, baseUrl);
+  url.searchParams.set("directory", fixture.root);
+  const authorization = Buffer.from(`${fixture.username}:${fixture.password}`, "utf8").toString("base64");
+  const response = await fetch(url, {
+    headers: { Authorization: `Basic ${authorization}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
+  });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.ok(Buffer.byteLength(text) <= 2 * 1024 * 1024);
+  assert.equal(text.includes(fixture.password), false);
+  return JSON.parse(text);
 }
 
 async function configuredAgentFixture(studioRoot, name) {
@@ -209,6 +367,83 @@ function createHarness(overrides = {}) {
     ...overrides,
   });
   return { calls, child, server };
+}
+
+for (const expectedVersion of ["1.17.19", "1.18.2"]) {
+  test(`actual OpenCode ${expectedVersion} serve exposes the pinned health, config, agent, and tool shapes`, {
+    skip: process.platform !== "win32",
+    timeout: 120_000,
+  }, async (t) => {
+    const selection = await supportedOpenCode(expectedVersion);
+    const fixture = await isolatedServeFixture(t);
+    const { baseUrl, child } = await startActualServe(t, selection.path, fixture);
+    const health = await actualServeJson(baseUrl, "/global/health", fixture);
+    assert.deepEqual(health, { healthy: true, version: expectedVersion });
+
+    const config = await actualServeJson(baseUrl, "/config", fixture);
+    assert.equal(config.model, undefined);
+    assert.equal(config.small_model, undefined);
+    assert.deepEqual(Object.keys(config.mcp), ["playwright"]);
+    assert.equal(config.mcp.playwright.url, "http://127.0.0.1:8931/mcp");
+    assert.equal(config.permission["*"], "deny");
+
+    const agents = await actualServeJson(baseUrl, "/agent", fixture);
+    for (const name of ["manual-video-planner", "manual-video-executor"]) {
+      const agent = agents.find((candidate) => candidate.name === name);
+      assert.ok(agent);
+      assert.equal(agent.mode, "primary");
+      assert.equal(agent.native, false);
+      assert.equal("model" in agent, false);
+    }
+
+    const toolIds = await actualServeJson(baseUrl, "/experimental/tool/ids", fixture);
+    assert.deepEqual(toolIds, [
+      "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
+      "webfetch", "todowrite", "websearch", "skill", "apply_patch",
+    ]);
+    await stopOwnedProcess(child);
+  });
+
+  test(`default preflight accepts the exact OpenCode ${expectedVersion} binary`, {
+    skip: process.platform !== "win32",
+    timeout: 120_000,
+  }, async (t) => {
+    const selection = await supportedOpenCode(expectedVersion);
+    const fixture = await isolatedServeFixture(t);
+    const runtimeConfigDirectory = path.join(fixture.env.XDG_CONFIG_HOME, "opencode");
+    await mkdir(runtimeConfigDirectory, { recursive: true });
+    await writeFile(path.join(runtimeConfigDirectory, "opencode.json"), JSON.stringify({
+      model: "ollama/gemma4:12b_qat",
+      small_model: "ollama/gemma4:12b_qat",
+      provider: {
+        ollama: {
+          name: "Ollama (local)",
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "http://127.0.0.1:11434/v1" },
+          models: { "gemma4:12b_qat": { name: "Gemma 4 12B QAT (Ollama)" } },
+        },
+      },
+    }), "utf8");
+    const child = new FakeChild(45800 + Number(expectedVersion === "1.18.2"));
+    const server = new OpenCodeServer({
+      opencodePath: selection.path,
+      expectedVersion,
+      studioRoot: fixture.root,
+      env: fixture.env,
+      spawnProcess: () => {
+        queueMicrotask(() => child.stdout.write("OpenCode server listening on 127.0.0.1:4096\n"));
+        return child;
+      },
+      validateLiveContract: async () => ({ valid: true }),
+      fetchImpl: async () => healthyResponse(expectedVersion),
+      verifyPortOwner: async () => {},
+      killTree: async () => child.close(),
+      waitForPortClosed: async () => {},
+    });
+    const active = await server.startJob(jobOptions(`job-preflight${expectedVersion.replaceAll(".", "")}000000`));
+    assert.equal(active.version, expectedVersion);
+    await server.stop();
+  });
 }
 
 test("OpenCodeServer starts exact production serve command and verifies healthy owned port", async () => {
@@ -825,7 +1060,7 @@ test("default preflight canonicalizes CRLF, revalidates the executable, and isol
   ];
   const toolIds = [
     "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
-    "webfetch", "todowrite", "websearch", "codesearch", "skill", "apply_patch",
+    "webfetch", "todowrite", "websearch", "skill", "apply_patch",
   ];
   const openCodeSelection = await selectedOpenCode();
   const opencodePath = openCodeSelection.path;

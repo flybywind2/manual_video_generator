@@ -76,7 +76,7 @@ const FORBIDDEN_PERMISSIONS = Object.freeze([
 ]);
 const PINNED_TOOL_IDS = Object.freeze([
   "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
-  "webfetch", "todowrite", "websearch", "codesearch", "skill", "apply_patch",
+  "webfetch", "todowrite", "websearch", "skill", "apply_patch",
 ]);
 const PINNED_AGENT_NAMES = Object.freeze([
   "build", "compaction", "explore", "general", "manual-video-executor",
