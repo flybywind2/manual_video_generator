@@ -9,10 +9,7 @@ import { HyperframesAdapter } from "./adapters/hyperframes.js";
 import { OpenCodeServer } from "./adapters/opencode-server.js";
 import { ExecutionLock } from "./jobs/execution-lock.js";
 import { QualityGate } from "./media/quality-gate.js";
-import {
-  resolveOpenCodeExecutable,
-  supportsOpenCodeVersion,
-} from "./runtime/opencode-installation.js";
+import { supportsOpenCodeVersion } from "./runtime/opencode-installation.js";
 import { CredentialVault } from "./security/credential-vault.js";
 
 const WHERE_TIMEOUT_MS = 5_000;
@@ -321,7 +318,7 @@ function producerStop(producer) {
   return Promise.resolve();
 }
 
-async function createProductionRuntimeInternal(options, openCodeRunVersion) {
+export async function createProductionRuntime(options) {
   const { config, env: rawEnvironment, producerFactory } = validateFactoryOptions(options);
   const env = snapshotEnvironment(rawEnvironment);
   const root = config.root;
@@ -337,20 +334,12 @@ async function createProductionRuntimeInternal(options, openCodeRunVersion) {
       "The selected OpenCode runtime is invalid.",
     );
   }
-  if (path.extname(configuredOpenCodePath).toLowerCase() !== ".exe") {
-    throw configurationError("UNSAFE_EXECUTABLE_PATH", "The configured executable path is unsafe.");
-  }
-
-  const [openCodeSelection, ffmpeg, ffprobe] = await Promise.all([
-    resolveOpenCodeExecutable({
-      environment: env,
-      explicitPath: configuredOpenCodePath,
-      ...(openCodeRunVersion === undefined ? {} : { runVersion: openCodeRunVersion }),
-    }).catch(() => {
-      throw configurationError(
-        "INVALID_OPENCODE_SELECTION",
-        "The selected OpenCode runtime is invalid.",
-      );
+  const [opencode, ffmpeg, ffprobe] = await Promise.all([
+    resolveExecutablePath({
+      command: "opencode.exe",
+      env,
+      override: configuredOpenCodePath,
+      requireExe: true,
     }),
     resolveExecutablePath({
       command: process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
@@ -363,13 +352,6 @@ async function createProductionRuntimeInternal(options, openCodeRunVersion) {
       override: readEnvironmentOverride(env, "MANUAL_STUDIO_FFPROBE_PATH"),
     }),
   ]);
-  if (openCodeSelection.version !== configuredOpenCodeVersion) {
-    throw configurationError(
-      "INVALID_OPENCODE_SELECTION",
-      "The selected OpenCode runtime is invalid.",
-    );
-  }
-  const opencode = openCodeSelection.path;
   const paths = Object.freeze({
     credentials: path.join(root, "data", "credentials"),
     ffmpeg,
@@ -387,7 +369,7 @@ async function createProductionRuntimeInternal(options, openCodeRunVersion) {
   });
   const openCodeServer = new OpenCodeServer({
     env,
-    expectedVersion: openCodeSelection.version,
+    expectedVersion: configuredOpenCodeVersion,
     opencodePath: paths.opencode,
     port: 4096,
     studioRoot: root,
@@ -451,33 +433,3 @@ async function createProductionRuntimeInternal(options, openCodeRunVersion) {
 
   return Object.freeze({ adapters, close, paths, runtime, stops });
 }
-
-function inspectRuntimeFactoryDependencies(dependencies) {
-  if (
-    !isPlainObject(dependencies) ||
-    Reflect.ownKeys(dependencies).some(
-      (key) => typeof key !== "string" || key !== "openCodeRunVersion",
-    )
-  ) {
-    throw configurationError("INVALID_RUNTIME_CONFIG", "The production runtime configuration is invalid.");
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(dependencies, "openCodeRunVersion");
-  if (descriptor === undefined) {
-    return undefined;
-  }
-  if (
-    !("value" in descriptor) ||
-    descriptor.enumerable !== true ||
-    typeof descriptor.value !== "function"
-  ) {
-    throw configurationError("INVALID_RUNTIME_CONFIG", "The production runtime configuration is invalid.");
-  }
-  return descriptor.value;
-}
-
-export function createProductionRuntimeFactory(dependencies = {}) {
-  const openCodeRunVersion = inspectRuntimeFactoryDependencies(dependencies);
-  return (options) => createProductionRuntimeInternal(options, openCodeRunVersion);
-}
-
-export const createProductionRuntime = createProductionRuntimeFactory();

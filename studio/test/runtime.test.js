@@ -12,11 +12,11 @@ import { buildConfig } from "../src/config.js";
 import { ExecutionLock } from "../src/jobs/execution-lock.js";
 import { QualityGate } from "../src/media/quality-gate.js";
 import { CredentialVault } from "../src/security/credential-vault.js";
+import * as runtimeModule from "../src/runtime.js";
 import {
   RuntimeCloseError,
   RuntimeConfigurationError,
   createProductionRuntime,
-  createProductionRuntimeFactory,
   resolveExecutablePath,
 } from "../src/runtime.js";
 
@@ -27,19 +27,6 @@ async function makeExecutable(directory, name) {
     await chmod(file, 0o700);
   }
   return file;
-}
-
-function openCodeVersionRunner(version, calls = []) {
-  return async (command, args, options) => {
-    calls.push({ command, args, options });
-    return {
-      exitCode: 0,
-      outputExceeded: false,
-      stderr: "",
-      stdout: `${version}\n`,
-      timedOut: false,
-    };
-  };
 }
 
 async function runtimeFixture(t) {
@@ -64,12 +51,13 @@ async function runtimeFixture(t) {
     ffmpeg,
     ffprobe,
     opencode,
-    createRuntime: createProductionRuntimeFactory({
-      openCodeRunVersion: openCodeVersionRunner("1.18.2"),
-    }),
     root,
   };
 }
+
+test("the production runtime module exposes no OpenCode version-runner injection factory", () => {
+  assert.equal(Object.hasOwn(runtimeModule, "createProductionRuntimeFactory"), false);
+});
 
 test("resolveExecutablePath returns a canonical absolute regular executable override", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "manual-studio-executable-"));
@@ -194,7 +182,7 @@ test("createProductionRuntime constructs the real production dependency graph", 
   let producerInput;
   const producer = { close: async () => undefined };
 
-  const bundle = await fixture.createRuntime({
+  const bundle = await createProductionRuntime({
     config: fixture.config,
     env: fixture.env,
     producerFactory: async (input) => {
@@ -230,7 +218,7 @@ test("createProductionRuntime accepts the process.env object shape before adapte
   const fixture = await runtimeFixture(t);
   const processEnvironmentShape = Object.assign(Object.create({}), fixture.env);
 
-  const bundle = await fixture.createRuntime({
+  const bundle = await createProductionRuntime({
     config: fixture.config,
     env: processEnvironmentShape,
   });
@@ -244,7 +232,7 @@ test("createProductionRuntime resolves the three executable overrides before bui
   const fixture = await runtimeFixture(t);
   const commandFile = await makeExecutable(fixture.root, "opencode.cmd");
   await assert.rejects(
-    fixture.createRuntime({
+    createProductionRuntime({
       config: fixture.config,
       env: { ...fixture.env, MANUAL_STUDIO_OPENCODE_PATH: commandFile },
     }),
@@ -259,16 +247,16 @@ test("createProductionRuntime resolves the three executable overrides before bui
     `${nested}${path.sep}..${path.sep}opencode.exe`,
   ]) {
     await assert.rejects(
-      fixture.createRuntime({
+      createProductionRuntime({
         config: fixture.config,
         env: { ...fixture.env, MANUAL_STUDIO_OPENCODE_PATH: candidate },
       }),
       (error) =>
-        error instanceof RuntimeConfigurationError && error.code === "INVALID_OPENCODE_SELECTION",
+        error instanceof RuntimeConfigurationError && error.code === "UNSAFE_EXECUTABLE_PATH",
     );
   }
   await assert.rejects(
-    fixture.createRuntime({ config: { root: "relative" }, env: fixture.env }),
+    createProductionRuntime({ config: { root: "relative" }, env: fixture.env }),
     (error) => error instanceof RuntimeConfigurationError && error.code === "INVALID_RUNTIME_CONFIG",
   );
 });
@@ -277,25 +265,26 @@ test("createProductionRuntime binds a supported exact OpenCode selection without
   const fixture = await runtimeFixture(t);
 
   for (const version of ["1.17.19", "1.18.2"]) {
-    const calls = [];
-    const createRuntime = createProductionRuntimeFactory({
-      openCodeRunVersion: openCodeVersionRunner(version, calls),
-    });
-    const bundle = await createRuntime({
+    const isolatedEnvironment = { ...fixture.env };
+    const pathKey = Object.keys(isolatedEnvironment).find((key) => key.toUpperCase() === "PATH");
+    if (pathKey !== undefined) {
+      isolatedEnvironment[pathKey] = path.join(fixture.root, "path-must-not-be-searched");
+    }
+    const bundle = await createProductionRuntime({
       config: fixture.config,
-      env: { ...fixture.env, MANUAL_STUDIO_OPENCODE_VERSION: version },
+      env: {
+        ...isolatedEnvironment,
+        MANUAL_STUDIO_OPENCODE_VERSION: version,
+      },
     });
     t.after(() => bundle.close().catch(() => undefined));
 
     assert.equal(bundle.paths.opencode, await realpath(fixture.opencode));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].command, await realpath(fixture.opencode));
-    assert.deepEqual(calls[0].args, ["--version"]);
-    assert.equal(calls[0].options.shell, false);
+    assert.ok(bundle.runtime.openCodeServer instanceof OpenCodeServer);
   }
 });
 
-test("createProductionRuntime rejects incomplete, unsupported, and drifted OpenCode selections", async (t) => {
+test("createProductionRuntime rejects incomplete and unsupported OpenCode selections", async (t) => {
   const fixture = await runtimeFixture(t);
   const cases = [
     {
@@ -305,7 +294,6 @@ test("createProductionRuntime rejects incomplete, unsupported, and drifted OpenC
         delete env.MANUAL_STUDIO_OPENCODE_PATH;
         return env;
       },
-      liveVersion: "1.18.2",
     },
     {
       name: "missing version",
@@ -314,36 +302,33 @@ test("createProductionRuntime rejects incomplete, unsupported, and drifted OpenC
         delete env.MANUAL_STUDIO_OPENCODE_VERSION;
         return env;
       },
-      liveVersion: "1.18.2",
+    },
+    {
+      name: "missing pair",
+      environment() {
+        const env = { ...fixture.env };
+        delete env.MANUAL_STUDIO_OPENCODE_PATH;
+        delete env.MANUAL_STUDIO_OPENCODE_VERSION;
+        return env;
+      },
     },
     {
       name: "below minimum",
       environment: () => ({ ...fixture.env, MANUAL_STUDIO_OPENCODE_VERSION: "1.17.18" }),
-      liveVersion: "1.17.18",
     },
     {
       name: "prerelease",
       environment: () => ({ ...fixture.env, MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2-beta.1" }),
-      liveVersion: "1.18.2",
     },
     {
       name: "malformed",
       environment: () => ({ ...fixture.env, MANUAL_STUDIO_OPENCODE_VERSION: "1.18" }),
-      liveVersion: "1.18.2",
-    },
-    {
-      name: "selected live drift",
-      environment: () => ({ ...fixture.env, MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2" }),
-      liveVersion: "1.17.19",
     },
   ];
 
   for (const sample of cases) {
-    const createRuntime = createProductionRuntimeFactory({
-      openCodeRunVersion: openCodeVersionRunner(sample.liveVersion),
-    });
     await assert.rejects(
-      createRuntime({
+      createProductionRuntime({
         config: fixture.config,
         env: sample.environment(),
       }),
@@ -351,12 +336,15 @@ test("createProductionRuntime rejects incomplete, unsupported, and drifted OpenC
       sample.name,
     );
   }
+});
 
+test("createProductionRuntime rejects an OpenCode version-runner injection hook", async (t) => {
+  const fixture = await runtimeFixture(t);
   await assert.rejects(
     createProductionRuntime({
       config: fixture.config,
       env: fixture.env,
-      openCodeRunVersion: openCodeVersionRunner("1.18.2"),
+      openCodeRunVersion: async () => ({ exitCode: 0, stdout: "1.18.2\n" }),
     }),
     (error) =>
       error instanceof RuntimeConfigurationError && error.code === "INVALID_RUNTIME_CONFIG",
@@ -372,7 +360,7 @@ test("close is idempotent, settles OpenCode, browser, and producer, then reports
       throw new Error("producer failed");
     },
   };
-  const bundle = await fixture.createRuntime({
+  const bundle = await createProductionRuntime({
     config: fixture.config,
     env: fixture.env,
     producerFactory: () => producer,
