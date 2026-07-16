@@ -299,14 +299,23 @@ test("planning proxies only the exact observation calls through a generation-bou
   });
   assert.equal(listed.status, 200);
 
-  for (const [id, name, argumentsValue] of [
-    [3, "browser_snapshot", {}],
-    [4, "browser_wait_for", { time: 0.01 }],
-    [5, "browser_take_screenshot", { type: "png", scale: "css" }],
+  for (const [id, name, argumentsValue, metadata] of [
+    [3, "browser_snapshot", {}, { progressToken: 2 }],
+    [4, "browser_wait_for", { time: 0.01 }, { progressToken: "planner-progress-4" }],
+    [5, "browser_take_screenshot", { type: "png", scale: "css" }, undefined],
   ]) {
     const observed = await request(gateway.endpoint, {
       sessionId: initialized.sessionId,
-      message: { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: argumentsValue } },
+      message: {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name,
+          arguments: argumentsValue,
+          ...(metadata === undefined ? {} : { _meta: metadata }),
+        },
+      },
     });
     assert.equal(observed.status, 200);
   }
@@ -316,11 +325,66 @@ test("planning proxies only the exact observation calls through a generation-bou
     "browser_wait_for",
     "browser_take_screenshot",
   ]);
+  const forwardedMetadata = upstream.requests
+    .map(({ body }) => JSON.parse(body))
+    .filter(({ method }) => method === "tools/call")
+    .map(({ params }) => params._meta);
+  assert.deepEqual(forwardedMetadata, [
+    { progressToken: 2 },
+    { progressToken: "planner-progress-4" },
+    undefined,
+  ]);
   assert.ok(upstream.calls.every(({ sessionId }) => sessionId === initialized.sessionId));
   assert.equal(upstream.requests[0].headers.authorization, undefined);
   assert.equal(upstream.requests[0].headers.cookie, undefined);
   assert.equal(upstream.requests[0].headers["x-forwarded-for"], undefined);
   assert.deepEqual(fatals, []);
+});
+
+test("planning rejects noncanonical progress metadata before raw MCP", async (t) => {
+  const cases = [
+    { name: "null metadata", metadata: null },
+    { name: "missing token", metadata: {} },
+    { name: "extra metadata", metadata: { progressToken: 2, unexpected: true } },
+    { name: "fractional token", metadata: { progressToken: 1.5 } },
+    { name: "empty token", metadata: { progressToken: "" } },
+    { name: "unbounded token", metadata: { progressToken: "x".repeat(513) } },
+    { name: "nul token", metadata: { progressToken: "bad\0token" } },
+  ];
+
+  for (const [index, policyCase] of cases.entries()) {
+    await t.test(policyCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      await gateway.start({ jobId: JOB_ID, generation: 72 + index });
+      const { sessionId } = await initialize(gateway.endpoint);
+      upstream.calls.length = 0;
+
+      const response = await request(gateway.endpoint, {
+        sessionId,
+        message: {
+          jsonrpc: "2.0",
+          id: 700 + index,
+          method: "tools/call",
+          params: {
+            name: "browser_snapshot",
+            arguments: {},
+            _meta: policyCase.metadata,
+          },
+        },
+      });
+      assert.equal(response.status, 403);
+      await waitFor(() => fatals.length === 1);
+      assert.deepEqual(upstream.calls, []);
+      assert.equal(fatals[0].reason, "INVALID_TOOL_CALL");
+    });
+  }
 });
 
 test("the actual MCP empty text/plain DELETE response closes only its registered session", async (t) => {
@@ -396,7 +460,11 @@ test("execution accepts only the installed ordered exact calls and freezes the a
       jsonrpc: "2.0",
       id: 10,
       method: "tools/call",
-      params: { name: "browser_click", arguments: { button: "left", target: "button-submit" } },
+      params: {
+        name: "browser_click",
+        arguments: { button: "left", target: "button-submit" },
+        _meta: { progressToken: 10 },
+      },
     },
   });
   assert.equal(first.status, 200);
@@ -408,12 +476,21 @@ test("execution accepts only the installed ordered exact calls and freezes the a
       jsonrpc: "2.0",
       id: 11,
       method: "tools/call",
-      params: { name: "browser_type", arguments: { text: "approved text", target: "input-name" } },
+      params: {
+        name: "browser_type",
+        arguments: { text: "approved text", target: "input-name" },
+        _meta: { progressToken: "executor-progress-11" },
+      },
     },
   });
   assert.equal(second.status, 200);
   assert.equal(gateway.active.phase, "execution_complete");
   assert.equal(gateway.active.remainingCalls, 0);
+  const forwardedProgressTokens = upstream.requests
+    .map(({ body }) => JSON.parse(body))
+    .filter(({ method }) => method === "tools/call")
+    .map(({ params }) => params._meta.progressToken);
+  assert.deepEqual(forwardedProgressTokens, [10, "executor-progress-11"]);
   assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_click", "browser_type"]);
 
   const extra = await request(gateway.endpoint, {

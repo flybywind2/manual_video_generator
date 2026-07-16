@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+
+import { runProcess } from "../../src/process/process-runner.js";
 
 const execFileAsync = promisify(execFile);
 const studioRoot = path.resolve(".");
@@ -18,6 +21,9 @@ const ACTUAL_OPENCODE_ENV = Object.freeze({
   "1.17.19": "MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH",
   "1.18.2": "MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH",
 });
+const MAX_WIRE_REQUEST_BYTES = 256 * 1024;
+const MAX_WIRE_TOOLS = 64;
+const WIRE_CAPTURE_TIMEOUT_MS = 15_000;
 const plannerTools = Object.freeze([
   "playwright_browser_snapshot",
   "playwright_browser_wait_for",
@@ -273,6 +279,214 @@ async function debugJson(executable, args, fixture) {
   return JSON.parse(result.stdout);
 }
 
+async function openWireCaptureServer(t) {
+  let captureSettled = false;
+  let resolveCapture;
+  let rejectCapture;
+  const captured = new Promise((resolvePromise, rejectPromise) => {
+    resolveCapture = resolvePromise;
+    rejectCapture = rejectPromise;
+  });
+  void captured.catch(() => {});
+  const settleCapture = (callback, value) => {
+    if (captureSettled) return;
+    captureSettled = true;
+    clearTimeout(captureTimer);
+    callback(value);
+  };
+  const captureTimer = setTimeout(() => {
+    settleCapture(rejectCapture, new Error("OpenCode wire request was not received in time."));
+  }, WIRE_CAPTURE_TIMEOUT_MS);
+
+  const server = createServer((request, response) => {
+    if (captureSettled) {
+      response.writeHead(409).end();
+      return;
+    }
+    let bytes = 0;
+    let requestFailed = false;
+    const chunks = [];
+    const rejectRequest = (status, message) => {
+      if (requestFailed) return;
+      requestFailed = true;
+      if (!response.headersSent) response.writeHead(status);
+      response.end();
+      request.destroy();
+      settleCapture(rejectCapture, new Error(message));
+    };
+    request.setTimeout(WIRE_CAPTURE_TIMEOUT_MS, () => {
+      rejectRequest(408, "OpenCode wire request body timed out.");
+    });
+    request.on("data", (chunk) => {
+      if (requestFailed) return;
+      bytes += chunk.length;
+      if (bytes > MAX_WIRE_REQUEST_BYTES) {
+        chunks.length = 0;
+        rejectRequest(413, "OpenCode wire request body exceeded the limit.");
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.once("aborted", () => {
+      settleCapture(rejectCapture, new Error("OpenCode wire request was aborted."));
+    });
+    request.once("error", () => {
+      settleCapture(rejectCapture, new Error("OpenCode wire request failed."));
+    });
+    request.once("end", () => {
+      if (captureSettled || requestFailed || bytes > MAX_WIRE_REQUEST_BYTES) return;
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
+      } catch {
+        rejectRequest(400, "OpenCode wire request body was not JSON.");
+        return;
+      }
+      const newline = "\n";
+      const responseBody = [
+        'data: {"id":"wire","object":"chat.completion.chunk","created":1,"model":"gemma4:12b_qat","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}',
+        "",
+        'data: {"id":"wire","object":"chat.completion.chunk","created":1,"model":"gemma4:12b_qat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        "",
+        'data: {"id":"wire","object":"chat.completion.chunk","created":1,"model":"gemma4:12b_qat","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join(newline);
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "close",
+      });
+      response.end(responseBody);
+      settleCapture(resolveCapture, Object.freeze({
+        body,
+        method: request.method,
+        path: request.url,
+      }));
+    });
+  });
+  server.headersTimeout = 5_000;
+  server.requestTimeout = WIRE_CAPTURE_TIMEOUT_MS;
+  server.keepAliveTimeout = 1_000;
+  server.on("clientError", (_error, socket) => {
+    socket.destroy();
+    settleCapture(rejectCapture, new Error("OpenCode wire client failed."));
+  });
+  try {
+    await new Promise((resolvePromise, rejectPromise) => {
+      const onError = () => rejectPromise(new Error("OpenCode wire capture could not listen."));
+      server.once("error", onError);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", onError);
+        resolvePromise();
+      });
+    });
+  } catch (error) {
+    settleCapture(rejectCapture, error);
+    if (server.listening) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    throw error;
+  }
+  server.on("error", () => {
+    settleCapture(rejectCapture, new Error("OpenCode wire capture server failed."));
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    settleCapture(rejectCapture, new Error("OpenCode wire capture closed."));
+    if (!server.listening) return;
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.close((error) => error
+        ? rejectPromise(new Error("OpenCode wire capture did not close."))
+        : resolvePromise());
+      server.closeAllConnections();
+    });
+  };
+  t.after(close);
+  return Object.freeze({
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    captured,
+    close,
+  });
+}
+
+async function isolatedWireProject(t, baseUrl) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "manual-studio-opencode-wire-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  const appData = path.join(root, "appdata");
+  const localAppData = path.join(root, "localappdata");
+  const configHome = path.join(root, "config");
+  const opencodeHome = path.join(configHome, "opencode");
+  const dataHome = path.join(root, "data");
+  const cacheHome = path.join(root, "cache");
+  const stateHome = path.join(root, "state");
+  const runtimeHome = path.join(root, "runtime");
+  for (const directory of [
+    home,
+    appData,
+    localAppData,
+    opencodeHome,
+    dataHome,
+    cacheHome,
+    stateHome,
+    runtimeHome,
+  ]) {
+    await mkdir(directory, { recursive: true });
+  }
+  const model = "gemma4:12b_qat";
+  await writeFile(path.join(opencodeHome, "opencode.json"), `${JSON.stringify({
+    model: `ollama/${model}`,
+    small_model: `ollama/${model}`,
+    provider: {
+      ollama: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Bounded wire capture",
+        options: {
+          baseURL: baseUrl,
+          apiKey: "wire-test",
+        },
+        models: {
+          [model]: {
+            name: "Gemma 4 12B QAT wire capture",
+            tool_call: true,
+            options: {
+              reasoningEffort: "none",
+            },
+          },
+        },
+      },
+    },
+  }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  return Object.freeze({
+    root,
+    env: {
+      SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+      Path: process.env.Path ?? "",
+      PATHEXT: process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD",
+      TEMP: process.env.TEMP ?? os.tmpdir(),
+      TMP: process.env.TMP ?? os.tmpdir(),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: appData,
+      LOCALAPPDATA: localAppData,
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_STATE_HOME: stateHome,
+      XDG_RUNTIME_DIR: runtimeHome,
+      OPENCODE_DISABLE_CLAUDE_CODE: "1",
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    },
+  });
+}
+
 for (const expectedVersion of ["1.17.19", "1.18.2"]) {
   test(`actual OpenCode ${expectedVersion} resolves the isolated config and both primary agents without model drift`, {
     skip: actualOpenCodeSkip(expectedVersion),
@@ -325,6 +539,65 @@ for (const expectedVersion of ["1.17.19", "1.18.2"]) {
           return !safe.includes("automatic-password") && /(?:disabled|denied|not found|not_found)/iu.test(safe);
         },
       );
+    }
+  });
+
+  test(`actual OpenCode ${expectedVersion} forwards the bounded Gemma tool-call compatibility request`, {
+    skip: actualOpenCodeSkip(expectedVersion),
+    timeout: 60_000,
+  }, async (t) => {
+    const executable = await supportedOpenCode(expectedVersion);
+    const wire = await openWireCaptureServer(t);
+    const fixture = await isolatedWireProject(t, wire.baseUrl);
+    let outcomes;
+    try {
+      outcomes = await Promise.allSettled([
+        runProcess({
+          command: executable,
+          args: [
+            "run",
+            "--pure",
+            "--format",
+            "json",
+            "--title",
+            `wire-${expectedVersion}`,
+            "--model",
+            "ollama/gemma4:12b_qat",
+            "Return exactly OK. Do not call any tool.",
+          ],
+          cwd: fixture.root,
+          env: fixture.env,
+          timeoutMs: 30_000,
+        }),
+        wire.captured,
+      ]);
+    } finally {
+      await wire.close();
+    }
+
+    const [processOutcome, captureOutcome] = outcomes;
+    assert.equal(processOutcome.status, "fulfilled", "OpenCode wire process must finish safely");
+    assert.equal(captureOutcome.status, "fulfilled", "OpenCode wire request must be captured safely");
+    const result = processOutcome.value;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout.includes("wire-test"), false);
+    assert.equal(result.stderr.includes("wire-test"), false);
+
+    const request = captureOutcome.value;
+    assert.equal(request.method, "POST");
+    assert.equal(request.path, "/v1/chat/completions");
+    assert.equal(request.body.model, "gemma4:12b_qat");
+    assert.equal(request.body.reasoning_effort, "none");
+    assert.equal(Object.hasOwn(request.body, "extraBody"), false);
+    assert.equal(request.body.stream, true);
+    assert.equal(Array.isArray(request.body.tools), true);
+    assert.ok(request.body.tools.length > 0);
+    assert.ok(request.body.tools.length <= MAX_WIRE_TOOLS);
+    for (const tool of request.body.tools) {
+      assert.equal(tool?.type, "function");
+      assert.equal(typeof tool?.function?.name, "string");
+      assert.ok(tool.function.name.length > 0);
     }
   });
 }

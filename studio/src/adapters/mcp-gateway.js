@@ -7,6 +7,7 @@ const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_POST_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_PLANNING_CALLS = 128;
 const MAX_SESSIONS = 16;
+const MAX_PROGRESS_TOKEN_BYTES = 512;
 const SAFE_STATUS = new Set([200, 202, 204, 400, 404, 405, 406, 409, 413, 415, 429, 500, 502, 503, 504]);
 const PLANNING_TOOLS = new Set([
   "browser_snapshot",
@@ -66,6 +67,18 @@ function hasCapability(request, capabilityToken) {
   received.copy(comparable, 0, 0, expected.length);
   const equal = timingSafeEqual(comparable, expected);
   return equal && received.length === expected.length;
+}
+
+function validProgressMetadata(value) {
+  if (!isPlain(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 1 || keys[0] !== "progressToken") return false;
+  const token = dataValue(value, "progressToken", true);
+  if (Number.isSafeInteger(token)) return true;
+  return typeof token === "string" &&
+    token.length > 0 &&
+    !token.includes("\0") &&
+    Buffer.byteLength(token, "utf8") <= MAX_PROGRESS_TOKEN_BYTES;
 }
 
 export class McpGatewayError extends Error {
@@ -915,7 +928,11 @@ export class McpGateway {
     if (safeRpcId(parsed.id) !== parsed.id) throw new PolicyViolation("INVALID_TOOL_CALL", parsed.id);
     if (this.#inFlightTool) throw new PolicyViolation("CONCURRENT_TOOL_CALL", parsed.id);
     const params = dataValue(parsed.message, "params");
-    if (!isPlain(params) || Reflect.ownKeys(params).some((key) => !["name", "arguments"].includes(key))) {
+    if (
+      !isPlain(params) ||
+      Reflect.ownKeys(params).some((key) => !["name", "arguments", "_meta"].includes(key)) ||
+      (Object.hasOwn(params, "_meta") && !validProgressMetadata(dataValue(params, "_meta", true)))
+    ) {
       throw new PolicyViolation("INVALID_TOOL_CALL", parsed.id);
     }
     const name = dataValue(params, "name", true);

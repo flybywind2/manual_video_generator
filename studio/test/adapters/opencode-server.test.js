@@ -21,6 +21,13 @@ const ACTUAL_OPENCODE_ENV = Object.freeze({
   "1.17.19": "MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH",
   "1.18.2": "MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH",
 });
+const OPENCODE_GENERATED_GITIGNORE = [
+  "node_modules",
+  "package.json",
+  "package-lock.json",
+  "bun.lock",
+  ".gitignore",
+].join("\n");
 
 function jobOptions(jobId, additional = {}) {
   return { jobId, mcpCapabilityToken: MCP_CAPABILITY_TOKEN, ...additional };
@@ -1144,7 +1151,13 @@ test("default preflight canonicalizes CRLF, revalidates the executable, and isol
         name: "Ollama (local)",
         npm: "@ai-sdk/openai-compatible",
         options: { baseURL: "http://127.0.0.1:11434/v1" },
-        models: { "gemma4:12b_qat": { name: "Gemma 4 12B QAT (Ollama)" } },
+        models: {
+          "gemma4:12b_qat": {
+            name: "Gemma 4 12B QAT (Ollama)",
+            tool_call: true,
+            options: { reasoningEffort: "none" },
+          },
+        },
       },
     },
     small_model: "ollama/gemma4:12b_qat",
@@ -1371,6 +1384,14 @@ test("default preflight canonicalizes CRLF, revalidates the executable, and isol
       );
       assert.equal(isolatedConfig.includes("{env:MANUAL_STUDIO_MCP_TOKEN}"), true);
       assert.equal(isolatedConfig.includes(MCP_CAPABILITY_TOKEN), false);
+      assert.deepEqual(
+        JSON.parse(isolatedConfig).provider.ollama.models["gemma4:12b_qat"],
+        {
+          name: "Gemma 4 12B QAT (Ollama)",
+          tool_call: true,
+          options: { reasoningEffort: "none" },
+        },
+      );
 
       liveCapabilityToken = OTHER_MCP_CAPABILITY_TOKEN;
       await assert.rejects(
@@ -1442,6 +1463,54 @@ test("default preflight rejects a changed trusted agent before invoking OpenCode
   );
   assert.equal(debugCalls, 0);
   assert.equal(serveCalls, 0);
+});
+
+test("default preflight permits only OpenCode's canonical generated extension ignore file", async (t) => {
+  const studioRoot = await trustedStudioFixture(t);
+  const xdgConfig = path.join(studioRoot, "xdg-config");
+  await mkdir(path.join(xdgConfig, "opencode"), { recursive: true });
+  await writeFile(path.join(xdgConfig, "opencode", "opencode.json"), JSON.stringify({
+    model: "ollama/gemma4:12b_qat",
+    small_model: "ollama/gemma4:12b_qat",
+    provider: {
+      ollama: {
+        name: "Ollama (local)",
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "http://127.0.0.1:11434/v1" },
+        models: { "gemma4:12b_qat": { name: "Gemma 4 12B QAT (Ollama)" } },
+      },
+    },
+  }), "utf8");
+  const generatedIgnore = path.join(studioRoot, ".opencode", ".gitignore");
+  const fakeExecutable = path.join(studioRoot, "opencode.exe");
+  await writeFile(fakeExecutable, "bounded manifest probe", "utf8");
+
+  async function preflightProcessCalls(source) {
+    await writeFile(generatedIgnore, source, "utf8");
+    let calls = 0;
+    const server = new OpenCodeServer({
+      opencodePath: fakeExecutable,
+      expectedVersion: "1.18.2",
+      studioRoot,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgConfig },
+      preflightProcessRunner: async () => {
+        calls += 1;
+        throw new Error("bounded manifest probe");
+      },
+      spawnProcess: () => {
+        throw new Error("must not serve");
+      },
+      validateLiveContract: async () => ({ valid: true }),
+    });
+    await assert.rejects(
+      server.startJob(jobOptions("job-generatedignore01")),
+      (error) => error.code === "OPENCODE_SERVER_PREFLIGHT_FAILED",
+    );
+    return calls;
+  }
+
+  assert.equal(await preflightProcessCalls(OPENCODE_GENERATED_GITIGNORE), 1);
+  assert.equal(await preflightProcessCalls(`${OPENCODE_GENERATED_GITIGNORE}unexpected\n`), 0);
 });
 
 test("stop aborts and awaits the supervised default preflight before resolving", {

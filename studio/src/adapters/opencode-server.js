@@ -36,6 +36,19 @@ const MAX_CONTRACT_BYTES = 2 * 1024 * 1024;
 const TRUSTED_PROJECT_DIGEST = "bdad2488e3f7bb89b4f7f2a1611ad76262a29996de3c0f7ec1e34f77e2b094b6";
 const JOB_ID = /^(?:job-[a-z0-9]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 const MCP_CAPABILITY_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const GEMMA4_MODEL_ID = /^gemma4(?::|$)/iu;
+// Gemma 4 reasoning deltas hide later tool calls from OpenCode's compatible stream parser.
+// Keep the isolated request on the standard tool-call path: https://github.com/anomalyco/opencode/issues/20995
+const GEMMA4_TOOL_COMPATIBILITY_OPTIONS = Object.freeze({
+  reasoningEffort: "none",
+});
+const OPENCODE_GENERATED_GITIGNORE = [
+  "node_modules",
+  "package.json",
+  "package-lock.json",
+  "bun.lock",
+  ".gitignore",
+].join("\n");
 const AGENT_TOOLS = Object.freeze({
   "manual-video-planner": Object.freeze([
     "playwright_browser_snapshot",
@@ -424,6 +437,31 @@ function exactKeys(record, expected) {
   }
 }
 
+function captureSelectedModel(modelId, sourceModel, strictIsolatedConfig) {
+  const gemma4 = GEMMA4_MODEL_ID.test(modelId);
+  exactKeys(
+    sourceModel,
+    gemma4 && strictIsolatedConfig ? ["name", "tool_call", "options"] : ["name"],
+  );
+  const name = ownString(dataValue(sourceModel, "name", true), "model name");
+  if (!gemma4) return Object.freeze({ name });
+  if (strictIsolatedConfig) {
+    if (dataValue(sourceModel, "tool_call", true) !== true) {
+      throw new Error("model tool capability");
+    }
+    const options = dataValue(sourceModel, "options", true);
+    exactKeys(options, ["reasoningEffort"]);
+    if (dataValue(options, "reasoningEffort", true) !== "none") {
+      throw new Error("model compatibility");
+    }
+  }
+  return Object.freeze({
+    name,
+    tool_call: true,
+    options: GEMMA4_TOOL_COMPATIBILITY_OPTIONS,
+  });
+}
+
 function captureSelectedRuntime(config, strictProviders = false) {
   if (!isPlain(config)) throw new Error("global config");
   const model = ownString(dataValue(config, "model", true), "model");
@@ -457,8 +495,7 @@ function captureSelectedRuntime(config, strictProviders = false) {
   const models = Object.create(null);
   for (const modelId of selectedIds) {
     const sourceModel = dataValue(sourceModels, modelId, true);
-    exactKeys(sourceModel, ["name"]);
-    models[modelId] = Object.freeze({ name: ownString(dataValue(sourceModel, "name", true), "model name") });
+    models[modelId] = captureSelectedModel(modelId, sourceModel, strictProviders);
   }
   const provider = Object.freeze({
     name: providerName,
@@ -553,7 +590,23 @@ async function snapshotProjectManifest(studioRoot) {
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe project directory");
   }
   const topEntries = (await readdir(opencodeDirectory)).sort();
-  if (topEntries.length !== 1 || topEntries[0] !== "agents") throw new Error("project extension surface");
+  const expectedTopEntries = topEntries[0] === ".gitignore"
+    ? [".gitignore", "agents"]
+    : ["agents"];
+  if (JSON.stringify(topEntries) !== JSON.stringify(expectedTopEntries)) {
+    throw new Error("project extension surface");
+  }
+  if (topEntries[0] === ".gitignore") {
+    const generatedIgnore = path.join(opencodeDirectory, ".gitignore");
+    await assertRegularFile(generatedIgnore);
+    const source = await readFile(generatedIgnore);
+    if (
+      source.length > MAX_CONTRACT_BYTES ||
+      canonicalProjectText(source) !== OPENCODE_GENERATED_GITIGNORE
+    ) {
+      throw new Error("project extension ignore");
+    }
+  }
   const agentNames = Object.keys(AGENT_TOOLS);
   const expectedFiles = agentNames.map((name) => `${name}.md`).sort();
   const actualFiles = (await readdir(agentsDirectory)).sort();
