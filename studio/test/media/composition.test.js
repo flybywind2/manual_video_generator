@@ -53,6 +53,55 @@ function manifest(
   });
 }
 
+function twoSceneManifest() {
+  const scenes = [
+    {
+      id: "step-1",
+      sourceStartMs: 0,
+      sourceEndMs: 2_000,
+      caption: "첫 번째 메뉴를 선택합니다.",
+      chapter: "첫 번째 메뉴",
+      highlights: [
+        {
+          callId: "step-1.click",
+          sourceAtMs: 200,
+          x: 120,
+          y: 160,
+          width: 320,
+          height: 72,
+        },
+      ],
+    },
+    {
+      id: "step-2",
+      sourceStartMs: 2_000,
+      sourceEndMs: 4_000,
+      caption: "두 번째 메뉴를 선택합니다.",
+      chapter: "두 번째 메뉴",
+      highlights: [
+        {
+          callId: "step-2.click",
+          sourceAtMs: 2_200,
+          x: 640,
+          y: 360,
+          width: 240,
+          height: 64,
+        },
+      ],
+    },
+  ];
+  return createMediaPlan({
+    recordingPath: "composition/media/normalized.mp4",
+    scenes,
+    narrations: scenes.map((scene) => ({
+      sceneId: scene.id,
+      path: `composition/narration/${scene.id}.wav`,
+      durationMs: 1_900,
+      text: scene.caption,
+    })),
+  });
+}
+
 test("fixed template compilation is deterministic and assigns a stable composition id", async () => {
   const template = await readFile(templatePath, "utf8");
   const mediaPlan = manifest();
@@ -261,6 +310,25 @@ test("schema 1.1 timed click cues are independently exact, dense, unique, sorted
   for (const candidate of invalidPlans) {
     assert.throws(() => compile(candidate), { code: "INVALID_MEDIA_PLAN" });
   }
+});
+
+test("duplicate scene ids fail before composition clips can reuse DOM ids", async () => {
+  const template = await readFile(templatePath, "utf8");
+  const duplicate = structuredClone(twoSceneManifest());
+  duplicate.scenes[1].id = duplicate.scenes[0].id;
+
+  assert.throws(
+    () => compileComposition({
+      template,
+      mediaPlan: duplicate,
+      projectPath: "composition",
+    }),
+    (error) => {
+      assert.equal(error.code, "INVALID_MEDIA_PLAN");
+      assert.equal(error.details.reason, "duplicate_scene_id");
+      return true;
+    },
+  );
 });
 
 test("the fixed template renders full-frame finite 900 ms purple-blue target and ripple animations", async () => {

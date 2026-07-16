@@ -242,6 +242,7 @@ function normalizedManifest(mediaPlan) {
     compositionError("INVALID_MEDIA_PLAN", "video_contract");
   }
   const recordingPath = assetPath(root.recordingPath, ".mp4");
+  const sceneIds = new Set();
   const highlightCallIds = new Set();
   const scenes = denseArray(root.scenes, "scenes").map((candidate) => {
     const scene = exactObject(
@@ -252,6 +253,10 @@ function normalizedManifest(mediaPlan) {
     if (typeof scene.id !== "string" || !SAFE_ID.test(scene.id)) {
       compositionError("INVALID_MEDIA_PLAN", "scene_id");
     }
+    if (sceneIds.has(scene.id)) {
+      compositionError("INVALID_MEDIA_PLAN", "duplicate_scene_id");
+    }
+    sceneIds.add(scene.id);
     const source = exactObject(
       scene.source,
       ["startMs", "endMs", "durationMs", "playbackRate"],
