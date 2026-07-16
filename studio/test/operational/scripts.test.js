@@ -126,8 +126,45 @@ test("doctor resolves OpenCode in check mode and reports the selected actual ver
   assert.match(script, /mode:\s*"check"/u);
   assert.match(script, /MANUAL_STUDIO_OPENCODE_PATH/u);
   assert.match(script, /MANUAL_STUDIO_OPENCODE_VERSION/u);
-  assert.match(script, /inspectRuntime\(\{[^}]*environment/isu);
+  assert.match(script, /inspect\(\{[^}]*environment/isu);
   assert.doesNotMatch(script, /mode:\s*"prepare"/u);
+});
+
+test("doctor fails closed without legacy PATH discovery when strict OpenCode resolution fails", async () => {
+  const previousExitCode = process.exitCode;
+  const doctor = await import(`../../scripts/doctor.mjs?fail-closed=${Date.now()}`);
+  process.exitCode = previousExitCode;
+  assert.equal(typeof doctor.buildDoctorReport, "function");
+
+  let legacyPathProbes = 0;
+  const report = await doctor.buildDoctorReport({
+    processEnvironment: {},
+    resolveInstallation: async () => {
+      throw new Error("strict resolution rejected the candidate");
+    },
+    inspect: async ({ environment }) => {
+      const hasInvalidSelection =
+        Object.hasOwn(environment, "MANUAL_STUDIO_OPENCODE_PATH")
+        && Object.hasOwn(environment, "MANUAL_STUDIO_OPENCODE_VERSION");
+      if (!hasInvalidSelection) legacyPathProbes += 1;
+      return {
+        ready: false,
+        checks: {
+          opencode: {
+            status: hasInvalidSelection ? "mismatch" : "ready",
+            expected: ">=1.17.19",
+            actual: null,
+            reason: hasInvalidSelection ? "selection_invalid" : undefined,
+          },
+        },
+      };
+    },
+  });
+
+  assert.equal(legacyPathProbes, 0);
+  assert.equal(report.ready, false);
+  assert.equal(report.checks.opencode.status, "mismatch");
+  assert.equal(report.checks.opencode.reason, "selection_invalid");
 });
 
 test("npm start delegates to the only supported PowerShell entrypoint", async () => {
