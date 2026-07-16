@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
+import { createConnection } from "node:net";
 import { performance } from "node:perf_hooks";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -2383,21 +2384,27 @@ async function unusedLoopbackPort(excludedPorts) {
   }
 }
 
-async function canBindAndReleaseLoopbackPort(port) {
-  const server = createServer();
-  try {
-    await listen(server, port);
-  } catch (error) {
-    if (error?.code === "EADDRINUSE") return false;
-    throw error;
-  }
-  await new Promise((resolvePromise, rejectPromise) => {
-    server.close((error) => error ? rejectPromise(error) : resolvePromise());
+async function isLoopbackListenerOpen(port, timeoutMs = 200) {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const finish = (value, error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (error) rejectPromise(error);
+      else resolvePromise(value);
+    };
+    socket.setTimeout(timeoutMs, () => finish(true));
+    socket.once("connect", () => finish(true));
+    socket.once("error", (error) => {
+      if (error?.code === "ECONNREFUSED") finish(false);
+      else finish(true, error);
+    });
   });
-  return true;
 }
 
-async function assertLoopbackPortsReleased(
+async function assertLoopbackListenersClosed(
   ports,
   { timeoutMs = 5_000, pollIntervalMs = 25 } = {},
 ) {
@@ -2405,7 +2412,8 @@ async function assertLoopbackPortsReleased(
     const deadline = performance.now() + timeoutMs;
     let released = false;
     while (performance.now() < deadline) {
-      if (await canBindAndReleaseLoopbackPort(port)) {
+      const remainingBeforeProbeMs = deadline - performance.now();
+      if (!(await isLoopbackListenerOpen(port, Math.min(200, Math.max(1, remainingBeforeProbeMs))))) {
         released = performance.now() <= deadline;
         break;
       }
@@ -2416,14 +2424,31 @@ async function assertLoopbackPortsReleased(
       });
     }
     if (!released) {
-      const error = new Error(`Loopback port ${port} was not released before the deadline.`);
-      error.code = "LOOPBACK_PORT_RELEASE_TIMEOUT";
+      const error = new Error(`Loopback listener on port ${port} did not close before the deadline.`);
+      error.code = "LOOPBACK_LISTENER_CLOSE_TIMEOUT";
       throw error;
     }
   }
 }
 
-test("loopback port release verification polls until a hard deadline", async (t) => {
+async function closeOwnedLoopbackFixture(server, expectedPort) {
+  const address = server?.address();
+  if (
+    server?.listening !== true ||
+    address === null ||
+    typeof address !== "object" ||
+    address.address !== "127.0.0.1" ||
+    address.port !== expectedPort
+  ) {
+    return false;
+  }
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await new Promise((resolvePromise) => server.close(resolvePromise));
+  return true;
+}
+
+test("loopback listener closure verification polls until a hard deadline", async (t) => {
   await t.test("a listener released shortly after cleanup is accepted", async (t) => {
     const held = createServer();
     const port = await listen(held);
@@ -2433,7 +2458,7 @@ test("loopback port release verification polls until a hard deadline", async (t)
       if (held.listening) await new Promise((resolvePromise) => held.close(resolvePromise));
     });
 
-    await assertLoopbackPortsReleased([port], { timeoutMs: 1_000, pollIntervalMs: 10 });
+    await assertLoopbackListenersClosed([port], { timeoutMs: 1_000, pollIntervalMs: 10 });
   });
 
   await t.test("a listener that never releases fails at the hard deadline", async (t) => {
@@ -2444,9 +2469,16 @@ test("loopback port release verification polls until a hard deadline", async (t)
     });
 
     await assert.rejects(
-      assertLoopbackPortsReleased([port], { timeoutMs: 80, pollIntervalMs: 10 }),
-      (error) => error?.code === "LOOPBACK_PORT_RELEASE_TIMEOUT",
+      assertLoopbackListenersClosed([port], { timeoutMs: 80, pollIntervalMs: 10 }),
+      (error) => error?.code === "LOOPBACK_LISTENER_CLOSE_TIMEOUT",
     );
+  });
+
+  await t.test("the test-owned collision listener closes even without a retry tag", async () => {
+    const held = createServer();
+    const port = await listen(held);
+    assert.equal(await closeOwnedLoopbackFixture(held, port), true);
+    assert.equal(await isLoopbackListenerOpen(port), false);
   });
 });
 
@@ -2808,13 +2840,10 @@ test("production BrowserRuntime retries a stolen port then captures click geomet
           stat(path.join(studioRoot, ".runtime", "browser", attemptJobId)),
           (candidateError) => candidateError?.code === "ENOENT",
         );
-        if (attempt.observedAddressCollision) {
-          collisionServer.closeIdleConnections?.();
-          collisionServer.closeAllConnections?.();
-          await new Promise((resolvePromise) => collisionServer.close(resolvePromise));
+        if (await closeOwnedLoopbackFixture(collisionServer, publicPort)) {
           collisionServer = undefined;
         }
-        await assertLoopbackPortsReleased([publicPort, rawPort]);
+        await assertLoopbackListenersClosed([publicPort, rawPort]);
       },
     });
   });
