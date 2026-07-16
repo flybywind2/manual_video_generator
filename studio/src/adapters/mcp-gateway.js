@@ -341,6 +341,24 @@ function canonicalJson(value) {
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
+function isExactGeometryProbe(probe, click) {
+  if (!probe || !click || probe.tool !== "browser_evaluate" || click.tool !== "browser_click") return false;
+  const probeArguments = probe.arguments;
+  const clickArguments = click.arguments;
+  const expectedKeys = Object.hasOwn(clickArguments, "element")
+    ? ["element", "target", "function"]
+    : ["target", "function"];
+  return (
+    probe.id === `${click.id}.highlight-bounds` &&
+    Reflect.ownKeys(probeArguments).length === expectedKeys.length &&
+    Reflect.ownKeys(probeArguments).every((key) => typeof key === "string" && expectedKeys.includes(key)) &&
+    dataValue(probeArguments, "function", true) === CLICK_GEOMETRY_FUNCTION &&
+    dataValue(probeArguments, "target", true) === dataValue(clickArguments, "target", true) &&
+    (!Object.hasOwn(clickArguments, "element") ||
+      dataValue(probeArguments, "element", true) === dataValue(clickArguments, "element", true))
+  );
+}
+
 function inspectApproval(value) {
   if (
     !isPlain(value) ||
@@ -405,24 +423,10 @@ function inspectApproval(value) {
     throw new Error("approval size");
   }
   for (let index = 0; index < calls.length; index += 1) {
-    const probe = calls[index];
-    if (probe.tool !== "browser_evaluate") continue;
-    const click = calls[index + 1];
-    const probeArguments = probe.arguments;
-    const clickArguments = click?.arguments;
-    const expectedKeys = Object.hasOwn(clickArguments ?? {}, "element")
-      ? ["element", "target", "function"]
-      : ["target", "function"];
+    const call = calls[index];
     if (
-      !click ||
-      click.tool !== "browser_click" ||
-      probe.id !== `${click.id}.highlight-bounds` ||
-      Reflect.ownKeys(probeArguments).length !== expectedKeys.length ||
-      Reflect.ownKeys(probeArguments).some((key) => typeof key !== "string" || !expectedKeys.includes(key)) ||
-      dataValue(probeArguments, "function", true) !== CLICK_GEOMETRY_FUNCTION ||
-      dataValue(probeArguments, "target", true) !== dataValue(clickArguments, "target", true) ||
-      (Object.hasOwn(clickArguments, "element") &&
-        dataValue(probeArguments, "element", true) !== dataValue(clickArguments, "element", true))
+      (call.tool === "browser_evaluate" && !isExactGeometryProbe(call, calls[index + 1])) ||
+      (call.tool === "browser_click" && !isExactGeometryProbe(calls[index - 1], call))
     ) {
       throw new Error("approval geometry probe");
     }

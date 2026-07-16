@@ -457,14 +457,14 @@ test("execution accepts only the installed ordered exact calls and freezes the a
   t.after(() => gateway.stop());
   await gateway.start({ jobId: JOB_ID, generation: 8, adoptedSessionId: EXECUTOR_SESSION_ID });
   const sessionId = EXECUTOR_SESSION_ID;
-  const firstArguments = { target: "button-submit", button: "left" };
+  const firstArguments = { key: "Enter" };
   const planDigest = "a".repeat(64);
   const approval = {
     jobId: JOB_ID,
     generation: 8,
     planDigest,
     calls: [
-      { id: "call-001", tool: "browser_click", arguments: firstArguments },
+      { id: "call-001", tool: "browser_press_key", arguments: firstArguments },
       { id: "call-002", tool: "browser_type", arguments: { target: "input-name", text: "approved text" } },
     ],
   };
@@ -475,7 +475,7 @@ test("execution accepts only the installed ordered exact calls and freezes the a
     planDigest,
     callCount: 2,
   });
-  firstArguments.target = "mutated-after-install";
+  firstArguments.key = "mutated-after-install";
   approval.calls.push({ id: "call-003", tool: "browser_press_key", arguments: { key: "Enter" } });
   assert.deepEqual(gateway.active, {
     endpoint: gateway.endpoint,
@@ -493,8 +493,8 @@ test("execution accepts only the installed ordered exact calls and freezes the a
       id: 10,
       method: "tools/call",
       params: {
-        name: "browser_click",
-        arguments: { button: "left", target: "button-submit" },
+        name: "browser_press_key",
+        arguments: { key: "Enter" },
         _meta: { progressToken: 10 },
       },
     },
@@ -523,7 +523,7 @@ test("execution accepts only the installed ordered exact calls and freezes the a
     .filter(({ method }) => method === "tools/call")
     .map(({ params }) => params._meta.progressToken);
   assert.deepEqual(forwardedProgressTokens, [10, "executor-progress-11"]);
-  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_click", "browser_type"]);
+  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_press_key", "browser_type"]);
 
   const extra = await request(gateway.endpoint, {
     sessionId,
@@ -539,7 +539,7 @@ test("execution accepts only the installed ordered exact calls and freezes the a
   assert.equal(gateway.active.phase, "quarantined");
   assert.equal(fatals.length, 1);
   assert.equal(fatals[0].reason, "TOOL_NOT_ALLOWED_IN_PHASE");
-  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_click", "browser_type"]);
+  assert.deepEqual(upstream.calls.map(({ name }) => name), ["browser_press_key", "browser_type"]);
 });
 
 test("execution timing is measured from successful approved calls and bound to the active approval", async (t) => {
@@ -568,7 +568,7 @@ test("execution timing is measured from successful approved calls and bound to t
   const planDigest = "e".repeat(64);
   const calls = [
     { id: "system.start-video", tool: "browser_start_video", arguments: { size: { width: 1920, height: 1080 } } },
-    { id: "step-01.click", tool: "browser_click", arguments: { target: "button-submit" } },
+    { id: "step-01.key", tool: "browser_press_key", arguments: { key: "Enter" } },
     { id: "system.stop-video", tool: "browser_stop_video", arguments: {} },
   ];
   const binding = { jobId: JOB_ID, generation: 81, planDigest };
@@ -812,6 +812,49 @@ test("approval accepts evaluate only as an exact generated probe immediately bef
   }
 });
 
+test("approval rejects every click without its exact immediately preceding geometry probe", async (t) => {
+  const click = { id: "step-01.click", tool: "browser_click", arguments: { target: "approved-target" } };
+  const cases = [
+    { name: "probe-less click", calls: [click] },
+    {
+      name: "click preceded by a non-probe call",
+      calls: [
+        { id: "step-01.wait", tool: "browser_wait_for", arguments: { time: 1 } },
+        click,
+      ],
+    },
+  ];
+
+  for (const [index, invalidCase] of cases.entries()) {
+    await t.test(invalidCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      const generation = 320 + index;
+      await gateway.start({ jobId: JOB_ID, generation, adoptedSessionId: EXECUTOR_SESSION_ID });
+
+      assert.throws(
+        () => gateway.installApproval({
+          jobId: JOB_ID,
+          generation,
+          planDigest: "c".repeat(64),
+          calls: invalidCase.calls,
+        }),
+        (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL",
+      );
+      await waitFor(() => fatals.length === 1);
+      assert.equal(fatals[0].reason, "INVALID_APPROVAL");
+      assert.equal(gateway.active.phase, "quarantined");
+      assert.deepEqual(upstream.calls, []);
+    });
+  }
+});
+
 test("the production coordinator MCP client completes an installed gateway approval", async (t) => {
   const upstream = await startUpstream(t, {
     toolResponder: async ({ message, response }) => {
@@ -871,7 +914,7 @@ test("approval fails closed without a retained executor session", async (t) => {
       jobId: JOB_ID,
       generation: 911,
       planDigest: "1".repeat(64),
-      calls: [{ id: "step-01.click", tool: "browser_click", arguments: { target: "approved" } }],
+      calls: [{ id: "step-01.key", tool: "browser_press_key", arguments: { key: "Enter" } }],
     }),
     (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL",
   );
@@ -946,7 +989,7 @@ test("an adopted executor session rejects planner sessions and new execution ini
     jobId: JOB_ID,
     generation: 93,
     planDigest: "c".repeat(64),
-    calls: [{ id: "step-01.click", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "step-01.key", tool: "browser_press_key", arguments: { key: "Enter" } }],
   });
 
   const plannerAttempt = await request(gateway.endpoint, {
@@ -955,7 +998,7 @@ test("an adopted executor session rejects planner sessions and new execution ini
       jsonrpc: "2.0",
       id: 20,
       method: "tools/call",
-      params: { name: "browser_click", arguments: { target: "approved" } },
+      params: { name: "browser_press_key", arguments: { key: "Enter" } },
     },
   });
   assert.equal(plannerAttempt.status, 403);
@@ -975,7 +1018,7 @@ test("an adopted executor session rejects planner sessions and new execution ini
     jobId: JOB_ID,
     generation: 94,
     planDigest: "d".repeat(64),
-    calls: [{ id: "step-01.click", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "step-01.key", tool: "browser_press_key", arguments: { key: "Enter" } }],
   });
   const initializeAttempt = await request(secondGateway.endpoint, {
     message: {
@@ -1236,7 +1279,7 @@ test("execution quarantines an argument or order mismatch before it reaches raw 
     generation: 9,
     planDigest: "b".repeat(64),
     calls: [
-      { id: "call-001", tool: "browser_click", arguments: { target: 'getByRole("button", { name: "승인", exact: true })' } },
+      { id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } },
     ],
   });
 
@@ -1246,7 +1289,7 @@ test("execution quarantines an argument or order mismatch before it reaches raw 
       jsonrpc: "2.0",
       id: 20,
       method: "tools/call",
-      params: { name: "browser_click", arguments: { target: 'getByRole("button", { name: "거절", exact: true })' } },
+      params: { name: "browser_press_key", arguments: { key: "Escape" } },
     },
   });
   assert.equal(response.status, 403);
@@ -1391,7 +1434,7 @@ test("a queued call advances only after a complete successful MCP JSON-RPC resul
         jobId: JOB_ID,
         generation: 40 + index,
         planDigest: "c".repeat(64),
-        calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+        calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
       });
 
       const outcome = await request(gateway.endpoint, {
@@ -1400,7 +1443,7 @@ test("a queued call advances only after a complete successful MCP JSON-RPC resul
           jsonrpc: "2.0",
           id: 50 + index,
           method: "tools/call",
-          params: { name: "browser_click", arguments: { target: "approved" } },
+          params: { name: "browser_press_key", arguments: { key: "Enter" } },
         },
       }).catch((error) => error);
       assert.ok(outcome instanceof Error || outcome.status === 200 || outcome.status === 403);
@@ -1444,19 +1487,19 @@ test("concurrent execution calls quarantine and never forward the second call", 
     generation: 50,
     planDigest: "d".repeat(64),
     calls: [
-      { id: "call-001", tool: "browser_click", arguments: { target: "one" } },
-      { id: "call-002", tool: "browser_click", arguments: { target: "two" } },
+      { id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } },
+      { id: "call-002", tool: "browser_press_key", arguments: { key: "Escape" } },
     ],
   });
 
   const first = request(gateway.endpoint, {
     sessionId,
-    message: { jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "browser_click", arguments: { target: "one" } } },
+    message: { jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "browser_press_key", arguments: { key: "Enter" } } },
   }).catch((error) => error);
   await waitFor(() => upstream.calls.length === 1);
   const second = await request(gateway.endpoint, {
     sessionId,
-    message: { jsonrpc: "2.0", id: 61, method: "tools/call", params: { name: "browser_click", arguments: { target: "two" } } },
+    message: { jsonrpc: "2.0", id: 61, method: "tools/call", params: { name: "browser_press_key", arguments: { key: "Escape" } } },
   });
   assert.equal(second.status, 403);
   await waitFor(() => fatals.length === 1);
@@ -1493,7 +1536,7 @@ test("quarantine remains terminal when a deferred approved response completes", 
     jobId: JOB_ID,
     generation: 51,
     planDigest: "f".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   });
 
   const publicPort = Number(new URL(gateway.endpoint).port);
@@ -1516,7 +1559,7 @@ test("quarantine remains terminal when a deferred approved response completes", 
       jsonrpc: "2.0",
       id: 62,
       method: "tools/call",
-      params: { name: "browser_click", arguments: { target: "approved" } },
+      params: { name: "browser_press_key", arguments: { key: "Enter" } },
     },
   }).catch((error) => error);
   await waitFor(() => upstream.calls.length === 1);
@@ -1552,12 +1595,12 @@ test("an upstream POST timeout quarantines without advancing the approved queue"
     jobId: JOB_ID,
     generation: 60,
     planDigest: "e".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   });
 
   await request(gateway.endpoint, {
     sessionId,
-    message: { jsonrpc: "2.0", id: 70, method: "tools/call", params: { name: "browser_click", arguments: { target: "approved" } } },
+    message: { jsonrpc: "2.0", id: 70, method: "tools/call", params: { name: "browser_press_key", arguments: { key: "Enter" } } },
   }).catch(() => undefined);
   await waitFor(() => fatals.length === 1);
   assert.equal(fatals[0].reason, "UPSTREAM_TIMEOUT");
@@ -1664,14 +1707,14 @@ test("a downstream disconnect makes an in-flight call uncertain and quarantines 
     jobId: JOB_ID,
     generation: 80,
     planDigest: "f".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   });
   const url = new URL(gateway.endpoint);
   const body = JSON.stringify({
     jsonrpc: "2.0",
     id: 81,
     method: "tools/call",
-    params: { name: "browser_click", arguments: { target: "approved" } },
+    params: { name: "browser_press_key", arguments: { key: "Enter" } },
   });
   const outgoing = httpRequest({
     hostname: url.hostname,
@@ -1771,7 +1814,7 @@ test("installApproval is one-shot, generation-bound and forbidden while planning
     jobId: JOB_ID,
     generation: 100,
     planDigest: "1".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   }), (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL");
   await waitFor(() => fatals.length === 1);
   assert.equal(fatals[0].reason, "STALE_APPROVAL");
@@ -1856,7 +1899,7 @@ test("approval contracts reject unsafe tools, duplicate ids, stale generations a
     jobId: JOB_ID,
     generation: 120,
     planDigest: "2".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   };
   const cases = [
     { name: "unsafe tool", patch: { calls: [{ id: "call-001", tool: "browser_evaluate", arguments: {} }] }, reason: "INVALID_APPROVAL" },
@@ -1945,7 +1988,7 @@ test("installApproval and coordinator quarantine are one-shot fail-closed transi
     jobId: JOB_ID,
     generation: 130,
     planDigest: "3".repeat(64),
-    calls: [{ id: "call-001", tool: "browser_click", arguments: { target: "approved" } }],
+    calls: [{ id: "call-001", tool: "browser_press_key", arguments: { key: "Enter" } }],
   };
   gateway.installApproval(approval);
   assert.throws(
