@@ -18,6 +18,7 @@ import {
   verifyLoopbackPortOwner,
   verifyPlaywrightMcpReady,
 } from "../../src/adapters/browser-runtime.js";
+import { McpGateway } from "../../src/adapters/mcp-gateway.js";
 import { CLICK_GEOMETRY_FUNCTION, compileExecutionCalls } from "../../src/domain/execution-calls.js";
 import { JobStore } from "../../src/jobs/job-store.js";
 
@@ -2391,6 +2392,63 @@ async function assertLoopbackPortsReleased(ports) {
   }
 }
 
+async function startRuntimeWithObservedPortRetry(createAttempt) {
+  for (let index = 0; index < 2; index += 1) {
+    const attempt = await createAttempt(index);
+    try {
+      return { index, attempt, active: await attempt.start() };
+    } catch (error) {
+      await attempt.cleanup();
+      if (
+        error?.code !== "BROWSER_RUNTIME_START_FAILED" ||
+        attempt.observedAddressCollision !== true ||
+        index === 1
+      ) {
+        throw error;
+      }
+    }
+  }
+  throw new Error("runtime attempts exhausted");
+}
+
+test("runtime start retry requires an explicitly observed address collision and cleans every failure", async (t) => {
+  const startFailure = Object.assign(new Error("wrapped start failure"), {
+    code: "BROWSER_RUNTIME_START_FAILED",
+  });
+
+  await t.test("an unobserved generic start failure is cleaned and never retried", async () => {
+    const events = [];
+    await assert.rejects(
+      startRuntimeWithObservedPortRetry(async (index) => ({
+        observedAddressCollision: false,
+        start: async () => {
+          events.push(`start:${index}`);
+          throw startFailure;
+        },
+        cleanup: async () => events.push(`release:${index}`),
+      })),
+      (error) => error === startFailure,
+    );
+    assert.deepEqual(events, ["start:0", "release:0"]);
+  });
+
+  await t.test("every failed attempt is cleaned before the final failure is surfaced", async () => {
+    const events = [];
+    await assert.rejects(
+      startRuntimeWithObservedPortRetry(async (index) => ({
+        observedAddressCollision: index === 0,
+        start: async () => {
+          events.push(`start:${index}`);
+          throw startFailure;
+        },
+        cleanup: async () => events.push(`release:${index}`),
+      })),
+      (error) => error === startFailure,
+    );
+    assert.deepEqual(events, ["start:0", "release:0", "start:1", "release:1"]);
+  });
+});
+
 test("actual Edge automatic login seals only after a credential redirect reaches the target", {
   skip: process.platform !== "win32",
   timeout: 45_000,
@@ -2628,16 +2686,16 @@ test("production BrowserRuntime retries a stolen port then captures click geomet
   const stolenPublicPort = await listen(collisionServer);
   const attemptedPorts = new Set([fixturePort, stolenPublicPort]);
   const originPolicy = createOriginPolicy({ targetOrigin: origin, authOrigins: [], resourceOrigins: [] });
-  let startFailures = 0;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    jobId = randomUUID();
-    jobIds.add(jobId);
-    const publicPort = attempt === 0
+  const started = await startRuntimeWithObservedPortRetry(async (attemptIndex) => {
+    const attemptJobId = randomUUID();
+    jobIds.add(attemptJobId);
+    const publicPort = attemptIndex === 0
       ? stolenPublicPort
       : await unusedLoopbackPort(attemptedPorts);
     attemptedPorts.add(publicPort);
     const rawPort = await unusedLoopbackPort(attemptedPorts);
     attemptedPorts.add(rawPort);
+    const attempt = { observedAddressCollision: false };
     const candidate = new BrowserRuntime({
       studioRoot,
       mcpPackageDir: path.join(studioRoot, "node_modules", "@playwright", "mcp"),
@@ -2645,39 +2703,67 @@ test("production BrowserRuntime retries a stolen port then captures click geomet
       rawPort,
       env: { Path: process.env.Path ?? "" },
       readinessTimeoutMs: 15_000,
+      gatewayFactory: (options) => {
+        const gateway = new McpGateway(options);
+        const startGateway = gateway.start.bind(gateway);
+        gateway.start = async (input) => {
+          try {
+            return await startGateway(input);
+          } catch (error) {
+            const collisionAddress = collisionServer?.address();
+            if (
+              error?.code === "MCP_GATEWAY_START_FAILED" &&
+              attemptIndex === 0 &&
+              options.port === publicPort &&
+              collisionServer?.listening === true &&
+              collisionAddress !== null &&
+              typeof collisionAddress === "object" &&
+              collisionAddress.address === "127.0.0.1" &&
+              collisionAddress.port === publicPort
+            ) {
+              attempt.observedAddressCollision = true;
+            }
+            throw error;
+          }
+        };
+        return gateway;
+      },
     });
     runtime = candidate;
-    try {
-      active = await startRuntime(candidate, {
-        id: jobId,
+    return Object.assign(attempt, {
+      runtime: candidate,
+      jobId: attemptJobId,
+      start: () => startRuntime(candidate, {
+        id: attemptJobId,
         targetUrl,
         originPolicy,
         blockedOrigins: [],
         auth: { mode: "manual" },
-      });
-      break;
-    } catch (error) {
-      startFailures += 1;
-      await candidate.stop();
-      runtime = undefined;
-      const jobDirectory = path.join(studioRoot, "data", "jobs", jobId);
-      await rm(jobDirectory, { recursive: true, force: true });
-      await assert.rejects(stat(jobDirectory), (candidateError) => candidateError?.code === "ENOENT");
-      await assert.rejects(
-        stat(path.join(studioRoot, ".runtime", "browser", jobId)),
-        (candidateError) => candidateError?.code === "ENOENT",
-      );
-      if (attempt === 0) {
-        collisionServer.closeIdleConnections?.();
-        collisionServer.closeAllConnections?.();
-        await new Promise((resolvePromise) => collisionServer.close(resolvePromise));
-        collisionServer = undefined;
+      }),
+      cleanup: async () => {
+        await candidate.stop();
+        if (runtime === candidate) runtime = undefined;
+        const jobDirectory = path.join(studioRoot, "data", "jobs", attemptJobId);
+        await rm(jobDirectory, { recursive: true, force: true });
+        await assert.rejects(stat(jobDirectory), (candidateError) => candidateError?.code === "ENOENT");
+        await assert.rejects(
+          stat(path.join(studioRoot, ".runtime", "browser", attemptJobId)),
+          (candidateError) => candidateError?.code === "ENOENT",
+        );
+        if (attempt.observedAddressCollision) {
+          collisionServer.closeIdleConnections?.();
+          collisionServer.closeAllConnections?.();
+          await new Promise((resolvePromise) => collisionServer.close(resolvePromise));
+          collisionServer = undefined;
+        }
         await assertLoopbackPortsReleased([publicPort, rawPort]);
-      }
-      if (error?.code !== "BROWSER_RUNTIME_START_FAILED" || attempt === 2) throw error;
-    }
-  }
-  assert.equal(startFailures >= 1, true);
+      },
+    });
+  });
+  assert.equal(started.index, 1);
+  runtime = started.attempt.runtime;
+  jobId = started.attempt.jobId;
+  active = started.active;
   assert.ok(active);
   assert.ok(runtime);
   const compiled = compileExecutionCalls({
