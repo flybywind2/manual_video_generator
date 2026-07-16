@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
+import { performance } from "node:perf_hooks";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -2382,15 +2383,72 @@ async function unusedLoopbackPort(excludedPorts) {
   }
 }
 
-async function assertLoopbackPortsReleased(ports) {
-  for (const port of ports) {
-    const server = createServer();
+async function canBindAndReleaseLoopbackPort(port) {
+  const server = createServer();
+  try {
     await listen(server, port);
-    await new Promise((resolvePromise, rejectPromise) => {
-      server.close((error) => error ? rejectPromise(error) : resolvePromise());
-    });
+  } catch (error) {
+    if (error?.code === "EADDRINUSE") return false;
+    throw error;
+  }
+  await new Promise((resolvePromise, rejectPromise) => {
+    server.close((error) => error ? rejectPromise(error) : resolvePromise());
+  });
+  return true;
+}
+
+async function assertLoopbackPortsReleased(
+  ports,
+  { timeoutMs = 5_000, pollIntervalMs = 25 } = {},
+) {
+  for (const port of ports) {
+    const deadline = performance.now() + timeoutMs;
+    let released = false;
+    while (performance.now() < deadline) {
+      if (await canBindAndReleaseLoopbackPort(port)) {
+        released = performance.now() <= deadline;
+        break;
+      }
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) break;
+      await new Promise((resolvePromise) => {
+        setTimeout(resolvePromise, Math.min(pollIntervalMs, remainingMs));
+      });
+    }
+    if (!released) {
+      const error = new Error(`Loopback port ${port} was not released before the deadline.`);
+      error.code = "LOOPBACK_PORT_RELEASE_TIMEOUT";
+      throw error;
+    }
   }
 }
+
+test("loopback port release verification polls until a hard deadline", async (t) => {
+  await t.test("a listener released shortly after cleanup is accepted", async (t) => {
+    const held = createServer();
+    const port = await listen(held);
+    const release = setTimeout(() => held.close(), 50);
+    t.after(async () => {
+      clearTimeout(release);
+      if (held.listening) await new Promise((resolvePromise) => held.close(resolvePromise));
+    });
+
+    await assertLoopbackPortsReleased([port], { timeoutMs: 1_000, pollIntervalMs: 10 });
+  });
+
+  await t.test("a listener that never releases fails at the hard deadline", async (t) => {
+    const held = createServer();
+    const port = await listen(held);
+    t.after(async () => {
+      if (held.listening) await new Promise((resolvePromise) => held.close(resolvePromise));
+    });
+
+    await assert.rejects(
+      assertLoopbackPortsReleased([port], { timeoutMs: 80, pollIntervalMs: 10 }),
+      (error) => error?.code === "LOOPBACK_PORT_RELEASE_TIMEOUT",
+    );
+  });
+});
 
 async function startRuntimeWithObservedPortRetry(createAttempt) {
   for (let index = 0; index < 2; index += 1) {
