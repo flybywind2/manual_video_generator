@@ -10,42 +10,35 @@ import { promisify } from "node:util";
 
 import { runOpenCode } from "../../src/adapters/opencode-client.js";
 import { OpenCodeServer } from "../../src/adapters/opencode-server.js";
-import { resolveOpenCodeInstallation } from "../../src/runtime/opencode-installation.js";
+import { killProcessTree } from "../../src/process/process-runner.js";
 
 const sourceStudioRoot = path.resolve(".");
 const execFileAsync = promisify(execFile);
+const MAX_ACTUAL_SERVE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MCP_CAPABILITY_TOKEN = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 const OTHER_MCP_CAPABILITY_TOKEN = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
+const ACTUAL_OPENCODE_ENV = Object.freeze({
+  "1.17.19": "MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH",
+  "1.18.2": "MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH",
+});
 
 function jobOptions(jobId, additional = {}) {
   return { jobId, mcpCapabilityToken: MCP_CAPABILITY_TOKEN, ...additional };
 }
 
 async function supportedOpenCode(expectedVersion) {
-  const selection = expectedVersion === "1.17.19"
-    ? {
-        path: path.join(
-          sourceStudioRoot,
-          ".runtime",
-          "opencode-1.17.19-probe",
-          "node_modules",
-          "opencode-ai",
-          "bin",
-          "opencode.exe",
-        ),
-        source: "version-probe",
-        version: expectedVersion,
-      }
-    : await resolveOpenCodeInstallation({
-        environment: process.env,
-        mode: "check",
-        runtimeRoot: path.join(sourceStudioRoot, ".runtime", "opencode"),
-        studioRoot: sourceStudioRoot,
-      });
-  const executable = await realpath(selection.path);
-  const stat = await lstat(executable);
+  const variable = ACTUAL_OPENCODE_ENV[expectedVersion];
+  const configured = variable === undefined ? undefined : process.env[variable];
+  assert.ok(variable);
+  assert.equal(typeof configured, "string", `${variable} must be configured`);
+  assert.equal(configured.trim(), configured, `${variable} must be canonical`);
+  assert.equal(path.isAbsolute(configured), true, `${variable} must be absolute`);
+  assert.equal(path.extname(configured).toLowerCase(), ".exe", `${variable} must select a native .exe`);
+  const stat = await lstat(configured);
   assert.equal(stat.isFile(), true);
   assert.equal(stat.isSymbolicLink(), false);
+  const executable = await realpath(configured);
+  assert.equal(executable.toLowerCase(), configured.toLowerCase(), `${variable} must be canonical`);
   assert.equal(path.extname(executable).toLowerCase(), ".exe");
   const result = await execFileAsync(executable, ["--version"], {
     encoding: "utf8",
@@ -54,17 +47,28 @@ async function supportedOpenCode(expectedVersion) {
   });
   assert.equal(result.stderr, "");
   assert.equal(result.stdout, `${expectedVersion}\n`);
-  assert.equal(selection.version, expectedVersion);
-  return { ...selection, path: executable };
+  return { path: executable, source: "explicit-test-path", version: expectedVersion };
 }
 
 async function selectedOpenCode() {
   return supportedOpenCode("1.18.2");
 }
 
-async function trustedStudioFixture(t, { crlf = false, mutateExecutor = false } = {}) {
+function actualOpenCodeSkip(expectedVersion) {
+  if (process.platform !== "win32") return "actual OpenCode contract tests require Windows";
+  const variable = ACTUAL_OPENCODE_ENV[expectedVersion];
+  if (typeof process.env[variable] !== "string" || process.env[variable].trim() === "") {
+    return `actual OpenCode ${expectedVersion} contract tests require ${variable}`;
+  }
+  return false;
+}
+
+async function trustedStudioFixture(
+  t,
+  { crlf = false, mutateExecutor = false, registerCleanup = true } = {},
+) {
   const root = await mkdtemp(path.join(os.tmpdir(), "manual-video-server-fixture-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  if (registerCleanup) t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, ".git"));
   await mkdir(path.join(root, ".opencode", "agents"), { recursive: true });
   for (const relative of [
@@ -81,7 +85,12 @@ async function trustedStudioFixture(t, { crlf = false, mutateExecutor = false } 
 }
 
 async function isolatedServeFixture(t) {
-  const root = await trustedStudioFixture(t);
+  const root = await trustedStudioFixture(t, { registerCleanup: false });
+  const ownedChildren = new Set();
+  t.after(async () => {
+    for (const child of ownedChildren) await stopOwnedProcess(child);
+    await rm(root, { recursive: true, force: true });
+  });
   const home = path.join(root, ".isolated-home");
   const appData = path.join(home, "AppData", "Roaming");
   const localData = path.join(home, "AppData", "Local");
@@ -117,23 +126,22 @@ async function isolatedServeFixture(t) {
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   };
-  return { env, password, root, username };
+  return { env, ownedChildren, password, root, username };
 }
 
-async function stopOwnedProcess(child) {
+async function stopOwnedProcess(
+  child,
+  { killTree = killProcessTree, timeoutMs = 5_000 } = {},
+) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = once(child, "close").catch(() => undefined);
-  child.kill();
+  await killTree(child);
   await Promise.race([
     closed,
-    new Promise((resolvePromise) => setTimeout(resolvePromise, 5_000)),
+    new Promise((resolvePromise) => setTimeout(resolvePromise, timeoutMs)),
   ]);
   if (child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-    await Promise.race([
-      closed,
-      new Promise((resolvePromise) => setTimeout(resolvePromise, 5_000)),
-    ]);
+    throw new Error("actual OpenCode serve process remained alive");
   }
 }
 
@@ -149,7 +157,7 @@ async function startActualServe(t, executable, fixture) {
       windowsHide: true,
     },
   );
-  t.after(() => stopOwnedProcess(child));
+  fixture.ownedChildren.add(child);
   let stdout = "";
   let stderr = "";
   const baseUrl = await new Promise((resolvePromise, rejectPromise) => {
@@ -196,12 +204,100 @@ async function actualServeJson(baseUrl, pathname, fixture) {
     cache: "no-store",
     signal: AbortSignal.timeout(20_000),
   });
-  assert.equal(response.status, 200);
-  const text = await response.text();
-  assert.ok(Buffer.byteLength(text) <= 2 * 1024 * 1024);
-  assert.equal(text.includes(fixture.password), false);
-  return JSON.parse(text);
+  const value = await boundedActualServeResponse(response);
+  assert.equal(JSON.stringify(value).includes(fixture.password), false);
+  return value;
 }
+
+async function boundedActualServeResponse(response) {
+  assert.equal(response?.status, 200);
+  const contentLength = response.headers?.get?.("content-length");
+  if (contentLength !== null && contentLength !== undefined) {
+    assert.match(contentLength, /^(?:0|[1-9]\d*)$/u);
+    const advertised = Number(contentLength);
+    assert.equal(Number.isSafeInteger(advertised), true);
+    if (advertised > MAX_ACTUAL_SERVE_RESPONSE_BYTES) {
+      await Promise.resolve(response.body?.cancel?.()).catch(() => undefined);
+      throw new Error("actual OpenCode serve response is too large");
+    }
+  }
+  const reader = response.body?.getReader?.();
+  assert.ok(reader);
+  const chunks = [];
+  let bytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    assert.equal(value instanceof Uint8Array, true);
+    bytes += value.byteLength;
+    if (bytes > MAX_ACTUAL_SERVE_RESPONSE_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("actual OpenCode serve response is too large");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return JSON.parse(Buffer.concat(chunks, bytes).toString("utf8"));
+}
+
+test("actual serve response parsing rejects oversized advertised and streamed bodies without buffering", async (t) => {
+  await t.test("Content-Length", async () => {
+    let cancelled = false;
+    const response = {
+      status: 200,
+      headers: { get: () => String(MAX_ACTUAL_SERVE_RESPONSE_BYTES + 1) },
+      body: {
+        async cancel() {
+          cancelled = true;
+        },
+      },
+    };
+    await assert.rejects(
+      () => boundedActualServeResponse(response),
+      /actual OpenCode serve response is too large/u,
+    );
+    assert.equal(cancelled, true);
+  });
+
+  await t.test("stream", async () => {
+    let cancelled = false;
+    const response = {
+      status: 200,
+      headers: { get: () => null },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.alloc(MAX_ACTUAL_SERVE_RESPONSE_BYTES));
+          controller.enqueue(Buffer.from([0]));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    };
+    await assert.rejects(
+      () => boundedActualServeResponse(response),
+      /actual OpenCode serve response is too large/u,
+    );
+    assert.equal(cancelled, true);
+  });
+});
+
+test("actual serve cleanup fails closed when the owned process tree remains alive", async () => {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  let killCalls = 0;
+  await assert.rejects(
+    () => stopOwnedProcess(child, {
+      killTree: async (target) => {
+        assert.equal(target, child);
+        killCalls += 1;
+      },
+      timeoutMs: 5,
+    }),
+    /actual OpenCode serve process remained alive/u,
+  );
+  assert.equal(killCalls, 1);
+});
 
 async function configuredAgentFixture(studioRoot, name) {
   const source = (await readFile(path.join(studioRoot, ".opencode", "agents", `${name}.md`), "utf8"))
@@ -371,7 +467,7 @@ function createHarness(overrides = {}) {
 
 for (const expectedVersion of ["1.17.19", "1.18.2"]) {
   test(`actual OpenCode ${expectedVersion} serve exposes the pinned health, config, agent, and tool shapes`, {
-    skip: process.platform !== "win32",
+    skip: actualOpenCodeSkip(expectedVersion),
     timeout: 120_000,
   }, async (t) => {
     const selection = await supportedOpenCode(expectedVersion);
@@ -405,7 +501,7 @@ for (const expectedVersion of ["1.17.19", "1.18.2"]) {
   });
 
   test(`default preflight accepts the exact OpenCode ${expectedVersion} binary`, {
-    skip: process.platform !== "win32",
+    skip: actualOpenCodeSkip(expectedVersion),
     timeout: 120_000,
   }, async (t) => {
     const selection = await supportedOpenCode(expectedVersion);
@@ -1005,7 +1101,7 @@ test("OpenCodeServer stop supersedes an awaited preflight and prevents a late sp
 });
 
 test("default preflight canonicalizes CRLF, revalidates the executable, and isolates data homes", {
-  skip: process.platform !== "win32",
+  skip: actualOpenCodeSkip("1.18.2"),
   timeout: 120_000,
 }, async (t) => {
   const studioRoot = await trustedStudioFixture(t, { crlf: true });
@@ -1348,7 +1444,9 @@ test("default preflight rejects a changed trusted agent before invoking OpenCode
   assert.equal(serveCalls, 0);
 });
 
-test("stop aborts and awaits the supervised default preflight before resolving", async () => {
+test("stop aborts and awaits the supervised default preflight before resolving", {
+  skip: actualOpenCodeSkip("1.18.2"),
+}, async () => {
   const before = new Set((await readdir(os.tmpdir())).filter((name) => name.startsWith("manual-video-opencode-")));
   const openCodeSelection = await selectedOpenCode();
   let entered;

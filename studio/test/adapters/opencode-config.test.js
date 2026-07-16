@@ -7,8 +7,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { resolveOpenCodeInstallation } from "../../src/runtime/opencode-installation.js";
-
 const execFileAsync = promisify(execFile);
 const studioRoot = path.resolve(".");
 const configPath = path.join(studioRoot, "opencode.json");
@@ -16,6 +14,10 @@ const plannerPath = path.join(studioRoot, ".opencode", "agents", "manual-video-p
 const executorPath = path.join(studioRoot, ".opencode", "agents", "manual-video-executor.md");
 const opencodeServerPath = path.join(studioRoot, "src", "adapters", "opencode-server.js");
 const mcpCapabilityToken = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+const ACTUAL_OPENCODE_ENV = Object.freeze({
+  "1.17.19": "MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH",
+  "1.18.2": "MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH",
+});
 const plannerTools = Object.freeze([
   "playwright_browser_snapshot",
   "playwright_browser_wait_for",
@@ -195,29 +197,18 @@ test("trusted project digest matches the exact OpenCode config and agent prompts
 });
 
 async function supportedOpenCode(expectedVersion) {
-  const selection = expectedVersion === "1.17.19"
-    ? {
-        path: path.join(
-          studioRoot,
-          ".runtime",
-          "opencode-1.17.19-probe",
-          "node_modules",
-          "opencode-ai",
-          "bin",
-          "opencode.exe",
-        ),
-        version: expectedVersion,
-      }
-    : await resolveOpenCodeInstallation({
-        environment: process.env,
-        mode: "check",
-        runtimeRoot: path.join(studioRoot, ".runtime", "opencode"),
-        studioRoot,
-      });
-  const executable = await realpath(selection.path);
-  const stat = await lstat(executable);
+  const variable = ACTUAL_OPENCODE_ENV[expectedVersion];
+  const configured = variable === undefined ? undefined : process.env[variable];
+  assert.ok(variable);
+  assert.equal(typeof configured, "string", `${variable} must be configured`);
+  assert.equal(configured.trim(), configured, `${variable} must be canonical`);
+  assert.equal(path.isAbsolute(configured), true, `${variable} must be absolute`);
+  assert.equal(path.extname(configured).toLowerCase(), ".exe", `${variable} must select a native .exe`);
+  const stat = await lstat(configured);
   assert.equal(stat.isFile(), true);
   assert.equal(stat.isSymbolicLink(), false);
+  const executable = await realpath(configured);
+  assert.equal(executable.toLowerCase(), configured.toLowerCase(), `${variable} must be canonical`);
   assert.equal(path.extname(executable).toLowerCase(), ".exe");
   const result = await execFileAsync(executable, ["--version"], {
     encoding: "utf8",
@@ -226,8 +217,16 @@ async function supportedOpenCode(expectedVersion) {
   });
   assert.equal(result.stderr, "");
   assert.equal(result.stdout, `${expectedVersion}\n`);
-  assert.equal(selection.version, expectedVersion);
   return executable;
+}
+
+function actualOpenCodeSkip(expectedVersion) {
+  if (process.platform !== "win32") return "actual OpenCode contract tests require Windows";
+  const variable = ACTUAL_OPENCODE_ENV[expectedVersion];
+  if (typeof process.env[variable] !== "string" || process.env[variable].trim() === "") {
+    return `actual OpenCode ${expectedVersion} contract tests require ${variable}`;
+  }
+  return false;
 }
 
 async function isolatedProject(t) {
@@ -276,7 +275,7 @@ async function debugJson(executable, args, fixture) {
 
 for (const expectedVersion of ["1.17.19", "1.18.2"]) {
   test(`actual OpenCode ${expectedVersion} resolves the isolated config and both primary agents without model drift`, {
-    skip: process.platform !== "win32",
+    skip: actualOpenCodeSkip(expectedVersion),
     timeout: 120_000,
   }, async (t) => {
     const executable = await supportedOpenCode(expectedVersion);
@@ -300,7 +299,7 @@ for (const expectedVersion of ["1.17.19", "1.18.2"]) {
   });
 
   test(`actual OpenCode ${expectedVersion} isolated agents reject native and unsafe browser tools`, {
-    skip: process.platform !== "win32",
+    skip: actualOpenCodeSkip(expectedVersion),
     timeout: 120_000,
   }, async (t) => {
     const executable = await supportedOpenCode(expectedVersion);
