@@ -30,7 +30,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 | HyperFrames | `0.7.57` | 캡션·챕터·하이라이트 타임라인 구성과 렌더링 |
 | FFmpeg / FFprobe | `8.1.1` | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
 
-Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 호환되는 네이티브 `opencode.exe`를 재사용합니다. 명시적으로 지정된 실행 파일, 프로젝트 런타임, PATH의 모든 네이티브 실행 파일, 전역 npm 패키지가 선언한 네이티브 실행 파일을 순서대로 검증하며, 버전이 `1.17.19` 이상인 첫 후보를 선택합니다. 이미 설치된 호환 후보가 없을 때만 정확한 프로젝트 로컬 폴백 `1.18.2`를 `.runtime/opencode`에 준비합니다. `opencode.cmd`와 `opencode.ps1` 같은 command shim은 실행하지 않습니다.
+Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 호환되는 네이티브 `opencode.exe`를 재사용합니다. 명시적으로 지정된 실행 파일, 프로젝트 런타임, PATH의 모든 네이티브 실행 파일, 전역 npm 패키지가 선언한 네이티브 실행 파일을 순서대로 검증하며, 버전이 `1.17.19` 이상인 첫 후보를 선택합니다. 이미 설치된 호환 후보가 없을 때만 정확한 프로젝트 로컬 폴백 `1.18.2`를 `.runtime/opencode`에 준비합니다. `opencode.cmd`와 `opencode.ps1` 같은 command shim은 패키지 위치를 찾기 위한 단서로만 확인하고 실행하지 않습니다.
 
 Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
 
@@ -41,12 +41,12 @@ Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구�
 ```powershell
 git pull --ff-only
 where.exe opencode.exe
-opencode.exe --version
+where.exe opencode.cmd
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ```
 
-`where.exe`와 직접 버전 명령은 PC에 설치된 네이티브 후보를 보여 주고, `-Check` 결과의 `checks.opencode.actual`은 Studio가 실제 선택한 버전을 보여 줍니다. PATH의 첫 후보가 오래된 `1.4.1`이어도 뒤에 있는 호환 후보를 계속 검사합니다. 첫 실행 전 호환 후보가 전혀 없으면 `-Check`는 설치 없이 불일치를 보고할 수 있으며, 일반 시작 명령이 프로젝트 폴백을 준비합니다.
+두 `where.exe` 명령은 네이티브 후보와 npm shim 배치 여부를 읽기 전용으로 조회할 뿐입니다. 발견된 command shim은 위치만 확인하고 실행하지 않습니다. 실행 파일 검증은 Studio의 제한 시간·출력 크기·버전 규칙을 모두 적용하는 `scripts/start.ps1 -Check` 하나만 사용하세요. `-Check` 결과의 `checks.opencode.actual`은 Studio가 실제 선택한 버전을 보여 줍니다. PATH의 첫 후보가 오래된 `1.4.1`이어도 뒤에 있는 호환 후보를 계속 검사합니다. 첫 실행 전 호환 후보가 전혀 없으면 `-Check`는 설치 없이 불일치를 보고할 수 있으며, 일반 시작 명령이 프로젝트 폴백을 준비합니다.
 
 ## 사용 흐름
 

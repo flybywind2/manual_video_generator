@@ -438,7 +438,16 @@ test("README documents the supported OpenCode runtime contract and company PC di
   assert.match(readme, /회사 PC/iu);
   assert.match(readme, /scripts[\\/]start\.ps1\s+-Check/iu);
   assert.match(readme, /where\.exe\s+opencode\.exe/iu);
-  assert.match(readme, /opencode\.exe\s+--version/iu);
+  assert.match(readme, /where\.exe\s+opencode\.cmd/iu);
+  assert.match(
+    readme,
+    /opencode\.cmd[^\r\n]*opencode\.ps1[^\r\n]*(?:위치|발견)[^\r\n]*(?:만|뿐)[^\r\n]*(?:실행하지|실행은 하지)/iu,
+  );
+  assert.match(
+    readme,
+    /실행 파일 검증[^\r\n]*scripts[\\/]start\.ps1\s+-Check[^\r\n]*(?:하나|유일)/iu,
+  );
+  assert.doesNotMatch(readme, /opencode\.exe\s+--version/iu);
   assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH/u);
   assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH/u);
   assert.doesNotMatch(readme, /OpenCode\s*\|\s*`1\.4\.1`/iu);
