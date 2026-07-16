@@ -139,6 +139,7 @@ test("startStudio assembles and closes the production workflow graph", async (t)
             complete: false,
             calls: [],
           }),
+          readExecutionHighlights: () => [],
           readRecordingArtifact: async () => ({
             schemaVersion: "1.0",
             jobId: "unused",
