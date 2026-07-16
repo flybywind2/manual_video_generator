@@ -111,10 +111,11 @@ test("real coordinator workflows reach completed across all approval gates", asy
         [0, 250],
         [500, 600],
         [600, 1_000],
-        [1_000, 2_000],
+        [1_000, 1_050],
+        [1_250, 1_350],
+        [1_350, 2_000],
         [2_000, 2_250],
-        [2_250, 2_500],
-        [2_500, 2_750],
+        [2_250, 2_750],
         [2_750, 3_000],
         [3_000, 3_001],
       ];
@@ -132,6 +133,16 @@ test("real coordinator workflows reach completed across all approval gates", asy
           endedAtMs: origin + offsets[index][1],
         })),
       };
+    },
+    readExecutionHighlights({ expectedCallIds }) {
+      assert.deepEqual(expectedCallIds, ["step-01.click.highlight-bounds"]);
+      return [{
+        approvedCallId: expectedCallIds[0],
+        x: 8,
+        y: 121,
+        width: 127,
+        height: 24,
+      }];
     },
     async readRecordingArtifact({ jobId, generation, planDigest }) {
       return {
@@ -205,6 +216,15 @@ test("real coordinator workflows reach completed across all approval gates", asy
         assert.equal(report.endedAt, "2026-07-14T00:00:03.000Z");
         assert.equal(report.steps[0].startedAt, "2026-07-14T00:00:00.500Z");
         assert.equal(report.steps[0].endedAt, "2026-07-14T00:00:02.750Z");
+        assert.deepEqual(report.clickHighlights, [{
+          stepId: "step-01",
+          callId: "step-01.click",
+          at: "2026-07-14T00:00:01.250Z",
+          x: 8,
+          y: 121,
+          width: 127,
+          height: 24,
+        }]);
         return {
           planDigest: report.planDigest,
           previewDigest,

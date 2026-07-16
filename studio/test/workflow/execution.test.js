@@ -43,7 +43,17 @@ function approvedPlan() {
   };
 }
 
-async function approvedStore(t, jobId) {
+function twoClickPlan() {
+  const value = approvedPlan();
+  value.steps[0].calls.push({
+    id: "step-01.second-click",
+    tool: "browser_click",
+    arguments: { element: "Manual Video", target: 'getByRole("link", { name: "Manual Video", exact: true })' },
+  });
+  return value;
+}
+
+async function approvedStore(t, jobId, planValue = approvedPlan()) {
   const root = join(
     tmpdir(),
     `manual-video-execution-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -54,7 +64,7 @@ async function approvedStore(t, jobId) {
     await store.close();
     await rm(root, { recursive: true, force: true });
   });
-  const plan = approvedPlan();
+  const plan = planValue;
   const planDigest = digestPlan(plan);
   await store.create({
     targetUrl: TARGET_URL,
@@ -92,7 +102,7 @@ function completedReport(jobId, plan, planDigest) {
         screenshotPath: "browser/step-01.png",
         expectedStatus: "passed",
         expectedEvidence: "프로젝트 목록이 표시됨",
-        actionCallIds: ["step-01.click"],
+        actionCallIds: plan.steps[0].calls.map(({ id }) => id),
       },
     ],
   };
@@ -118,19 +128,21 @@ function mismatchReport(jobId, plan, planDigest) {
 }
 
 function measuredTiming(jobId, planDigest, toolCalls) {
-  const approved = compileExecutionCalls(approvedPlan());
-  const offsets = [
-    [-1, 0],
-    [0, 500],
-    [1_000, 1_100],
-    [1_100, 1_200],
-    [1_200, 2_000],
-    [2_000, 2_500],
-    [2_500, 3_000],
-    [3_000, 4_000],
-    [4_000, 4_500],
-    [5_000, 5_001],
-  ];
+  const explicitOffsets = new Map([
+    ["system.start-video", [-1, 0]],
+    ["system.show-actions", [0, 500]],
+    ["step-01.chapter", [1_000, 1_100]],
+    ["step-01.narration-dwell", [1_100, 1_200]],
+    ["step-01.click.highlight-bounds", [1_200, 1_300]],
+    ["step-01.click", [1_500, 1_600]],
+    ["step-01.second-click.highlight-bounds", [1_700, 1_800]],
+    ["step-01.second-click", [2_000, 2_100]],
+    ["step-01.result-dwell", [2_200, 2_500]],
+    ["step-01.evidence-snapshot", [2_500, 3_000]],
+    ["step-01.evidence-screenshot", [3_000, 4_000]],
+    ["system.hide-actions", [4_000, 4_500]],
+    ["system.stop-video", [5_000, 5_001]],
+  ]);
   const origin = Date.parse("2026-07-14T01:00:00.000Z");
   return Object.freeze({
     schemaVersion: "1.0",
@@ -138,12 +150,12 @@ function measuredTiming(jobId, planDigest, toolCalls) {
     jobId,
     generation: 7,
     planDigest,
-    complete: toolCalls.length === approved.length,
+    complete: toolCalls.at(-1)?.id === "system.stop-video",
     calls: Object.freeze(toolCalls.map((call, index) => Object.freeze({
       id: call.id,
       tool: call.tool,
-      startedAtMs: origin + offsets[index][0],
-      endedAtMs: origin + offsets[index][1],
+      startedAtMs: origin + (explicitOffsets.get(call.id) ?? [index * 100, index * 100 + 50])[0],
+      endedAtMs: origin + (explicitOffsets.get(call.id) ?? [index * 100, index * 100 + 50])[1],
     }))),
   });
 }
@@ -156,6 +168,7 @@ function harness(store, jobId, finalValue, overrides = {}) {
     runOptions: [],
     browserStops: 0,
     timingReads: [],
+    highlightReads: [],
     artifactReads: [],
     evidenceReads: [],
     openCodeStops: 0,
@@ -206,6 +219,21 @@ function harness(store, jobId, finalValue, overrides = {}) {
         ? finalValue.toolCalls
         : compileExecutionCalls(approvedPlan());
       return overrides.executionTiming ?? measuredTiming(jobId, input.planDigest, toolCalls);
+    },
+    readExecutionHighlights(input) {
+      calls.highlightReads.push(structuredClone(input));
+      if (overrides.executionHighlights !== undefined) {
+        return typeof overrides.executionHighlights === "function"
+          ? overrides.executionHighlights(input)
+          : overrides.executionHighlights;
+      }
+      return Object.freeze(input.expectedCallIds.map((approvedCallId, index) => Object.freeze({
+        approvedCallId,
+        x: 8 + (index * 200),
+        y: 121 + (index * 100),
+        width: 127,
+        height: 24,
+      })));
     },
     async readRecordingArtifact(input) {
       calls.artifactReads.push(structuredClone(input));
@@ -288,7 +316,18 @@ test("execution installs the exact approved queue, persists progress, and reache
   const result = await workflow.execute(jobId, fixture.planDigest);
 
   assert.equal(result.job.state, "narrating");
-  assert.deepEqual(result.report, report);
+  assert.deepEqual(result.report, {
+    ...report,
+    clickHighlights: [{
+      stepId: "step-01",
+      callId: "step-01.click",
+      at: "2026-07-14T01:00:01.500Z",
+      x: 8,
+      y: 121,
+      width: 127,
+      height: 24,
+    }],
+  });
   assert.equal(calls.approvals.length, 1);
   assert.deepEqual(calls.approvals[0].calls, compileExecutionCalls(fixture.plan));
   assert.equal(calls.approvals[0].planDigest, fixture.planDigest);
@@ -305,6 +344,12 @@ test("execution installs the exact approved queue, persists progress, and reache
     jobId,
     generation: 7,
     planDigest: fixture.planDigest,
+  }]);
+  assert.deepEqual(calls.highlightReads, [{
+    jobId,
+    generation: 7,
+    planDigest: fixture.planDigest,
+    expectedCallIds: ["step-01.click.highlight-bounds"],
   }]);
   assert.deepEqual(calls.artifactReads, [{
     jobId,
@@ -333,6 +378,49 @@ test("execution installs the exact approved queue, persists progress, and reache
   });
 });
 
+test("execution persists one measured highlight for every approved click in queue order", async (t) => {
+  const jobId = "job-exechltwosuccess1";
+  const fixture = await approvedStore(t, jobId, twoClickPlan());
+  const report = completedReport(jobId, fixture.plan, fixture.planDigest);
+  const { calls, workflow } = harness(fixture.store, jobId, report);
+
+  const result = await workflow.execute(jobId, fixture.planDigest);
+
+  assert.deepEqual(calls.highlightReads, [{
+    jobId,
+    generation: 7,
+    planDigest: fixture.planDigest,
+    expectedCallIds: [
+      "step-01.click.highlight-bounds",
+      "step-01.second-click.highlight-bounds",
+    ],
+  }]);
+  assert.deepEqual(result.report.clickHighlights, [
+    {
+      stepId: "step-01",
+      callId: "step-01.click",
+      at: "2026-07-14T01:00:01.500Z",
+      x: 8,
+      y: 121,
+      width: 127,
+      height: 24,
+    },
+    {
+      stepId: "step-01",
+      callId: "step-01.second-click",
+      at: "2026-07-14T01:00:02.000Z",
+      x: 208,
+      y: 221,
+      width: 127,
+      height: 24,
+    },
+  ]);
+  assert.deepEqual(
+    (await fixture.store.readEvents(jobId)).at(-1).data.report.clickHighlights,
+    result.report.clickHighlights,
+  );
+});
+
 test("coordinator timing replaces every executor-supplied timestamp before media persistence", async (t) => {
   const jobId = "job-exectiming0000001";
   const fixture = await approvedStore(t, jobId);
@@ -352,6 +440,92 @@ test("coordinator timing replaces every executor-supplied timestamp before media
   const persisted = (await fixture.store.readEvents(jobId)).at(-1).data.report;
   assert.deepEqual(persisted, result.report);
   assert.notEqual(persisted.startedAt, forged.startedAt);
+});
+
+test("completed execution rejects missing, duplicate, stale, reordered, or forged geometry", async (t) => {
+  const cases = [
+    {
+      name: "missing",
+      highlights: [],
+    },
+    {
+      name: "duplicate",
+      highlights: [
+        { approvedCallId: "step-01.click.highlight-bounds", x: 8, y: 121, width: 127, height: 24 },
+        { approvedCallId: "step-01.click.highlight-bounds", x: 8, y: 121, width: 127, height: 24 },
+      ],
+    },
+    {
+      name: "stale",
+      highlights: [
+        { approvedCallId: "step-00.click.highlight-bounds", x: 8, y: 121, width: 127, height: 24 },
+      ],
+    },
+    {
+      name: "forged",
+      highlights: [
+        { approvedCallId: "step-01.click.highlight-bounds", x: 1_900, y: 121, width: 21, height: 24 },
+      ],
+    },
+  ];
+
+  for (const [index, fixtureCase] of cases.entries()) {
+    await t.test(fixtureCase.name, async (t) => {
+      const jobId = `job-exechlreject${String(index).padStart(4, "0")}`;
+      const fixture = await approvedStore(t, jobId);
+      const report = completedReport(jobId, fixture.plan, fixture.planDigest);
+      const { calls, workflow } = harness(fixture.store, jobId, report, {
+        executionHighlights: fixtureCase.highlights,
+      });
+
+      await assert.rejects(workflow.execute(jobId, fixture.planDigest), {
+        code: "EXECUTION_FAILED",
+      });
+      assert.equal(calls.highlightReads.length, 1);
+      assert.equal((await fixture.store.readEvents(jobId)).at(-1).event, "EXECUTION_FAILED");
+    });
+  }
+
+  await t.test("reordered", async (t) => {
+    const jobId = "job-exechlreorder0001";
+    const plan = twoClickPlan();
+    const fixture = await approvedStore(t, jobId, plan);
+    const report = completedReport(jobId, fixture.plan, fixture.planDigest);
+    const reordered = [
+      { approvedCallId: "step-01.second-click.highlight-bounds", x: 208, y: 221, width: 127, height: 24 },
+      { approvedCallId: "step-01.click.highlight-bounds", x: 8, y: 121, width: 127, height: 24 },
+    ];
+    const { workflow } = harness(fixture.store, jobId, report, {
+      executionHighlights: reordered,
+    });
+
+    await assert.rejects(workflow.execute(jobId, fixture.planDigest), {
+      code: "EXECUTION_FAILED",
+    });
+  });
+});
+
+test("executor-authored click metadata is rejected before coordinator geometry is read", async (t) => {
+  const jobId = "job-exechlforgedmeta1";
+  const fixture = await approvedStore(t, jobId);
+  const forged = {
+    ...completedReport(jobId, fixture.plan, fixture.planDigest),
+    clickHighlights: [{
+      stepId: "step-01",
+      callId: "step-01.click",
+      at: "2026-07-14T01:00:01.500Z",
+      x: 8,
+      y: 121,
+      width: 127,
+      height: 24,
+    }],
+  };
+  const { calls, workflow } = harness(fixture.store, jobId, forged);
+
+  await assert.rejects(workflow.execute(jobId, fixture.planDigest), {
+    code: "EXECUTION_FAILED",
+  });
+  assert.deepEqual(calls.highlightReads, []);
 });
 
 test("coordinator timing replaces malformed executor timestamps before report validation", async (t) => {
@@ -497,6 +671,7 @@ test("a validated mismatch stops all runtimes and enters needs_review", async (t
   assert.equal(result.report.status, "mismatch");
   assert.equal(calls.browserStops, 1);
   assert.equal(calls.openCodeStops, 1);
+  assert.deepEqual(calls.highlightReads, []);
   assert.equal((await fixture.store.readEvents(jobId)).at(-1).event, "EXECUTION_MISMATCH");
 });
 

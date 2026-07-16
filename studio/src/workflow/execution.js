@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { runOpenCode as defaultRunOpenCode } from "../adapters/opencode-client.js";
 import { StudioError } from "../domain/errors.js";
 import { compileExecutionCalls } from "../domain/execution-calls.js";
+import { bindExecutionHighlights } from "../domain/execution-highlights.js";
 import { validateExecutionReport } from "../domain/execution-report.js";
 import { unwrapExactJsonFence } from "../domain/json-output.js";
 import { assertApprovedPlan } from "../domain/plan.js";
@@ -74,6 +75,7 @@ function validateDependencies(options) {
   if (
     typeof browserRuntime?.installApproval !== "function" ||
     typeof browserRuntime?.executeApproval !== "function" ||
+    typeof browserRuntime?.readExecutionHighlights !== "function" ||
     typeof browserRuntime?.readExecutionTiming !== "function" ||
     typeof browserRuntime?.readEvidenceArtifacts !== "function" ||
     typeof browserRuntime?.readRecordingArtifact !== "function" ||
@@ -516,7 +518,7 @@ function bindMeasuredTiming(report, binding, expectedCalls, timingValue, ownedAr
       ...(completed ? { screenshotPath: ownedEvidence.screenshotPath } : {}),
     };
   });
-  return validateExecutionReport({
+  const validated = validateExecutionReport({
     ...report,
     startedAt: isoTime(recordingStartMs),
     endedAt: isoTime(recordingEndMs),
@@ -527,6 +529,103 @@ function bindMeasuredTiming(report, binding, expectedCalls, timingValue, ownedAr
     plan: binding.plan,
     planDigest: binding.planDigest,
   });
+  return Object.freeze({
+    report: validated,
+    measuredCalls: Object.freeze(measuredCalls.map((call) => Object.freeze({ ...call }))),
+  });
+}
+
+function approvedClickPairs(expectedCalls) {
+  const pairs = [];
+  for (let index = 0; index < expectedCalls.length; index += 1) {
+    const click = expectedCalls[index];
+    if (click.tool !== "browser_click") continue;
+    const probe = expectedCalls[index - 1];
+    if (
+      !probe ||
+      probe.tool !== "browser_evaluate" ||
+      probe.id !== `${click.id}.highlight-bounds`
+    ) {
+      throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+    }
+    pairs.push(Object.freeze({ clickIndex: index, click, probe }));
+  }
+  return Object.freeze(pairs);
+}
+
+function denseHighlightRecords(value, expectedLength) {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length !== expectedLength
+  ) {
+    throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== value.length + 1 ||
+    keys.some((key) => key !== "length" && (typeof key !== "string" || !/^(?:0|[1-9]\d*)$/u.test(key)))
+  ) {
+    throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+  }
+  return value.map((_, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+    }
+    return descriptor.value;
+  });
+}
+
+function exactHighlightObject(value, fields) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+    Reflect.ownKeys(value).length !== fields.length ||
+    Reflect.ownKeys(value).some((key) => typeof key !== "string" || !fields.includes(key))
+  ) {
+    throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+  }
+  const output = Object.create(null);
+  for (const field of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+    }
+    output[field] = descriptor.value;
+  }
+  return output;
+}
+
+function measuredHighlightCandidates(expectedCalls, measuredCalls, geometryValue) {
+  const pairs = approvedClickPairs(expectedCalls);
+  if (measuredCalls.length !== expectedCalls.length) {
+    throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+  }
+  const geometryRecords = denseHighlightRecords(geometryValue, pairs.length);
+  const geometryFields = ["approvedCallId", "x", "y", "width", "height"];
+  return Object.freeze(geometryRecords.map((candidate, index) => {
+    const fields = exactHighlightObject(candidate, geometryFields);
+    const pair = pairs[index];
+    const measuredClick = measuredCalls[pair.clickIndex];
+    if (
+      fields.approvedCallId !== pair.probe.id ||
+      measuredClick?.id !== pair.click.id ||
+      measuredClick?.tool !== "browser_click"
+    ) {
+      throw executionError("EXECUTION_HIGHLIGHTS_INVALID", "The browser execution highlights are invalid.");
+    }
+    return Object.freeze({
+      approvedCallId: fields.approvedCallId,
+      at: isoTime(measuredClick.startedAtMs),
+      x: fields.x,
+      y: fields.y,
+      width: fields.width,
+      height: fields.height,
+    });
+  }));
 }
 
 function progressEvent(value) {
@@ -788,13 +887,28 @@ export function createExecutionWorkflow(options) {
         } else {
           report = validateExecutionReport({ ...candidate, recordingPath: null }, binding);
         }
-        report = bindMeasuredTiming(
+        const timingValue = settings.browserRuntime.readExecutionTiming(timingBinding);
+        const measured = bindMeasuredTiming(
           report,
           { ...timingBinding, plan },
           calls,
-          settings.browserRuntime.readExecutionTiming(timingBinding),
+          timingValue,
           ownedArtifacts,
         );
+        report = measured.report;
+        if (report.status === "completed") {
+          const clickPairs = approvedClickPairs(calls);
+          const expectedCallIds = Object.freeze(clickPairs.map(({ probe }) => probe.id));
+          const geometry = settings.browserRuntime.readExecutionHighlights({
+            ...timingBinding,
+            expectedCallIds,
+          });
+          report = bindExecutionHighlights(
+            report,
+            measuredHighlightCandidates(calls, measured.measuredCalls, geometry),
+            { plan, planDigest: restored.planDigest },
+          );
+        }
       } catch (error) {
         outputRejected = true;
         outputFailure = safeOutputFailure(error);
