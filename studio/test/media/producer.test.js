@@ -10,6 +10,7 @@ import { digestPlan } from "../../src/domain/plan.js";
 import { compileExecutionCalls } from "../../src/domain/execution-calls.js";
 import { JobStore } from "../../src/jobs/job-store.js";
 import { mediaPlanDigest, writeComposition } from "../../src/media/composition.js";
+import { createMediaPlan } from "../../src/media/media-plan.js";
 import { createMediaProducer } from "../../src/media/producer.js";
 import { ProductionWorkflow } from "../../src/workflow/production.js";
 
@@ -160,11 +161,12 @@ async function fixture(t, overrides = {}) {
   };
   const clientFactoryCalls = [];
   const compositionWrites = [];
+  const mediaPlanInputs = [];
   const createSupertonicClient = (options) => {
     clientFactoryCalls.push(options);
     return { outputRoot: options.outputRoot, health() {}, synthesize() {} };
   };
-  const producer = createMediaProducer({
+  const producerOptions = {
     jobsRoot,
     templatePath,
     restoreLatestPlan: async (_jobStore, restoredJobId) => {
@@ -178,16 +180,23 @@ async function fixture(t, overrides = {}) {
     supertonicBaseUrl: overrides.supertonicBaseUrl ?? "http://127.0.0.1:7788",
     createSupertonicClient,
     generateNarration,
+    createMediaPlan(input) {
+      mediaPlanInputs.push(structuredClone(input));
+      return createMediaPlan(input);
+    },
     writeComposition: async (options) => {
       compositionWrites.push(options);
       return (overrides.writeComposition ?? writeComposition)(options);
     },
     mediaPlanDigest: overrides.mediaPlanDigest,
     previewPort: 49_317,
-  });
+  };
+  const createProducer = () => createMediaProducer(producerOptions);
+  const producer = createProducer();
 
   return {
     producer,
+    createProducer,
     jobId,
     jobRoot,
     plan,
@@ -196,6 +205,7 @@ async function fixture(t, overrides = {}) {
     narrationCalls,
     clientFactoryCalls,
     compositionWrites,
+    mediaPlanInputs,
   };
 }
 
@@ -323,6 +333,7 @@ test("transforms approved browser evidence into a bound draft preview and safe a
         "preview-integrity.json",
         "preview.json",
         "preview.mp4",
+        "source-highlights.json",
       ],
     },
   );
@@ -337,6 +348,7 @@ test("transforms approved browser evidence into a bound draft preview and safe a
     [
       "artifacts/captions.vtt",
       "artifacts/preview.mp4",
+      "artifacts/source-highlights.json",
       "composition/index.html",
       "composition/media/normalized.mp4",
       "composition/narration/scene-001.wav",
@@ -753,6 +765,17 @@ test("preserves multiple trusted clicks in deterministic order and rejects an im
     ["open-menu.click", "open-menu.select"],
   );
   assert.deepEqual(preview.mediaPlan.scenes[1].highlights, []);
+  const sourceBinding = JSON.parse(
+    await readFile(
+      join(context.jobRoot, "artifacts", "source-highlights.json"),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    sourceBinding.scenes[0].highlights.map(({ callId }) => callId),
+    ["open-menu.click", "open-menu.select"],
+  );
+  assert.deepEqual(sourceBinding.scenes[1].highlights, []);
 
   const impossible = {
     ...report,
@@ -876,6 +899,19 @@ test("edit rejects fields outside the digest-bound caption and narration contrac
     }),
     { code: "PRODUCER_EDIT_INVALID" },
   );
+  await assert.rejects(
+    context.producer.edit({
+      jobId: context.jobId,
+      preview,
+      edit: {
+        previewDigest: preview.previewDigest,
+        sceneId: "open-menu",
+        narrationText: "변경 문장",
+        sourceHighlights: [],
+      },
+    }),
+    { code: "PRODUCER_EDIT_INVALID" },
+  );
 });
 
 test("verifyPreview rejects a preview object whose media plan differs from the persisted digest", async (t) => {
@@ -943,6 +979,7 @@ test("verifyPreview rejects mutation of every HyperFrames input and reviewed art
   const protectedPaths = [
     "artifacts/preview.mp4",
     "artifacts/captions.vtt",
+    "artifacts/source-highlights.json",
     "composition/index.html",
     "composition/media/normalized.mp4",
     "composition/narration/scene-001.wav",
@@ -961,7 +998,11 @@ test("verifyPreview rejects mutation of every HyperFrames input and reviewed art
 
       await assert.rejects(
         context.producer.verifyPreview({ jobId: context.jobId, preview }),
-        { code: "PRODUCER_PREVIEW_STALE" },
+        {
+          code: relativePath === "artifacts/source-highlights.json"
+            ? "PRODUCER_DATA_INVALID"
+            : "PRODUCER_PREVIEW_STALE",
+        },
       );
     });
   }
@@ -981,6 +1022,63 @@ test("verifyPreview requires the exact immutable preview integrity manifest", as
     context.producer.verifyPreview({ jobId: context.jobId, preview }),
     { code: "PRODUCER_PREVIEW_INVALID" },
   );
+});
+
+test("verifyPreview rejects missing, stale, and swapped source highlight bindings", async (t) => {
+  await t.test("missing", async (subtest) => {
+    const context = await fixture(subtest);
+    const { preview } = await preparedPreview(context);
+    await rm(join(context.jobRoot, "artifacts", "source-highlights.json"));
+
+    await assert.rejects(
+      context.producer.verifyPreview({ jobId: context.jobId, preview }),
+      { code: "UNSAFE_MEDIA_PATH" },
+    );
+  });
+
+  await t.test("stale digest", async (subtest) => {
+    const context = await fixture(subtest);
+    const { preview } = await preparedPreview(context);
+    const sourcePath = join(context.jobRoot, "artifacts", "source-highlights.json");
+    const binding = JSON.parse(await readFile(sourcePath, "utf8"));
+    binding.previewDigest = binding.previewDigest === "0".repeat(64)
+      ? "f".repeat(64)
+      : "0".repeat(64);
+    await writeFile(sourcePath, `${JSON.stringify(binding)}\n`, "utf8");
+
+    await assert.rejects(
+      context.producer.verifyPreview({ jobId: context.jobId, preview }),
+      { code: "PRODUCER_PREVIEW_STALE" },
+    );
+  });
+
+  await t.test("swapped job", async (subtest) => {
+    const context = await fixture(subtest);
+    const { preview } = await preparedPreview(context);
+    const sourcePath = join(context.jobRoot, "artifacts", "source-highlights.json");
+    const binding = JSON.parse(await readFile(sourcePath, "utf8"));
+    binding.jobId = "job-media-2";
+    await writeFile(sourcePath, `${JSON.stringify(binding)}\n`, "utf8");
+
+    await assert.rejects(
+      context.producer.verifyPreview({ jobId: context.jobId, preview }),
+      { code: "PRODUCER_PREVIEW_STALE" },
+    );
+  });
+
+  await t.test("fractional source cue", async (subtest) => {
+    const context = await fixture(subtest);
+    const { preview } = await preparedPreview(context);
+    const sourcePath = join(context.jobRoot, "artifacts", "source-highlights.json");
+    const binding = JSON.parse(await readFile(sourcePath, "utf8"));
+    binding.scenes[0].highlights[0].sourceAtMs += 0.5;
+    await writeFile(sourcePath, `${JSON.stringify(binding)}\n`, "utf8");
+
+    await assert.rejects(
+      context.producer.verifyPreview({ jobId: context.jobId, preview }),
+      { code: "PRODUCER_PREVIEW_INVALID" },
+    );
+  });
 });
 
 test("final rendering regenerates and checks the approved composition before HyperFrames", async (t) => {
@@ -1039,6 +1137,7 @@ test("final artifact publication never replaces the immutable preview manifest",
         "preview.json",
         "preview.mp4",
         "quality.json",
+        "source-highlights.json",
       ],
     },
   );
@@ -1212,6 +1311,55 @@ test("narration editing resynthesizes real clips while preserving every approved
   );
 });
 
+test("narration rebuild preserves the trusted source time of a late boundary click", async (t) => {
+  const context = await fixture(t);
+  const base = executionReport(context.planDigest);
+  const report = {
+    ...base,
+    clickHighlights: [
+      {
+        ...base.clickHighlights[0],
+        at: "2026-07-15T00:00:01.000Z",
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+  assert.equal(preview.mediaPlan.scenes[0].highlights[0].startMs, 100);
+  assert.equal(context.mediaPlanInputs[0].scenes[0].highlights[0].sourceAtMs, 1_000);
+
+  const restartedProducer = context.createProducer();
+  const edited = await restartedProducer.edit({
+    jobId: context.jobId,
+    preview,
+    edit: {
+      previewDigest: preview.previewDigest,
+      sceneId: "open-menu",
+      narrationText: "프로필 메뉴를 선택한 뒤 내용을 확인합니다.",
+    },
+  });
+  const rebuilt = await restartedProducer.rebuild({
+    jobId: context.jobId,
+    job,
+    preview,
+    edited,
+    stage: edited.stage,
+  });
+
+  assert.equal(rebuilt.mediaPlan.scenes[0].highlights[0].startMs, 100);
+  assert.equal(context.mediaPlanInputs[1].scenes[0].highlights[0].sourceAtMs, 1_000);
+});
+
 test("render refuses to publish final artifacts when the media plan changes during quality probing", async (t) => {
   let mediaPlanPath;
   const context = await fixture(t, {
@@ -1294,6 +1442,7 @@ test("high render passes the media duration to QualityGate and publishes the fin
         "preview.json",
         "preview.mp4",
         "quality.json",
+        "source-highlights.json",
       ],
     },
   );

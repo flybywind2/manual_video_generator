@@ -37,6 +37,7 @@ const DIGEST = /^[a-f0-9]{64}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const PREVIEW_INTEGRITY_FILE = "preview-integrity.json";
+const SOURCE_HIGHLIGHTS_FILE = "source-highlights.json";
 const CLICK_HIGHLIGHT_PRE_ROLL_MS = 250;
 const REPORT_HIGHLIGHT_FIELDS = Object.freeze([
   "stepId",
@@ -53,6 +54,7 @@ const PREVIEW_FILES = Object.freeze([
   PREVIEW_INTEGRITY_FILE,
   "preview.json",
   "preview.mp4",
+  SOURCE_HIGHLIGHTS_FILE,
 ]);
 
 function producerError(code, message, reason, retryable = false) {
@@ -864,6 +866,7 @@ function integrityPaths(mediaPlan) {
   const paths = [
     "artifacts/captions.vtt",
     "artifacts/preview.mp4",
+    `artifacts/${SOURCE_HIGHLIGHTS_FILE}`,
     "composition/index.html",
     mediaPlan.recordingPath,
   ];
@@ -904,6 +907,224 @@ function exactObjectFields(value, fields) {
       (key) => typeof key === "string" && fields.includes(key),
     )
   );
+}
+
+function exactDenseArray(value, { minimum = 0, maximum = 100, reason } = {}) {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    value.length < minimum ||
+    value.length > maximum ||
+    Reflect.ownKeys(value).length !== value.length + 1
+  ) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The source highlight binding is invalid.",
+      reason,
+    );
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) {
+      throw producerError(
+        "PRODUCER_PREVIEW_INVALID",
+        "The source highlight binding is invalid.",
+        reason,
+      );
+    }
+  }
+  return value;
+}
+
+function validateSourceHighlightBinding(
+  candidate,
+  mediaPlan,
+  { jobId, planDigest, previewDigest },
+) {
+  const rootFields = [
+    "schemaVersion",
+    "jobId",
+    "planDigest",
+    "mediaPlanDigest",
+    "previewDigest",
+    "scenes",
+  ];
+  const sceneFields = ["id", "sourceStartMs", "sourceEndMs", "highlights"];
+  const highlightFields = ["callId", "sourceAtMs", "x", "y", "width", "height"];
+  if (
+    !exactObjectFields(candidate, rootFields) ||
+    candidate.schemaVersion !== "1.0" ||
+    typeof candidate.jobId !== "string" ||
+    !JOB_ID.test(candidate.jobId) ||
+    !DIGEST.test(candidate.planDigest ?? "") ||
+    !DIGEST.test(candidate.mediaPlanDigest ?? "") ||
+    !DIGEST.test(candidate.previewDigest ?? "") ||
+    !Array.isArray(mediaPlan?.scenes)
+  ) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The source highlight binding is invalid.",
+      "source_binding_contract",
+    );
+  }
+  if (
+    candidate.jobId !== jobId ||
+    !equalDigest(candidate.planDigest, planDigest) ||
+    !equalDigest(candidate.mediaPlanDigest, previewDigest) ||
+    !equalDigest(candidate.previewDigest, previewDigest)
+  ) {
+    throw producerError(
+      "PRODUCER_PREVIEW_STALE",
+      "The source highlight binding is stale.",
+      "source_binding_digest",
+    );
+  }
+  const scenes = exactDenseArray(candidate.scenes, {
+    minimum: 1,
+    maximum: 100,
+    reason: "source_binding_scenes",
+  });
+  if (scenes.length !== mediaPlan.scenes.length) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The source highlight binding is invalid.",
+      "source_binding_scene_count",
+    );
+  }
+  const normalizedScenes = scenes.map((scene, sceneIndex) => {
+    const mediaScene = mediaPlan.scenes[sceneIndex];
+    if (
+      !exactObjectFields(scene, sceneFields) ||
+      scene.id !== mediaScene?.id ||
+      !Number.isSafeInteger(scene.sourceStartMs) ||
+      !Number.isSafeInteger(scene.sourceEndMs) ||
+      scene.sourceStartMs !== mediaScene?.source?.startMs ||
+      scene.sourceEndMs !== mediaScene?.source?.endMs ||
+      scene.sourceEndMs <= scene.sourceStartMs ||
+      !Array.isArray(mediaScene?.highlights)
+    ) {
+      throw producerError(
+        "PRODUCER_PREVIEW_INVALID",
+        "The source highlight binding is invalid.",
+        "source_binding_scene",
+      );
+    }
+    const highlights = exactDenseArray(scene.highlights, {
+      maximum: 100,
+      reason: "source_binding_highlights",
+    });
+    if (highlights.length !== mediaScene.highlights.length) {
+      throw producerError(
+        "PRODUCER_PREVIEW_INVALID",
+        "The source highlight binding is invalid.",
+        "source_binding_highlight_count",
+      );
+    }
+    let previous = null;
+    const normalizedHighlights = highlights.map((highlight, highlightIndex) => {
+      const mediaHighlight = mediaScene.highlights[highlightIndex];
+      if (
+        !exactObjectFields(highlight, highlightFields) ||
+        highlight.callId !== mediaHighlight?.callId ||
+        !Number.isSafeInteger(highlight.sourceAtMs) ||
+        highlight.sourceAtMs < scene.sourceStartMs ||
+        highlight.sourceAtMs > scene.sourceEndMs ||
+        ![highlight.x, highlight.y, highlight.width, highlight.height].every(Number.isSafeInteger) ||
+        highlight.x !== mediaHighlight?.x ||
+        highlight.y !== mediaHighlight?.y ||
+        highlight.width !== mediaHighlight?.width ||
+        highlight.height !== mediaHighlight?.height ||
+        highlight.x < 0 ||
+        highlight.y < 0 ||
+        highlight.width < 1 ||
+        highlight.height < 1 ||
+        !Number.isSafeInteger(highlight.x + highlight.width) ||
+        !Number.isSafeInteger(highlight.y + highlight.height) ||
+        highlight.x + highlight.width > 1_920 ||
+        highlight.y + highlight.height > 1_080
+      ) {
+        throw producerError(
+          "PRODUCER_PREVIEW_INVALID",
+          "The source highlight binding is invalid.",
+          "source_binding_highlight",
+        );
+      }
+      if (
+        previous !== null &&
+        (highlight.sourceAtMs < previous.sourceAtMs ||
+          (highlight.sourceAtMs === previous.sourceAtMs &&
+            highlight.callId.localeCompare(previous.callId, "en") < 0))
+      ) {
+        throw producerError(
+          "PRODUCER_PREVIEW_INVALID",
+          "The source highlight binding is invalid.",
+          "source_binding_order",
+        );
+      }
+      previous = highlight;
+      return Object.freeze({
+        callId: highlight.callId,
+        sourceAtMs: highlight.sourceAtMs,
+        x: highlight.x,
+        y: highlight.y,
+        width: highlight.width,
+        height: highlight.height,
+      });
+    });
+    return Object.freeze({
+      id: scene.id,
+      sourceStartMs: scene.sourceStartMs,
+      sourceEndMs: scene.sourceEndMs,
+      highlights: Object.freeze(normalizedHighlights),
+    });
+  });
+  return Object.freeze({
+    schemaVersion: "1.0",
+    jobId: candidate.jobId,
+    planDigest: candidate.planDigest,
+    mediaPlanDigest: candidate.mediaPlanDigest,
+    previewDigest: candidate.previewDigest,
+    scenes: Object.freeze(normalizedScenes),
+  });
+}
+
+function createSourceHighlightBinding(
+  sourceScenes,
+  mediaPlan,
+  { jobId, planDigest, previewDigest },
+) {
+  if (!Array.isArray(sourceScenes)) {
+    throw producerError(
+      "PRODUCER_PREVIEW_INVALID",
+      "The source highlight binding is invalid.",
+      "source_binding_input",
+    );
+  }
+  const candidate = {
+    schemaVersion: "1.0",
+    jobId,
+    planDigest,
+    mediaPlanDigest: previewDigest,
+    previewDigest,
+    scenes: sourceScenes.map((scene) => ({
+      id: scene.id,
+      sourceStartMs: scene.sourceStartMs,
+      sourceEndMs: scene.sourceEndMs,
+      highlights: scene.highlights.map((highlight) => ({
+        callId: highlight.callId,
+        sourceAtMs: highlight.sourceAtMs,
+        x: highlight.x,
+        y: highlight.y,
+        width: highlight.width,
+        height: highlight.height,
+      })),
+    })),
+  };
+  return validateSourceHighlightBinding(candidate, mediaPlan, {
+    jobId,
+    planDigest,
+    previewDigest,
+  });
 }
 
 function parsePreviewIntegrity(value, mediaPlan, planDigest, previewDigest) {
@@ -1453,7 +1674,7 @@ export class MediaProducer {
     }
   }
 
-  async #publishPreview(layout, planDigest, mediaPlan, renderedFile) {
+  async #publishPreview(layout, planDigest, mediaPlan, sourceScenes, renderedFile) {
     const digest = this.#mediaPlanDigest(mediaPlan);
     if (!DIGEST.test(digest)) {
       throw producerError(
@@ -1462,6 +1683,11 @@ export class MediaProducer {
         "invalid_digest",
       );
     }
+    const sourceBinding = createSourceHighlightBinding(sourceScenes, mediaPlan, {
+      jobId: layout.jobId,
+      planDigest,
+      previewDigest: digest,
+    });
     const previewPath = join(layout.artifactsPath, "preview.mp4");
     const beforeMetadata = await requireRegular(layout.jobRoot, previewPath, {
       minimumBytes: 1,
@@ -1470,6 +1696,11 @@ export class MediaProducer {
       throw invalidPath("preview_file_changed_before_publication");
     }
     await atomicJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json"), mediaPlan);
+    await atomicJson(
+      layout.jobRoot,
+      join(layout.artifactsPath, SOURCE_HIGHLIGHTS_FILE),
+      sourceBinding,
+    );
     await atomicWrite(layout.jobRoot, join(layout.artifactsPath, "captions.vtt"), captionsVtt(mediaPlan));
     const beforeIntegrity = await requireRegular(layout.jobRoot, previewPath, {
       minimumBytes: 1,
@@ -1514,7 +1745,7 @@ export class MediaProducer {
     });
   }
 
-  async #composePlan(layout, planDigest, mediaPlan, signal) {
+  async #composePlan(layout, planDigest, mediaPlan, sourceScenes, signal) {
     await this.#writeComposition({
       jobRoot: layout.jobRoot,
       templatePath: this.#templatePath,
@@ -1523,7 +1754,13 @@ export class MediaProducer {
     });
     await requireRegular(layout.jobRoot, join(layout.compositionPath, "index.html"), { minimumBytes: 1 });
     const renderedFile = await this.#renderDraft(layout, signal);
-    return this.#publishPreview(layout, planDigest, mediaPlan, renderedFile);
+    return this.#publishPreview(
+      layout,
+      planDigest,
+      mediaPlan,
+      sourceScenes,
+      renderedFile,
+    );
   }
 
   async compose({ jobId, job, report, narration, signal } = {}) {
@@ -1561,10 +1798,15 @@ export class MediaProducer {
       signal,
     });
     await requireRegular(layout.jobRoot, normalizedPath, { minimumBytes: 1 });
-    const mediaPlan = this.#createMediaPlan(
-      this.#rawPlan(binding, narrationScenes, approved.plan),
+    const rawPlan = this.#rawPlan(binding, narrationScenes, approved.plan);
+    const mediaPlan = this.#createMediaPlan(rawPlan);
+    return this.#composePlan(
+      layout,
+      approved.planDigest,
+      mediaPlan,
+      rawPlan.scenes,
+      signal,
     );
-    return this.#composePlan(layout, approved.planDigest, mediaPlan, signal);
   }
 
   async verifyPreview({ jobId, preview } = {}) {
@@ -1597,9 +1839,10 @@ export class MediaProducer {
         "event_media_plan",
       );
     }
-    const [mediaPlan, metadata] = await Promise.all([
+    const [mediaPlan, metadata, sourceBindingCandidate] = await Promise.all([
       readJson(layout.jobRoot, join(layout.artifactsPath, "media-plan.json")),
       readJson(layout.jobRoot, join(layout.artifactsPath, "preview.json")),
+      readJson(layout.jobRoot, join(layout.artifactsPath, SOURCE_HIGHLIGHTS_FILE)),
     ]);
     exactPreviewMetadata(metadata);
     const digest = this.#mediaPlanDigest(mediaPlan);
@@ -1623,6 +1866,15 @@ export class MediaProducer {
         "digest_mismatch",
       );
     }
+    const sourceBinding = validateSourceHighlightBinding(
+      sourceBindingCandidate,
+      mediaPlan,
+      {
+        jobId: layout.jobId,
+        planDigest: preview.planDigest,
+        previewDigest: preview.previewDigest,
+      },
+    );
     const integrityRead = await readJsonFingerprint(
       layout.jobRoot,
       join(layout.artifactsPath, PREVIEW_INTEGRITY_FILE),
@@ -1652,6 +1904,7 @@ export class MediaProducer {
       mediaPlan: cloneFrozen(mediaPlan),
       metadata: cloneFrozen(metadata),
       integrity: cloneFrozen(integrityRead.value),
+      sourceBinding: cloneFrozen(sourceBinding),
       records,
     });
   }
@@ -1790,11 +2043,14 @@ export class MediaProducer {
       narrationChanged,
       previousPreviewDigest: preview.previewDigest,
     });
-    this.#drafts.set(layout.jobId, edited);
+    this.#drafts.set(layout.jobId, Object.freeze({
+      edited,
+      sourceBinding: verified.sourceBinding,
+    }));
     return edited;
   }
 
-  async #regenerateNarration(layout, approved, edited, signal) {
+  async #regenerateNarration(layout, approved, edited, sourceBinding, signal) {
     const byId = new Map(edited.mediaPlan.scenes.map((scene) => [scene.id, scene]));
     const narrationPlan = {
       ...approved.plan,
@@ -1845,29 +2101,36 @@ export class MediaProducer {
       join(layout.narrationPath, "narration.json"),
       { minimumBytes: 2 },
     );
-    const sourceScenes = edited.mediaPlan.scenes.map((scene) => ({
-      id: scene.id,
-      sourceStartMs: scene.source.startMs,
-      sourceEndMs: scene.source.endMs,
-      caption: scene.caption.text,
-      chapter: scene.chapter,
-      highlights: scene.highlights.map((highlight) => ({
-        callId: highlight.callId,
-        sourceAtMs: Math.max(
-          scene.source.startMs,
-          Math.min(
-            scene.source.endMs,
-            scene.source.startMs + Math.round(
-              (highlight.startMs - scene.output.startMs) * scene.source.playbackRate,
-            ),
-          ),
-        ),
-        x: highlight.x,
-        y: highlight.y,
-        width: highlight.width,
-        height: highlight.height,
-      })),
-    }));
+    const sourceById = new Map(sourceBinding.scenes.map((scene) => [scene.id, scene]));
+    const sourceScenes = edited.mediaPlan.scenes.map((scene) => {
+      const source = sourceById.get(scene.id);
+      if (
+        !source ||
+        source.sourceStartMs !== scene.source.startMs ||
+        source.sourceEndMs !== scene.source.endMs
+      ) {
+        throw producerError(
+          "PRODUCER_EDIT_INVALID",
+          "The media edit source binding is invalid.",
+          "source_binding",
+        );
+      }
+      return {
+        id: scene.id,
+        sourceStartMs: source.sourceStartMs,
+        sourceEndMs: source.sourceEndMs,
+        caption: scene.caption.text,
+        chapter: scene.chapter,
+        highlights: source.highlights.map((highlight) => ({
+          callId: highlight.callId,
+          sourceAtMs: highlight.sourceAtMs,
+          x: highlight.x,
+          y: highlight.y,
+          width: highlight.width,
+          height: highlight.height,
+        })),
+      };
+    });
     return this.#createMediaPlan({
       recordingPath: edited.mediaPlan.recordingPath,
       scenes: sourceScenes,
@@ -1884,7 +2147,7 @@ export class MediaProducer {
     const layout = await this.#layout(jobId);
     const ownedDraft = this.#drafts.get(layout.jobId);
     if (
-      ownedDraft !== edited ||
+      ownedDraft?.edited !== edited ||
       edited?.stage !== stage ||
       !equalDigest(edited?.previousPreviewDigest, preview?.previewDigest) ||
       !equalDigest(edited?.draftDigest, this.#mediaPlanDigest(edited?.mediaPlan))
@@ -1896,14 +2159,26 @@ export class MediaProducer {
     let mediaPlan = edited.mediaPlan;
     if (stage === "narrating") {
       const withVoice = { ...edited, voice: job?.request?.voice ?? "F1" };
-      mediaPlan = await this.#regenerateNarration(layout, approved, withVoice, signal);
+      mediaPlan = await this.#regenerateNarration(
+        layout,
+        approved,
+        withVoice,
+        ownedDraft.sourceBinding,
+        signal,
+      );
     } else if (stage !== "composing") {
       throw producerError("PRODUCER_EDIT_INVALID", "The media edit is invalid.", "edit_stage");
     }
     try {
-      return await this.#composePlan(layout, approved.planDigest, mediaPlan, signal);
+      return await this.#composePlan(
+        layout,
+        approved.planDigest,
+        mediaPlan,
+        ownedDraft.sourceBinding.scenes,
+        signal,
+      );
     } finally {
-      if (this.#drafts.get(layout.jobId) === edited) this.#drafts.delete(layout.jobId);
+      if (this.#drafts.get(layout.jobId) === ownedDraft) this.#drafts.delete(layout.jobId);
     }
   }
 
