@@ -23,6 +23,7 @@ import { compileExecutionCalls } from "../domain/execution-calls.js";
 import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 import { mediaPlanDigest as defaultMediaPlanDigest, writeComposition as defaultWriteComposition } from "./composition.js";
 import {
+  CLICK_HIGHLIGHT_DURATION_MS,
   createMediaPlan as defaultCreateMediaPlan,
   MAX_MEDIA_DRIFT_MS,
   MAX_PLAYBACK_RATE,
@@ -36,6 +37,16 @@ const DIGEST = /^[a-f0-9]{64}$/u;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const PREVIEW_INTEGRITY_FILE = "preview-integrity.json";
+const CLICK_HIGHLIGHT_PRE_ROLL_MS = 250;
+const REPORT_HIGHLIGHT_FIELDS = Object.freeze([
+  "stepId",
+  "callId",
+  "at",
+  "x",
+  "y",
+  "width",
+  "height",
+]);
 const PREVIEW_FILES = Object.freeze([
   "captions.vtt",
   "media-plan.json",
@@ -475,6 +486,122 @@ function safeTimestamp(value, reason) {
   return date.getTime();
 }
 
+function invalidHighlight(reason) {
+  throw producerError(
+    "PRODUCER_HIGHLIGHT_INVALID",
+    "The trusted click highlight metadata is invalid.",
+    reason,
+  );
+}
+
+function exactHighlightRecord(value) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+  ) {
+    invalidHighlight("highlight_record");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== REPORT_HIGHLIGHT_FIELDS.length ||
+    !keys.every((key) => typeof key === "string" && REPORT_HIGHLIGHT_FIELDS.includes(key))
+  ) {
+    invalidHighlight("highlight_fields");
+  }
+  const fields = Object.create(null);
+  for (const field of REPORT_HIGHLIGHT_FIELDS) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) {
+      invalidHighlight("highlight_properties");
+    }
+    fields[field] = descriptor.value;
+  }
+  return fields;
+}
+
+function trustedReportHighlights(report, plan, reportStart, reportEnd) {
+  try {
+    const approvedClicks = plan.steps.flatMap((step) => step.calls
+      .filter(({ tool }) => tool === "browser_click")
+      .map((call) => Object.freeze({ stepId: step.id, callId: call.id })));
+    const descriptor = Object.getOwnPropertyDescriptor(report, "clickHighlights");
+    if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) {
+      invalidHighlight("highlights_missing");
+    }
+    const source = descriptor.value;
+    if (
+      !Array.isArray(source) ||
+      Object.getPrototypeOf(source) !== Array.prototype ||
+      source.length !== approvedClicks.length ||
+      Reflect.ownKeys(source).length !== source.length + 1
+    ) {
+      invalidHighlight("highlight_count");
+    }
+    const stepRanges = new Map(report.steps.map((step) => [
+      step.id,
+      Object.freeze({
+        startMs: safeTimestamp(step.startedAt, "step_start"),
+        endMs: safeTimestamp(step.endedAt, "step_end"),
+      }),
+    ]));
+    const normalized = [];
+    for (let index = 0; index < source.length; index += 1) {
+      const itemDescriptor = Object.getOwnPropertyDescriptor(source, String(index));
+      if (!itemDescriptor || !("value" in itemDescriptor) || itemDescriptor.enumerable !== true) {
+        invalidHighlight("highlights_sparse");
+      }
+      const fields = exactHighlightRecord(itemDescriptor.value);
+      const approved = approvedClicks[index];
+      if (fields.stepId !== approved.stepId || fields.callId !== approved.callId) {
+        invalidHighlight("highlight_binding");
+      }
+      if (typeof fields.at !== "string") invalidHighlight("highlight_time");
+      const atMs = Date.parse(fields.at);
+      if (!Number.isFinite(atMs) || new Date(atMs).toISOString() !== fields.at) {
+        invalidHighlight("highlight_time");
+      }
+      const stepRange = stepRanges.get(fields.stepId);
+      if (
+        !stepRange ||
+        atMs < reportStart ||
+        atMs > reportEnd ||
+        atMs < stepRange.startMs ||
+        atMs > stepRange.endMs
+      ) {
+        invalidHighlight("highlight_time_range");
+      }
+      if (
+        ![fields.x, fields.y, fields.width, fields.height].every(Number.isSafeInteger) ||
+        fields.x < 0 ||
+        fields.y < 0 ||
+        fields.width < 1 ||
+        fields.height < 1 ||
+        !Number.isSafeInteger(fields.x + fields.width) ||
+        !Number.isSafeInteger(fields.y + fields.height) ||
+        fields.x + fields.width > plan.captureSettings.width ||
+        fields.y + fields.height > plan.captureSettings.height
+      ) {
+        invalidHighlight("highlight_bounds");
+      }
+      normalized.push(Object.freeze({
+        stepId: fields.stepId,
+        callId: fields.callId,
+        sourceAtMs: atMs - reportStart,
+        x: fields.x,
+        y: fields.y,
+        width: fields.width,
+        height: fields.height,
+      }));
+    }
+    return Object.freeze(normalized);
+  } catch (error) {
+    if (error?.code === "PRODUCER_HIGHLIGHT_INVALID") throw error;
+    invalidHighlight("highlight_contract");
+  }
+}
+
 function reportBinding(report, plan, planDigest) {
   if (
     report === null ||
@@ -546,15 +673,33 @@ function reportBinding(report, plan, planDigest) {
       sourceEndMs: endedAt - reportStart,
       caption: approved.narration,
       chapter: approved.action,
-      highlight: null,
     });
   });
+  const highlights = trustedReportHighlights(report, plan, reportStart, reportEnd);
+  const byStep = new Map(plan.steps.map(({ id }) => [id, []]));
+  for (const highlight of highlights) {
+    byStep.get(highlight.stepId).push(Object.freeze({
+      callId: highlight.callId,
+      sourceAtMs: highlight.sourceAtMs,
+      x: highlight.x,
+      y: highlight.y,
+      width: highlight.width,
+      height: highlight.height,
+    }));
+  }
+  const boundScenes = scenes.map((scene) => Object.freeze({
+    ...scene,
+    highlights: Object.freeze(byStep.get(scene.id).sort(
+      (left, right) =>
+        left.sourceAtMs - right.sourceAtMs || left.callId.localeCompare(right.callId, "en"),
+    )),
+  }));
   return Object.freeze({
     reportStart,
     reportEnd,
     recordingPath: report.recordingPath,
     narrationDwell,
-    scenes,
+    scenes: Object.freeze(boundScenes),
   });
 }
 
@@ -617,6 +762,60 @@ function cloneFrozen(value, code = "PRODUCER_DATA_INVALID") {
     return deepFreeze(structuredClone(value));
   } catch {
     throw producerError(code, "Media production metadata is invalid.", "clone_failed");
+  }
+}
+
+function clickCueRange(scene) {
+  if (scene.highlights.length === 0) return null;
+  const sourceTimes = scene.highlights.map(({ sourceAtMs }) => sourceAtMs);
+  return Object.freeze({
+    startMs: Math.min(...sourceTimes) - CLICK_HIGHLIGHT_PRE_ROLL_MS,
+    endMs: Math.max(...sourceTimes) + CLICK_HIGHLIGHT_DURATION_MS,
+  });
+}
+
+function retainedClickWindow(scene, durationMs) {
+  const defaultStartMs = scene.sourceEndMs - durationMs;
+  const cue = clickCueRange(scene);
+  if (cue === null) {
+    return Object.freeze({
+      sourceStartMs: defaultStartMs,
+      sourceEndMs: scene.sourceEndMs,
+    });
+  }
+  if (
+    cue.startMs < scene.sourceStartMs ||
+    cue.endMs > scene.sourceEndMs ||
+    cue.endMs - cue.startMs > durationMs
+  ) {
+    invalidHighlight("cue_span_unretained");
+  }
+  const sourceStartMs = Math.max(
+    scene.sourceStartMs,
+    cue.endMs - durationMs,
+    Math.min(defaultStartMs, cue.startMs),
+  );
+  const sourceEndMs = sourceStartMs + durationMs;
+  if (sourceStartMs > cue.startMs || sourceEndMs < cue.endMs) {
+    invalidHighlight("cue_window_unretained");
+  }
+  return Object.freeze({ sourceStartMs, sourceEndMs });
+}
+
+function assertRetainedHighlights(scene) {
+  if (scene.highlights.length === 0) return;
+  if (scene.highlights.some(
+    ({ sourceAtMs }) => sourceAtMs < scene.sourceStartMs || sourceAtMs > scene.sourceEndMs,
+  )) {
+    invalidHighlight("cue_outside_scene");
+  }
+  const cue = clickCueRange(scene);
+  const durationMs = scene.sourceEndMs - scene.sourceStartMs;
+  if (
+    durationMs >= cue.endMs - cue.startMs &&
+    (scene.sourceStartMs > cue.startMs || scene.sourceEndMs < cue.endMs)
+  ) {
+    invalidHighlight("cue_roll_unretained");
   }
 }
 
@@ -1121,9 +1320,11 @@ export class MediaProducer {
       );
       const sourceDurationMs = scene.sourceEndMs - scene.sourceStartMs;
       if (sourceDurationMs <= maximumSourceDurationMs) return { ...scene };
+      const window = retainedClickWindow(scene, maximumSourceDurationMs);
       return {
         ...scene,
-        sourceStartMs: scene.sourceEndMs - maximumSourceDurationMs,
+        sourceStartMs: window.sourceStartMs,
+        sourceEndMs: window.sourceEndMs,
       };
     });
 
@@ -1174,6 +1375,8 @@ export class MediaProducer {
       }
       actionRunStart = waitIndex + 1;
     }
+
+    for (const scene of scenes) assertRetainedHighlights(scene);
 
     return {
       recordingPath: "composition/media/normalized.mp4",
@@ -1648,7 +1851,22 @@ export class MediaProducer {
       sourceEndMs: scene.source.endMs,
       caption: scene.caption.text,
       chapter: scene.chapter,
-      highlight: scene.highlight,
+      highlights: scene.highlights.map((highlight) => ({
+        callId: highlight.callId,
+        sourceAtMs: Math.max(
+          scene.source.startMs,
+          Math.min(
+            scene.source.endMs,
+            scene.source.startMs + Math.round(
+              (highlight.startMs - scene.output.startMs) * scene.source.playbackRate,
+            ),
+          ),
+        ),
+        x: highlight.x,
+        y: highlight.y,
+        width: highlight.width,
+        height: highlight.height,
+      })),
     }));
     return this.#createMediaPlan({
       recordingPath: edited.mediaPlan.recordingPath,

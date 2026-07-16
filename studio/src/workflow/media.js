@@ -155,7 +155,7 @@ function editableManifest(mediaPlan) {
   if (
     clone === null ||
     typeof clone !== "object" ||
-    clone.schemaVersion !== "1.0" ||
+    clone.schemaVersion !== "1.1" ||
     !Array.isArray(clone.scenes) ||
     !Array.isArray(clone.captions) ||
     clone.scenes.length < 1 ||

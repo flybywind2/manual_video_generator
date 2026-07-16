@@ -63,6 +63,17 @@ function executionReport(planDigest) {
     startedAt: "2026-07-15T00:00:00.000Z",
     endedAt: "2026-07-15T00:00:02.200Z",
     recordingPath: "browser/session.webm",
+    clickHighlights: [
+      {
+        stepId: "open-menu",
+        callId: "open-menu.click",
+        at: "2026-07-15T00:00:00.500Z",
+        x: 120,
+        y: 160,
+        width: 320,
+        height: 72,
+      },
+    ],
     steps: [
       {
         id: "open-menu",
@@ -259,6 +270,7 @@ test("transforms approved browser evidence into a bound draft preview and safe a
       end: scene.source.endMs,
       caption: scene.caption.text,
       chapter: scene.chapter,
+      highlights: scene.highlights,
     })),
     [
       {
@@ -267,6 +279,17 @@ test("transforms approved browser evidence into a bound draft preview and safe a
         end: 1_100,
         caption: "상단의 프로필 메뉴를 엽니다.",
         chapter: "프로필 메뉴 열기",
+        highlights: [
+          {
+            callId: "open-menu.click",
+            x: 120,
+            y: 160,
+            width: 320,
+            height: 72,
+            startMs: 100,
+            durationMs: 900,
+          },
+        ],
       },
       {
         id: "review-profile",
@@ -274,6 +297,7 @@ test("transforms approved browser evidence into a bound draft preview and safe a
         end: 2_200,
         caption: "표시된 프로필 정보를 확인합니다.",
         chapter: "프로필 정보 확인",
+        highlights: [],
       },
     ],
   );
@@ -520,6 +544,26 @@ test("rebalances consecutive actions into the leading idle of the next wait scen
         endedAt: "2026-07-15T00:00:16.412Z",
       },
     ],
+    clickHighlights: [
+      {
+        stepId: "open-menu",
+        callId: "open-menu.click",
+        at: "2026-07-15T00:00:00.500Z",
+        x: 120,
+        y: 160,
+        width: 320,
+        height: 72,
+      },
+      {
+        stepId: "select-project",
+        callId: "select-project.click",
+        at: "2026-07-15T00:00:04.000Z",
+        x: 480,
+        y: 320,
+        width: 240,
+        height: 64,
+      },
+    ],
   };
   const job = { request: { voice: "F2" } };
   const narration = await context.producer.narrate({
@@ -586,6 +630,17 @@ test("trims the leading coordinator dwell while retaining the completed action t
         endedAt: "2026-07-15T00:00:09.200Z",
       },
     ],
+    clickHighlights: [
+      {
+        stepId: "open-menu",
+        callId: "open-menu.click",
+        at: "2026-07-15T00:00:06.600Z",
+        x: 120,
+        y: 160,
+        width: 320,
+        height: 72,
+      },
+    ],
   };
   const job = { request: { voice: "F2" } };
   const narration = await context.producer.narrate({
@@ -611,8 +666,8 @@ test("trims the leading coordinator dwell while retaining the completed action t
     [
       {
         id: "open-menu",
-        start: 6_450,
-        end: 8_100,
+        start: 6_350,
+        end: 8_000,
         playbackRate: 1.1,
         drift: 500,
       },
@@ -625,6 +680,147 @@ test("trims the leading coordinator dwell while retaining the completed action t
       },
     ],
   );
+  assert.deepEqual(preview.mediaPlan.scenes[0].highlights, [
+    {
+      callId: "open-menu.click",
+      x: 120,
+      y: 160,
+      width: 320,
+      height: 72,
+      startMs: 227,
+      durationMs: 900,
+    },
+  ]);
+});
+
+test("preserves multiple trusted clicks in deterministic order and rejects an impossible cue span", async (t) => {
+  const plan = approvedPlan();
+  plan.steps[0].calls.push({
+    id: "open-menu.select",
+    tool: "browser_click",
+    arguments: { element: "프로필 항목", target: "e12" },
+  });
+  const context = await fixture(t, {
+    plan,
+    async afterNarration({ manifest }) {
+      manifest.scenes[0].durationSeconds = 2;
+    },
+  });
+  const base = executionReport(context.planDigest);
+  const report = {
+    ...base,
+    endedAt: "2026-07-15T00:00:03.500Z",
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:02.400Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:02.500Z",
+        endedAt: "2026-07-15T00:00:03.500Z",
+      },
+    ],
+    clickHighlights: [
+      { ...base.clickHighlights[0], at: "2026-07-15T00:00:00.500Z" },
+      {
+        stepId: "open-menu",
+        callId: "open-menu.select",
+        at: "2026-07-15T00:00:01.400Z",
+        x: 480,
+        y: 320,
+        width: 240,
+        height: 64,
+      },
+    ],
+  };
+  const job = { request: { voice: "F2" } };
+  const narration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report,
+  });
+  const preview = await context.producer.compose({
+    jobId: context.jobId,
+    job,
+    report,
+    narration,
+  });
+
+  assert.deepEqual(
+    preview.mediaPlan.scenes[0].highlights.map(({ callId }) => callId),
+    ["open-menu.click", "open-menu.select"],
+  );
+  assert.deepEqual(preview.mediaPlan.scenes[1].highlights, []);
+
+  const impossible = {
+    ...report,
+    endedAt: "2026-07-15T00:00:09.200Z",
+    toolCalls: compileExecutionCalls(plan).map(({ id, tool }) => ({ id, tool })),
+    steps: [
+      {
+        id: "open-menu",
+        startedAt: "2026-07-15T00:00:00.100Z",
+        endedAt: "2026-07-15T00:00:08.100Z",
+      },
+      {
+        id: "review-profile",
+        startedAt: "2026-07-15T00:00:08.200Z",
+        endedAt: "2026-07-15T00:00:09.200Z",
+      },
+    ],
+    clickHighlights: [
+      { ...report.clickHighlights[0], at: "2026-07-15T00:00:01.000Z" },
+      { ...report.clickHighlights[1], at: "2026-07-15T00:00:07.000Z" },
+    ],
+  };
+  const impossibleNarration = await context.producer.narrate({
+    jobId: context.jobId,
+    job,
+    report: impossible,
+  });
+  await assert.rejects(
+    context.producer.compose({
+      jobId: context.jobId,
+      job,
+      report: impossible,
+      narration: impossibleNarration,
+    }),
+    (error) =>
+      error?.code === "PRODUCER_HIGHLIGHT_INVALID" &&
+      typeof error?.details?.reason === "string" &&
+      error.details.reason.length <= 64,
+  );
+});
+
+test("completed reports require exactly one trusted highlight for every approved click", async (t) => {
+  const context = await fixture(t);
+  const job = { request: { voice: "F2" } };
+  const valid = executionReport(context.planDigest);
+  for (const clickHighlights of [
+    [],
+    [{ ...valid.clickHighlights[0], x: 120.5 }],
+    [{ ...valid.clickHighlights[0], untrusted: true }],
+    [...valid.clickHighlights, {
+      stepId: "review-profile",
+      callId: "review-profile.wait",
+      at: "2026-07-15T00:00:01.500Z",
+      x: 1,
+      y: 1,
+      width: 10,
+      height: 10,
+    }],
+  ]) {
+    await assert.rejects(
+      context.producer.narrate({
+        jobId: context.jobId,
+        job,
+        report: { ...valid, clickHighlights },
+      }),
+      { code: "PRODUCER_HIGHLIGHT_INVALID" },
+    );
+  }
 });
 
 test("does not hide unexplained drift in a long action scene", async (t) => {
@@ -947,6 +1143,7 @@ test("caption editing is a pure draft and rebuild reuses the recording and narra
   assert.notEqual(rebuilt.previewDigest, preview.previewDigest);
   assert.equal(rebuilt.mediaPlan.scenes[0].caption.text, "프로필 메뉴를 선택하세요.");
   assert.equal(rebuilt.mediaPlan.scenes[0].narration.text, "상단의 프로필 메뉴를 엽니다.");
+  assert.deepEqual(rebuilt.mediaPlan.scenes[0].highlights, preview.mediaPlan.scenes[0].highlights);
   assert.equal(context.narrationCalls.length, narrationCount);
   assert.equal(
     context.calls.filter(([name]) => name === "normalize").length,
@@ -1008,6 +1205,7 @@ test("narration editing resynthesizes real clips while preserving every approved
     context.plan.steps.map((step) => step.calls),
   );
   assert.equal(rebuilt.mediaPlan.scenes[0].narration.text, "프로필 메뉴를 한 번 선택합니다.");
+  assert.deepEqual(rebuilt.mediaPlan.scenes[0].highlights, preview.mediaPlan.scenes[0].highlights);
   assert.equal(
     context.calls.filter(([name]) => name === "normalize").length,
     normalizeCount,

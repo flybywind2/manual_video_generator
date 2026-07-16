@@ -20,7 +20,16 @@ function plan() {
         sourceEndMs: 2_000,
         caption: "설정 메뉴를 선택합니다.",
         chapter: "설정 열기",
-        highlight: null,
+        highlights: [
+          {
+            callId: "step-1.click",
+            sourceAtMs: 500,
+            x: 120,
+            y: 160,
+            width: 320,
+            height: 72,
+          },
+        ],
       },
       {
         id: "step-2",
@@ -28,7 +37,7 @@ function plan() {
         sourceEndMs: 4_100,
         caption: "프로필을 확인합니다.",
         chapter: "프로필 확인",
-        highlight: null,
+        highlights: [],
       },
     ],
     narrations: [
@@ -125,6 +134,8 @@ test("narration edit invalidates only the selected narration and downstream medi
   ]);
   assert.deepEqual(result.preserved, ["recording", "trace", "evidence"]);
   assert.equal(result.mediaPlan.scenes[0].narration.text, "설정 아이콘을 선택한 뒤 메뉴를 엽니다.");
+  assert.equal(result.mediaPlan.schemaVersion, "1.1");
+  assert.deepEqual(result.mediaPlan.scenes[0].highlights, original.scenes[0].highlights);
   assert.equal(original.scenes[0].narration.text, "상단에서 설정 메뉴를 선택합니다.");
   assert.equal(context.state, "narrating");
   assert.equal(context.artifacts.has("recording"), true);
@@ -140,6 +151,7 @@ test("narration edit invalidates only the selected narration and downstream medi
 
 test("caption-only edit keeps all narration and returns directly to composing", async () => {
   const context = harness();
+  const originalHighlights = context.mediaPlan.scenes[0].highlights;
   const result = await updateMediaPlan({
     ...context.dependencies,
     jobId: "job-1",
@@ -151,6 +163,7 @@ test("caption-only edit keeps all narration and returns directly to composing", 
   assert.deepEqual(result.invalidated, ["composition", "preview", "render", "quality"]);
   assert.equal(result.mediaPlan.scenes[1].caption.text, "프로필에서 현재 정보를 확인하세요.");
   assert.equal(result.mediaPlan.captions[1].text, "프로필에서 현재 정보를 확인하세요.");
+  assert.deepEqual(result.mediaPlan.scenes[0].highlights, originalHighlights);
   assert.equal(context.artifacts.has("narration:step-1"), true);
   assert.equal(context.artifacts.has("narration:step-2"), true);
   assert.equal(context.artifacts.has("recording"), true);

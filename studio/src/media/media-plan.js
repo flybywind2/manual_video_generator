@@ -6,6 +6,7 @@ import { MAX_STEP_NARRATION_CODE_UNITS } from "../domain/plan.js";
 export const MIN_PLAYBACK_RATE = 0.9;
 export const MAX_PLAYBACK_RATE = 1.1;
 export const MAX_MEDIA_DRIFT_MS = 500;
+export const CLICK_HIGHLIGHT_DURATION_MS = 900;
 
 const INPUT_FIELDS = Object.freeze(["recordingPath", "scenes", "narrations"]);
 const SCENE_FIELDS = Object.freeze([
@@ -14,11 +15,19 @@ const SCENE_FIELDS = Object.freeze([
   "sourceEndMs",
   "caption",
   "chapter",
-  "highlight",
+  "highlights",
 ]);
 const NARRATION_FIELDS = Object.freeze(["sceneId", "path", "durationMs", "text"]);
-const HIGHLIGHT_FIELDS = Object.freeze(["x", "y", "width", "height"]);
+const HIGHLIGHT_FIELDS = Object.freeze([
+  "callId",
+  "sourceAtMs",
+  "x",
+  "y",
+  "width",
+  "height",
+]);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const CALL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u;
 const PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 function mediaPlanError(code, reason) {
@@ -140,17 +149,19 @@ function assetPath(value, reason, extension) {
   return value;
 }
 
-function normalizedHighlight(value) {
-  if (value === null) {
-    return null;
-  }
+function normalizedHighlight(value, sceneStartMs, sceneEndMs) {
   const fields = ownData(value, HIGHLIGHT_FIELDS, "highlight");
-  for (const field of HIGHLIGHT_FIELDS) {
+  for (const field of ["sourceAtMs", "x", "y", "width", "height"]) {
     if (!Number.isSafeInteger(fields[field])) {
       mediaPlanError("INVALID_MEDIA_PLAN", "highlight_integer_required");
     }
   }
+  if (typeof fields.callId !== "string" || !CALL_ID_PATTERN.test(fields.callId)) {
+    mediaPlanError("INVALID_MEDIA_PLAN", "highlight_call_id");
+  }
   if (
+    fields.sourceAtMs < sceneStartMs ||
+    fields.sourceAtMs > sceneEndMs ||
     fields.x < 0 ||
     fields.y < 0 ||
     fields.width < 1 ||
@@ -161,6 +172,8 @@ function normalizedHighlight(value) {
     mediaPlanError("INVALID_MEDIA_PLAN", "highlight_out_of_bounds");
   }
   return Object.freeze({
+    callId: fields.callId,
+    sourceAtMs: fields.sourceAtMs,
     x: fields.x,
     y: fields.y,
     width: fields.width,
@@ -175,13 +188,21 @@ function normalizedScene(candidate) {
   if (endMs <= startMs) {
     mediaPlanError("INVALID_MEDIA_PLAN", "scene_range");
   }
+  const highlights = denseArray(fields.highlights, "highlights", {
+    minimum: 0,
+    maximum: 100,
+  }).map((highlight) => normalizedHighlight(highlight, startMs, endMs));
+  highlights.sort(
+    (left, right) =>
+      left.sourceAtMs - right.sourceAtMs || left.callId.localeCompare(right.callId, "en"),
+  );
   return {
     id: identifier(fields.id, "scene_id"),
     sourceStartMs: startMs,
     sourceEndMs: endMs,
     caption: cleanText(fields.caption, "scene_caption", 4_000),
     chapter: cleanText(fields.chapter, "scene_chapter", 200),
-    highlight: normalizedHighlight(fields.highlight),
+    highlights,
   };
 }
 
@@ -224,11 +245,18 @@ export function createMediaPlan(candidate) {
   const narrations = denseArray(input.narrations, "narrations").map(normalizedNarration);
 
   const sceneIds = new Set();
+  const highlightCallIds = new Set();
   for (const scene of scenes) {
     if (sceneIds.has(scene.id)) {
       mediaPlanError("INVALID_MEDIA_PLAN", "duplicate_scene_id");
     }
     sceneIds.add(scene.id);
+    for (const highlight of scene.highlights) {
+      if (highlightCallIds.has(highlight.callId)) {
+        mediaPlanError("INVALID_MEDIA_PLAN", "duplicate_highlight_call_id");
+      }
+      highlightCallIds.add(highlight.callId);
+    }
   }
   const narrationByScene = new Map();
   for (const narration of narrations) {
@@ -277,6 +305,31 @@ export function createMediaPlan(candidate) {
       Math.round(adjustedVideoDurationMs),
     );
     const outputEndMs = outputStartMs + outputDurationMs;
+    if (scene.highlights.length > 0 && outputDurationMs < CLICK_HIGHLIGHT_DURATION_MS) {
+      mediaPlanError("INVALID_MEDIA_PLAN", "highlight_output_too_short");
+    }
+    const highlights = scene.highlights.map((highlight) => {
+      const convertedStartMs = outputStartMs + Math.round(
+        (highlight.sourceAtMs - scene.sourceStartMs) / playbackRate,
+      );
+      const latestStartMs = outputEndMs - CLICK_HIGHLIGHT_DURATION_MS;
+      const startMs = Math.max(outputStartMs, Math.min(convertedStartMs, latestStartMs));
+      if (
+        startMs < outputStartMs ||
+        startMs + CLICK_HIGHLIGHT_DURATION_MS > outputEndMs
+      ) {
+        mediaPlanError("INVALID_MEDIA_PLAN", "highlight_output_range");
+      }
+      return {
+        callId: highlight.callId,
+        x: highlight.x,
+        y: highlight.y,
+        width: highlight.width,
+        height: highlight.height,
+        startMs,
+        durationMs: CLICK_HIGHLIGHT_DURATION_MS,
+      };
+    });
     const caption = {
       text: scene.caption,
       startMs: outputStartMs,
@@ -302,7 +355,7 @@ export function createMediaPlan(candidate) {
       },
       caption,
       chapter: scene.chapter,
-      highlight: scene.highlight,
+      highlights,
       driftMs,
     });
     captions.push({ sceneId: scene.id, ...caption });
@@ -311,7 +364,7 @@ export function createMediaPlan(candidate) {
   }
 
   return deepFreeze({
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     video: {
       width: 1_920,
       height: 1_080,
