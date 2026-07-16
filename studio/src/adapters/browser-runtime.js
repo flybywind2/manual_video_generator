@@ -17,6 +17,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { McpGateway } from "./mcp-gateway.js";
+import { CLICK_GEOMETRY_FUNCTION } from "../domain/execution-calls.js";
 import { killProcessTree } from "../process/process-runner.js";
 import {
   scavengeEphemeralSecrets,
@@ -1338,6 +1339,117 @@ export class BrowserRuntime {
     }
   }
 
+  readExecutionHighlights(input) {
+    if (!this.#active || !this.#gateway || !this.#approvedExecution) {
+      throw runtimeError("BROWSER_RUNTIME_INACTIVE", "The browser runtime is not active.");
+    }
+    try {
+      const fields = ["jobId", "generation", "planDigest", "expectedCallIds"];
+      if (
+        !isPlain(input) ||
+        Reflect.ownKeys(input).length !== fields.length ||
+        Reflect.ownKeys(input).some((key) => typeof key !== "string" || !fields.includes(key)) ||
+        !Array.isArray(input.expectedCallIds) ||
+        Object.getPrototypeOf(input.expectedCallIds) !== Array.prototype ||
+        input.expectedCallIds.length > 128 ||
+        Reflect.ownKeys(input.expectedCallIds).length !== input.expectedCallIds.length + 1 ||
+        input.expectedCallIds.some((id) =>
+          typeof id !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\.highlight-bounds$/u.test(id)) ||
+        new Set(input.expectedCallIds).size !== input.expectedCallIds.length
+      ) {
+        throw new Error("highlight binding");
+      }
+      const gateway = this.#gateway;
+      const approval = this.#approvedExecution;
+      const active = gateway.active;
+      if (
+        input.jobId !== approval.jobId ||
+        input.generation !== approval.generation ||
+        input.planDigest !== approval.planDigest ||
+        !active ||
+        active.jobId !== approval.jobId ||
+        active.generation !== approval.generation ||
+        active.planDigest !== approval.planDigest ||
+        active.phase !== "execution_complete" ||
+        active.remainingCalls !== 0
+      ) {
+        throw new Error("highlight generation");
+      }
+      const approvedProbeIds = [];
+      for (let index = 0; index < approval.calls.length; index += 1) {
+        const probe = approval.calls[index];
+        if (probe.tool !== "browser_evaluate") continue;
+        const click = approval.calls[index + 1];
+        const expectedKeys = Object.hasOwn(click?.arguments ?? {}, "element")
+          ? ["element", "target", "function"]
+          : ["target", "function"];
+        if (
+          !click ||
+          click.tool !== "browser_click" ||
+          probe.id !== `${click.id}.highlight-bounds` ||
+          Reflect.ownKeys(probe.arguments).length !== expectedKeys.length ||
+          Reflect.ownKeys(probe.arguments).some((key) => typeof key !== "string" || !expectedKeys.includes(key)) ||
+          probe.arguments.function !== CLICK_GEOMETRY_FUNCTION ||
+          probe.arguments.target !== click.arguments.target ||
+          (Object.hasOwn(click.arguments, "element") && probe.arguments.element !== click.arguments.element)
+        ) {
+          throw new Error("highlight approval");
+        }
+        approvedProbeIds.push(probe.id);
+      }
+      if (
+        approvedProbeIds.length !== input.expectedCallIds.length ||
+        approvedProbeIds.some((id, index) => id !== input.expectedCallIds[index])
+      ) {
+        throw new Error("highlight call ids");
+      }
+      const highlights = gateway.readExecutionHighlights(Object.freeze({
+        jobId: input.jobId,
+        generation: input.generation,
+        planDigest: input.planDigest,
+        expectedCallIds: Object.freeze([...input.expectedCallIds]),
+      }));
+      if (
+        !Array.isArray(highlights) ||
+        Object.getPrototypeOf(highlights) !== Array.prototype ||
+        highlights.length !== input.expectedCallIds.length ||
+        Reflect.ownKeys(highlights).length !== highlights.length + 1
+      ) {
+        throw new Error("highlight records");
+      }
+      const verified = highlights.map((highlight, index) => {
+        const recordFields = ["approvedCallId", "x", "y", "width", "height"];
+        if (
+          !isPlain(highlight) ||
+          Reflect.ownKeys(highlight).length !== recordFields.length ||
+          Reflect.ownKeys(highlight).some((key) => typeof key !== "string" || !recordFields.includes(key)) ||
+          highlight.approvedCallId !== input.expectedCallIds[index] ||
+          ![highlight.x, highlight.y, highlight.width, highlight.height].every(Number.isSafeInteger) ||
+          highlight.x < 0 ||
+          highlight.y < 0 ||
+          highlight.width < 1 ||
+          highlight.height < 1 ||
+          highlight.x + highlight.width > 1_920 ||
+          highlight.y + highlight.height > 1_080
+        ) {
+          throw new Error("highlight record");
+        }
+        return Object.freeze({ ...highlight });
+      });
+      if (this.#gateway !== gateway || this.#approvedExecution !== approval) {
+        throw new Error("highlight lifecycle");
+      }
+      return Object.freeze(verified);
+    } catch (error) {
+      if (error instanceof BrowserRuntimeError) throw error;
+      throw runtimeError(
+        "BROWSER_RUNTIME_HIGHLIGHTS_FAILED",
+        "The browser execution highlights could not be read safely.",
+      );
+    }
+  }
+
   async readRecordingArtifact(input) {
     if (!this.#active || !this.#gateway || !this.#outputDirectory) {
       throw runtimeError("BROWSER_RUNTIME_INACTIVE", "The browser runtime is not active.");
@@ -1785,6 +1897,7 @@ export class BrowserRuntime {
           typeof gateway.quarantine !== "function" ||
           typeof gateway.installApproval !== "function" ||
           typeof gateway.readExecutionTiming !== "function" ||
+          typeof gateway.readExecutionHighlights !== "function" ||
           typeof gateway.readEvidenceArtifacts !== "function" ||
           typeof gateway.readRecordingArtifact !== "function"
         ) {

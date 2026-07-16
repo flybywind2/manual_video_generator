@@ -18,6 +18,7 @@ import {
   verifyLoopbackPortOwner,
   verifyPlaywrightMcpReady,
 } from "../../src/adapters/browser-runtime.js";
+import { CLICK_GEOMETRY_FUNCTION } from "../../src/domain/execution-calls.js";
 import { JobStore } from "../../src/jobs/job-store.js";
 
 const require = createRequire(import.meta.url);
@@ -94,6 +95,11 @@ class FakeGateway {
       complete: false,
       calls: Object.freeze([]),
     });
+  }
+
+  readExecutionHighlights(input) {
+    this.calls.gatewayHighlights.push(input);
+    return Object.freeze(this.calls.gatewayHighlightRecords.map((record) => Object.freeze({ ...record })));
   }
 
   readRecordingArtifact(input) {
@@ -221,6 +227,8 @@ async function createHarness(t, overrides = {}) {
     gatewayStart: [],
     gatewayApproval: [],
     gatewayTiming: [],
+    gatewayHighlights: [],
+    gatewayHighlightRecords: [],
     gatewayArtifact: [],
     gatewayArtifactFileName: "video-generation-owned.webm",
     gatewayEvidence: [],
@@ -745,6 +753,10 @@ test("BrowserRuntime installs the immutable approval queue only on its active ga
     () => runtime.readExecutionTiming(binding),
     (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
   );
+  assert.throws(
+    () => runtime.readExecutionHighlights({ ...binding, expectedCallIds: [] }),
+    (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
+  );
   await assert.rejects(
     runtime.readRecordingArtifact(binding),
     (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
@@ -755,6 +767,65 @@ test("BrowserRuntime installs the immutable approval queue only on its active ga
       expectedCallIds: ["step-01.evidence-screenshot"],
     }),
     (error) => error.code === "BROWSER_RUNTIME_INACTIVE",
+  );
+});
+
+test("BrowserRuntime revalidates exact highlight binding and returns immutable ordered geometry", async (t) => {
+  const { calls, runtime } = await createHarness(t, {
+    executeMcpCalls: async (input) => {
+      const gateway = calls.gatewayInstances.at(-1);
+      gateway.active = Object.freeze({ ...gateway.active, phase: "execution_complete", remainingCalls: 0 });
+      return Object.freeze({ callCount: input.calls.length });
+    },
+  });
+  const job = { ...automaticJob(), auth: { mode: "manual" } };
+  const active = await startRuntime(runtime, job);
+  const binding = {
+    jobId: job.id,
+    generation: active.generation,
+    planDigest: "7".repeat(64),
+  };
+  const callsToApprove = [
+    {
+      id: "step-01.click.highlight-bounds",
+      tool: "browser_evaluate",
+      arguments: { element: "저장", target: "button-save", function: CLICK_GEOMETRY_FUNCTION },
+    },
+    { id: "step-01.click", tool: "browser_click", arguments: { element: "저장", target: "button-save" } },
+  ];
+  calls.gatewayHighlightRecords = [
+    { approvedCallId: callsToApprove[0].id, x: 8, y: 121, width: 127, height: 24 },
+  ];
+  runtime.installApproval({ ...binding, calls: callsToApprove });
+  await runtime.executeApproval(binding);
+  const request = { ...binding, expectedCallIds: [callsToApprove[0].id] };
+
+  const highlights = runtime.readExecutionHighlights(request);
+  assert.deepEqual(highlights, calls.gatewayHighlightRecords);
+  assert.equal(Object.isFrozen(highlights), true);
+  assert.equal(highlights.every((highlight) => Object.isFrozen(highlight)), true);
+  assert.deepEqual(calls.gatewayHighlights, [request]);
+
+  for (const invalid of [
+    { ...request, jobId: "job-fedcba9876543210" },
+    { ...request, generation: request.generation + 1 },
+    { ...request, planDigest: "8".repeat(64) },
+    { ...request, expectedCallIds: ["step-01.other.highlight-bounds"] },
+    { ...request, expectedCallIds: [request.expectedCallIds[0], request.expectedCallIds[0]] },
+    { ...request, unexpected: true },
+  ]) {
+    assert.throws(
+      () => runtime.readExecutionHighlights(invalid),
+      (error) => error.code === "BROWSER_RUNTIME_HIGHLIGHTS_FAILED",
+    );
+  }
+
+  calls.gatewayHighlightRecords = [
+    { approvedCallId: request.expectedCallIds[0], x: 1_900, y: 1_070, width: 21, height: 11 },
+  ];
+  assert.throws(
+    () => runtime.readExecutionHighlights(request),
+    (error) => error.code === "BROWSER_RUNTIME_HIGHLIGHTS_FAILED",
   );
 });
 

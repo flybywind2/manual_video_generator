@@ -32,6 +32,7 @@ const plannerTools = Object.freeze([
 const executorTools = Object.freeze([
   "playwright_browser_snapshot",
   "playwright_browser_click",
+  "playwright_browser_evaluate",
   "playwright_browser_type",
   "playwright_browser_fill_form",
   "playwright_browser_press_key",
@@ -147,6 +148,8 @@ test("planner cannot perform business actions or start recording before approval
   assert.notEqual(executor.header.permission.playwright_browser_navigate, "allow");
   assert.notEqual(executor.header.permission.playwright_browser_navigate_back, "allow");
   assert.notEqual(executor.header.permission.playwright_browser_tabs, "allow");
+  assert.notEqual(planner.header.permission.playwright_browser_evaluate, "allow");
+  assert.equal(executor.header.permission.playwright_browser_evaluate, "allow");
 });
 
 test("planner and executor prompts enforce immutable JSON-only plan and digest-bound evidence execution", async () => {
@@ -179,6 +182,7 @@ test("planner and executor prompts enforce immutable JSON-only plan and digest-b
   assert.match(executor.body, /never navigate by URL or browser history/iu);
   assert.match(executor.body, /schemaVersion.*1\.0/isu);
   assert.match(executor.body, /exact supplied call queue/iu);
+  assert.match(executor.body, /coordinator-owned.*geometry probe/iu);
   assert.match(executor.body, /toolCalls.*steps/isu);
 });
 
@@ -525,7 +529,6 @@ for (const expectedVersion of ["1.17.19", "1.18.2"]) {
       "websearch",
       "external_directory",
       "playwright_browser_run_code_unsafe",
-      "playwright_browser_evaluate",
       "playwright_browser_file_upload",
     ]) {
       await assert.rejects(

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { executeApprovedMcpCalls } from "../../src/adapters/browser-runtime.js";
 import { McpGateway } from "../../src/adapters/mcp-gateway.js";
+import { CLICK_GEOMETRY_FUNCTION } from "../../src/domain/execution-calls.js";
 
 const JOB_ID = "job-0123456789abcdef";
 const CAPABILITY_TOKEN = Buffer.alloc(32, 0x5a).toString("base64url");
@@ -16,6 +17,37 @@ function createGateway(options) {
 
 function sse(value) {
   return `event: message\ndata: ${JSON.stringify(value)}\n\n`;
+}
+
+function clickCalls(id, target, element) {
+  return [
+    {
+      id: `${id}.highlight-bounds`,
+      tool: "browser_evaluate",
+      arguments: {
+        ...(element === undefined ? {} : { element }),
+        target,
+        function: CLICK_GEOMETRY_FUNCTION,
+      },
+    },
+    {
+      id,
+      tool: "browser_click",
+      arguments: {
+        ...(element === undefined ? {} : { element }),
+        target,
+      },
+    },
+  ];
+}
+
+function evaluateToolResult(geometry) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ result: typeof geometry === "string" ? geometry : JSON.stringify(geometry) }),
+    }],
+  };
 }
 
 async function listen(server) {
@@ -595,6 +627,189 @@ test("execution timing is measured from successful approved calls and bound to t
     () => gateway.readRecordingArtifact({ ...binding, generation: 82 }),
     (error) => error.code === "INVALID_MCP_GATEWAY_ARTIFACT",
   );
+});
+
+test("completed execution returns immutable ordered click geometry from the exact Playwright MCP 0.0.78 response", async (t) => {
+  const geometries = new Map([
+    ["first-target", { x: 8.25, y: 120.75, width: 126.5, height: 23.1 }],
+    ["second-target", { x: 1_800, y: 1_000, width: 120, height: 80 }],
+  ]);
+  const upstream = await startUpstream(t, {
+    toolResponder: async ({ message, response }) => {
+      const result = message.params?.name === "browser_evaluate"
+        ? evaluateToolResult(geometries.get(message.params.arguments.target))
+        : { content: [{ type: "text", text: "ok" }] };
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(sse({ jsonrpc: "2.0", id: message.id, result }));
+    },
+  });
+  const gateway = createGateway({
+    upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+    port: 0,
+    onFatal: async () => {},
+  });
+  t.after(() => gateway.stop());
+  const binding = {
+    jobId: JOB_ID,
+    generation: 82,
+    planDigest: "8".repeat(64),
+    expectedCallIds: ["step-01.first.highlight-bounds", "step-01.second.highlight-bounds"],
+  };
+  const calls = [
+    ...clickCalls("step-01.first", "first-target", "첫 번째 대상"),
+    ...clickCalls("step-01.second", "second-target"),
+  ];
+  await gateway.start({ jobId: binding.jobId, generation: binding.generation, adoptedSessionId: EXECUTOR_SESSION_ID });
+  gateway.installApproval({
+    jobId: binding.jobId,
+    generation: binding.generation,
+    planDigest: binding.planDigest,
+    calls,
+  });
+
+  assert.throws(
+    () => gateway.readExecutionHighlights(binding),
+    (error) => error.code === "INVALID_MCP_GATEWAY_HIGHLIGHTS",
+  );
+  for (const [index, call] of calls.entries()) {
+    const outcome = await request(gateway.endpoint, {
+      sessionId: EXECUTOR_SESSION_ID,
+      message: {
+        jsonrpc: "2.0",
+        id: 200 + index,
+        method: "tools/call",
+        params: { name: call.tool, arguments: call.arguments },
+      },
+    });
+    assert.equal(outcome.status, 200);
+  }
+
+  const highlights = gateway.readExecutionHighlights(binding);
+  assert.deepEqual(highlights, [
+    { approvedCallId: "step-01.first.highlight-bounds", x: 8, y: 120, width: 127, height: 24 },
+    { approvedCallId: "step-01.second.highlight-bounds", x: 1_800, y: 1_000, width: 120, height: 80 },
+  ]);
+  assert.equal(Object.isFrozen(highlights), true);
+  assert.equal(highlights.every((highlight) => Object.isFrozen(highlight)), true);
+  for (const invalid of [
+    { ...binding, jobId: "job-fedcba9876543210" },
+    { ...binding, generation: 83 },
+    { ...binding, planDigest: "9".repeat(64) },
+    { ...binding, expectedCallIds: [...binding.expectedCallIds].reverse() },
+    { ...binding, expectedCallIds: [binding.expectedCallIds[0], binding.expectedCallIds[0]] },
+    { ...binding, expectedCallIds: ["step-01.unknown.highlight-bounds", binding.expectedCallIds[1]] },
+  ]) {
+    assert.throws(
+      () => gateway.readExecutionHighlights(invalid),
+      (error) => error.code === "INVALID_MCP_GATEWAY_HIGHLIGHTS",
+    );
+  }
+});
+
+test("click geometry capture rejects every non-canonical or unsafe evaluate result before queue commit", async (t) => {
+  const validGeometry = JSON.stringify({ x: 8, y: 121, width: 127, height: 24 });
+  const cases = [
+    { name: "malformed response text", result: { content: [{ type: "text", text: "not-json" }] } },
+    { name: "extra outer result field", result: { ...evaluateToolResult(validGeometry), structuredContent: {} } },
+    { name: "multiple content items", result: { content: [{ type: "text", text: JSON.stringify({ result: validGeometry }) }, { type: "text", text: "duplicate" }] } },
+    { name: "extra envelope field", result: { content: [{ type: "text", text: JSON.stringify({ result: validGeometry, extra: true }) }] } },
+    { name: "non-string envelope result", result: { content: [{ type: "text", text: JSON.stringify({ result: { x: 8, y: 121, width: 127, height: 24 } }) }] } },
+    { name: "malformed geometry JSON", result: evaluateToolResult("{not-json") },
+    { name: "extra geometry field", result: evaluateToolResult('{"x":8,"y":121,"width":127,"height":24,"extra":true}') },
+    { name: "non-finite coordinate", result: evaluateToolResult('{"x":1e400,"y":121,"width":127,"height":24}') },
+    { name: "null coordinate", result: evaluateToolResult('{"x":null,"y":121,"width":127,"height":24}') },
+    { name: "zero width", result: evaluateToolResult({ x: 8, y: 121, width: 0, height: 24 }) },
+    { name: "negative height", result: evaluateToolResult({ x: 8, y: 121, width: 127, height: -1 }) },
+    { name: "negative normalized origin", result: evaluateToolResult({ x: -0.1, y: 121, width: 127, height: 24 }) },
+    { name: "right edge outside frame", result: evaluateToolResult({ x: 1_900, y: 121, width: 21, height: 24 }) },
+    { name: "bottom edge outside frame", result: evaluateToolResult({ x: 8, y: 1_070, width: 127, height: 11 }) },
+  ];
+
+  for (const [index, failureCase] of cases.entries()) {
+    await t.test(failureCase.name, async (t) => {
+      const upstream = await startUpstream(t, {
+        toolResponder: async ({ message, response }) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(sse({ jsonrpc: "2.0", id: message.id, result: failureCase.result }));
+        },
+      });
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      const generation = 200 + index;
+      const planDigest = "a".repeat(64);
+      const calls = clickCalls("step-01.click", "approved-target", "승인 대상");
+      await gateway.start({ jobId: JOB_ID, generation, adoptedSessionId: EXECUTOR_SESSION_ID });
+      gateway.installApproval({ jobId: JOB_ID, generation, planDigest, calls });
+
+      await request(gateway.endpoint, {
+        sessionId: EXECUTOR_SESSION_ID,
+        message: {
+          jsonrpc: "2.0",
+          id: 400 + index,
+          method: "tools/call",
+          params: { name: calls[0].tool, arguments: calls[0].arguments },
+        },
+      }).catch(() => undefined);
+      await waitFor(() => fatals.length === 1);
+      assert.equal(fatals[0].reason, "HIGHLIGHT_GEOMETRY_INVALID");
+      assert.equal(gateway.active.phase, "quarantined");
+      assert.equal(gateway.active.remainingCalls, calls.length);
+      assert.throws(
+        () => gateway.readExecutionHighlights({
+          jobId: JOB_ID,
+          generation,
+          planDigest,
+          expectedCallIds: [calls[0].id],
+        }),
+        (error) => error.code === "INVALID_MCP_GATEWAY_HIGHLIGHTS",
+      );
+    });
+  }
+});
+
+test("approval accepts evaluate only as an exact generated probe immediately before its matching click", async (t) => {
+  const baseCalls = clickCalls("step-01.click", "approved-target", "승인 대상");
+  const cases = [
+    { name: "reordered probe", calls: [baseCalls[1], baseCalls[0]] },
+    { name: "wrong generated id", calls: [{ ...baseCalls[0], id: "step-01.wrong.highlight-bounds" }, baseCalls[1]] },
+    { name: "mutated function", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, function: "(element) => ({ x: 0, y: 0, width: 1, height: 1 })" } }, baseCalls[1]] },
+    { name: "mutated target", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, target: "other-target" } }, baseCalls[1]] },
+    { name: "mutated element", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, element: "다른 대상" } }, baseCalls[1]] },
+    { name: "arbitrary evaluate", calls: [{ id: "step-01.evaluate", tool: "browser_evaluate", arguments: baseCalls[0].arguments }] },
+  ];
+
+  for (const [index, invalidCase] of cases.entries()) {
+    await t.test(invalidCase.name, async (t) => {
+      const upstream = await startUpstream(t);
+      const fatals = [];
+      const gateway = createGateway({
+        upstreamUrl: `http://127.0.0.1:${upstream.port}/mcp`,
+        port: 0,
+        onFatal: async (event) => fatals.push(event),
+      });
+      t.after(() => gateway.stop());
+      const generation = 300 + index;
+      await gateway.start({ jobId: JOB_ID, generation, adoptedSessionId: EXECUTOR_SESSION_ID });
+      assert.throws(
+        () => gateway.installApproval({
+          jobId: JOB_ID,
+          generation,
+          planDigest: "b".repeat(64),
+          calls: invalidCase.calls,
+        }),
+        (error) => error.code === "INVALID_MCP_GATEWAY_APPROVAL",
+      );
+      await waitFor(() => fatals.length === 1);
+      assert.equal(fatals[0].reason, "INVALID_APPROVAL");
+      assert.equal(gateway.active.phase, "quarantined");
+      assert.deepEqual(upstream.calls, []);
+    });
+  }
 });
 
 test("the production coordinator MCP client completes an installed gateway approval", async (t) => {

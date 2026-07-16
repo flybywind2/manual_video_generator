@@ -68,6 +68,7 @@ const AGENT_TOOLS = Object.freeze({
   "manual-video-executor": new Set([
     "playwright_browser_snapshot",
     "playwright_browser_click",
+    "playwright_browser_evaluate",
     "playwright_browser_type",
     "playwright_browser_fill_form",
     "playwright_browser_press_key",

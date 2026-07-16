@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compileExecutionCalls } from "../../src/domain/execution-calls.js";
+import * as executionCallsModule from "../../src/domain/execution-calls.js";
+
+const { compileExecutionCalls } = executionCallsModule;
 
 function plan() {
   return {
@@ -30,12 +32,16 @@ function plan() {
 }
 
 test("execution calls deterministically wrap exact approved actions with recording and evidence", () => {
+  assert.equal(typeof executionCallsModule.CLICK_GEOMETRY_FUNCTION, "string");
+  assert.equal(Object.isFrozen(executionCallsModule.CLICK_GEOMETRY_FUNCTION), true);
+  const { CLICK_GEOMETRY_FUNCTION } = executionCallsModule;
   const calls = compileExecutionCalls(plan());
   assert.deepEqual(calls, [
     { id: "system.start-video", tool: "browser_start_video", arguments: { size: { width: 1920, height: 1080 } } },
     { id: "system.show-actions", tool: "browser_video_show_actions", arguments: { cursor: "pointer", duration: 700, position: "top-right" } },
     { id: "step-01.chapter", tool: "browser_video_chapter", arguments: { description: "프로젝트 목록이 표시됨", duration: 800, title: "프로젝트 메뉴 열기" } },
     { id: "step-01.narration-dwell", tool: "browser_wait_for", arguments: { time: 6 } },
+    { id: "step-01.click.highlight-bounds", tool: "browser_evaluate", arguments: { element: "프로젝트 메뉴", target: 'getByRole("link", { name: "프로젝트 메뉴", exact: true })', function: CLICK_GEOMETRY_FUNCTION } },
     { id: "step-01.click", tool: "browser_click", arguments: { element: "프로젝트 메뉴", target: 'getByRole("link", { name: "프로젝트 메뉴", exact: true })' } },
     { id: "step-01.wait", tool: "browser_wait_for", arguments: { text: "프로젝트" } },
     { id: "step-01.result-dwell", tool: "browser_wait_for", arguments: { time: 2 } },
@@ -46,6 +52,38 @@ test("execution calls deterministically wrap exact approved actions with recordi
   ]);
   assert.equal(Object.isFrozen(calls), true);
   assert.equal(Object.isFrozen(calls[3].arguments), true);
+  assert.equal(Object.isFrozen(calls[4]), true);
+  assert.equal(Object.isFrozen(calls[4].arguments), true);
+});
+
+test("every click receives exactly one immediately preceding geometry probe and non-click calls receive none", () => {
+  const candidate = plan();
+  candidate.steps[0].calls = [
+    { id: "step-01.type", tool: "browser_type", arguments: { target: "search", text: "Manual Video" } },
+    { id: "step-01.first-click", tool: "browser_click", arguments: { target: "first-result" } },
+    { id: "step-01.wait", tool: "browser_wait_for", arguments: { text: "Manual Video" } },
+    { id: "step-01.second-click", tool: "browser_click", arguments: { element: "Manual Video", target: "second-result" } },
+  ];
+
+  const calls = compileExecutionCalls(candidate);
+  const probes = calls.filter(({ id }) => id.endsWith(".highlight-bounds"));
+  const clicks = calls.filter(({ tool }) => tool === "browser_click");
+
+  assert.equal(probes.length, clicks.length);
+  for (const click of clicks) {
+    const clickIndex = calls.indexOf(click);
+    assert.deepEqual(calls[clickIndex - 1], {
+      id: `${click.id}.highlight-bounds`,
+      tool: "browser_evaluate",
+      arguments: {
+        ...(click.arguments.element === undefined ? {} : { element: click.arguments.element }),
+        target: click.arguments.target,
+        function: executionCallsModule.CLICK_GEOMETRY_FUNCTION,
+      },
+    });
+  }
+  assert.equal(calls.some(({ id }) => id === "step-01.type.highlight-bounds"), false);
+  assert.equal(calls.some(({ id }) => id === "step-01.wait.highlight-bounds"), false);
 });
 
 test("wait-only steps retain a narration dwell when a text condition resolves immediately", () => {

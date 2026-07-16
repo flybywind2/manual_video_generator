@@ -33,7 +33,7 @@ import { createRedactor } from "../security/redactor.js";
 const MAX_READINESS_LINE_BYTES = 64 * 1024;
 const MAX_READINESS_BYTES = 512 * 1024;
 const MAX_CONTRACT_BYTES = 2 * 1024 * 1024;
-const TRUSTED_PROJECT_DIGEST = "bdad2488e3f7bb89b4f7f2a1611ad76262a29996de3c0f7ec1e34f77e2b094b6";
+const TRUSTED_PROJECT_DIGEST = "a13303bd2e904b25388a8ec12e478591fece6aacbc09c01f1728773ee0761144";
 const JOB_ID = /^(?:job-[a-z0-9]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 const MCP_CAPABILITY_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const GEMMA4_MODEL_ID = /^gemma4(?::|$)/iu;
@@ -58,6 +58,7 @@ const AGENT_TOOLS = Object.freeze({
   "manual-video-executor": Object.freeze([
     "playwright_browser_snapshot",
     "playwright_browser_click",
+    "playwright_browser_evaluate",
     "playwright_browser_type",
     "playwright_browser_fill_form",
     "playwright_browser_press_key",

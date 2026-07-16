@@ -1,6 +1,8 @@
 import { createServer, request as httpRequest } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 
+import { CLICK_GEOMETRY_FUNCTION } from "../domain/execution-calls.js";
+
 const JOB_ID = /^(?:job-[a-z0-9]{16,64}|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 const SESSION_ID = /^[A-Za-z0-9._~-]{16,256}$/u;
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -17,6 +19,7 @@ const PLANNING_TOOLS = new Set([
 const EXECUTION_TOOLS = new Set([
   "browser_snapshot",
   "browser_click",
+  "browser_evaluate",
   "browser_type",
   "browser_fill_form",
   "browser_press_key",
@@ -385,7 +388,7 @@ function inspectApproval(value) {
     const argumentsValue = cloneJson(dataValue(source, "arguments", true));
     if (
       typeof id !== "string" ||
-      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u.test(id) ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(id) ||
       ids.has(id) ||
       typeof tool !== "string" ||
       !EXECUTION_TOOLS.has(tool) ||
@@ -400,6 +403,29 @@ function inspectApproval(value) {
   });
   if (Buffer.byteLength(canonicalJson(calls.map(({ id, tool, arguments: args }) => ({ id, tool, arguments: args })))) > MAX_REQUEST_BYTES) {
     throw new Error("approval size");
+  }
+  for (let index = 0; index < calls.length; index += 1) {
+    const probe = calls[index];
+    if (probe.tool !== "browser_evaluate") continue;
+    const click = calls[index + 1];
+    const probeArguments = probe.arguments;
+    const clickArguments = click?.arguments;
+    const expectedKeys = Object.hasOwn(clickArguments ?? {}, "element")
+      ? ["element", "target", "function"]
+      : ["target", "function"];
+    if (
+      !click ||
+      click.tool !== "browser_click" ||
+      probe.id !== `${click.id}.highlight-bounds` ||
+      Reflect.ownKeys(probeArguments).length !== expectedKeys.length ||
+      Reflect.ownKeys(probeArguments).some((key) => typeof key !== "string" || !expectedKeys.includes(key)) ||
+      dataValue(probeArguments, "function", true) !== CLICK_GEOMETRY_FUNCTION ||
+      dataValue(probeArguments, "target", true) !== dataValue(clickArguments, "target", true) ||
+      (Object.hasOwn(clickArguments, "element") &&
+        dataValue(probeArguments, "element", true) !== dataValue(clickArguments, "element", true))
+    ) {
+      throw new Error("approval geometry probe");
+    }
   }
   return Object.freeze({ jobId, generation, planDigest, calls: Object.freeze(calls) });
 }
@@ -426,6 +452,46 @@ function inspectTimingBinding(value) {
     throw new Error("timing binding");
   }
   return Object.freeze({ jobId, generation, planDigest });
+}
+
+function inspectHighlightBinding(value) {
+  if (
+    !isPlain(value) ||
+    Reflect.ownKeys(value).length !== 4 ||
+    Reflect.ownKeys(value).some((key) => !["jobId", "generation", "planDigest", "expectedCallIds"].includes(key))
+  ) {
+    throw new Error("highlight binding");
+  }
+  const timing = inspectTimingBinding({
+    jobId: dataValue(value, "jobId", true),
+    generation: dataValue(value, "generation", true),
+    planDigest: dataValue(value, "planDigest", true),
+  });
+  const sourceIds = dataValue(value, "expectedCallIds", true);
+  if (
+    !Array.isArray(sourceIds) ||
+    Object.getPrototypeOf(sourceIds) !== Array.prototype ||
+    sourceIds.length > 128 ||
+    Reflect.ownKeys(sourceIds).length !== sourceIds.length + 1
+  ) {
+    throw new Error("highlight ids");
+  }
+  const seen = new Set();
+  const expectedCallIds = sourceIds.map((id, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(sourceIds, String(index));
+    if (
+      !descriptor?.enumerable ||
+      !("value" in descriptor) ||
+      typeof id !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\.highlight-bounds$/u.test(id) ||
+      seen.has(id)
+    ) {
+      throw new Error("highlight id");
+    }
+    seen.add(id);
+    return id;
+  });
+  return Object.freeze({ ...timing, expectedCallIds: Object.freeze(expectedCallIds) });
 }
 
 function inspectEvidenceBinding(value) {
@@ -584,6 +650,90 @@ function validateToolResponse(chunks, contentType, expectedId) {
   return result;
 }
 
+function clickGeometry(result, expectedId) {
+  try {
+    if (
+      !isPlain(result) ||
+      Reflect.ownKeys(result).length !== 1 ||
+      Reflect.ownKeys(result)[0] !== "content"
+    ) {
+      throw new Error("result");
+    }
+    const content = dataValue(result, "content", true);
+    if (
+      !Array.isArray(content) ||
+      Object.getPrototypeOf(content) !== Array.prototype ||
+      content.length !== 1 ||
+      Reflect.ownKeys(content).length !== 2
+    ) {
+      throw new Error("content");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(content, "0");
+    const item = descriptor?.value;
+    if (
+      !descriptor?.enumerable ||
+      !isPlain(item) ||
+      Reflect.ownKeys(item).length !== 2 ||
+      Reflect.ownKeys(item).some((key) => !["type", "text"].includes(key)) ||
+      dataValue(item, "type", true) !== "text"
+    ) {
+      throw new Error("content item");
+    }
+    const text = dataValue(item, "text", true);
+    if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 4_096) throw new Error("text");
+    const envelope = JSON.parse(text);
+    if (
+      !isPlain(envelope) ||
+      Reflect.ownKeys(envelope).length !== 1 ||
+      Reflect.ownKeys(envelope)[0] !== "result"
+    ) {
+      throw new Error("envelope");
+    }
+    const encodedGeometry = dataValue(envelope, "result", true);
+    if (typeof encodedGeometry !== "string" || Buffer.byteLength(encodedGeometry, "utf8") > 1_024) {
+      throw new Error("encoded geometry");
+    }
+    const geometry = JSON.parse(encodedGeometry);
+    const names = ["x", "y", "width", "height"];
+    if (
+      !isPlain(geometry) ||
+      Reflect.ownKeys(geometry).length !== names.length ||
+      Reflect.ownKeys(geometry).some((key) => typeof key !== "string" || !names.includes(key))
+    ) {
+      throw new Error("geometry");
+    }
+    const x = dataValue(geometry, "x", true);
+    const y = dataValue(geometry, "y", true);
+    const width = dataValue(geometry, "width", true);
+    const height = dataValue(geometry, "height", true);
+    if (
+      ![x, y, width, height].every((value) => typeof value === "number" && Number.isFinite(value)) ||
+      width <= 0 ||
+      height <= 0
+    ) {
+      throw new Error("geometry values");
+    }
+    const left = Math.floor(x);
+    const top = Math.floor(y);
+    const right = Math.ceil(x + width);
+    const bottom = Math.ceil(y + height);
+    if (
+      ![left, top, right, bottom].every(Number.isSafeInteger) ||
+      left < 0 ||
+      top < 0 ||
+      right <= left ||
+      bottom <= top ||
+      right > 1_920 ||
+      bottom > 1_080
+    ) {
+      throw new Error("geometry bounds");
+    }
+    return Object.freeze({ x: left, y: top, width: right - left, height: bottom - top });
+  } catch {
+    throw new PolicyViolation("HIGHLIGHT_GEOMETRY_INVALID", expectedId);
+  }
+}
+
 function recordingArtifactFileName(result, expectedId) {
   try {
     const content = dataValue(result, "content", true);
@@ -671,6 +821,7 @@ export class McpGateway {
   #approval = null;
   #approvalIndex = 0;
   #executionTiming = [];
+  #executionHighlights = [];
   #recordingArtifact = null;
   #evidenceArtifacts = [];
   #lastTimingMs = 0;
@@ -722,6 +873,7 @@ export class McpGateway {
     this.#approval = null;
     this.#approvalIndex = 0;
     this.#executionTiming = [];
+    this.#executionHighlights = [];
     this.#recordingArtifact = null;
     this.#evidenceArtifacts = [];
     this.#lastTimingMs = 0;
@@ -786,6 +938,7 @@ export class McpGateway {
     this.#approval = approval;
     this.#approvalIndex = 0;
     this.#executionTiming = [];
+    this.#executionHighlights = [];
     this.#recordingArtifact = null;
     this.#evidenceArtifacts = [];
     this.#lastTimingMs = 0;
@@ -825,6 +978,34 @@ export class McpGateway {
         this.#executionTiming.length === this.#approval.calls.length,
       calls: Object.freeze([...this.#executionTiming]),
     });
+  }
+
+  readExecutionHighlights(input) {
+    let binding;
+    try {
+      binding = inspectHighlightBinding(input);
+    } catch {
+      throw gatewayError("INVALID_MCP_GATEWAY_HIGHLIGHTS", "The MCP execution highlights request is invalid.");
+    }
+    const approvedProbeIds = this.#approval?.calls
+      .filter(({ tool }) => tool === "browser_evaluate")
+      .map(({ id }) => id) ?? [];
+    if (
+      !this.#approval ||
+      this.#phase !== "execution_complete" ||
+      binding.jobId !== this.#jobId ||
+      binding.generation !== this.#generation ||
+      binding.planDigest !== this.#approval.planDigest ||
+      binding.expectedCallIds.length !== approvedProbeIds.length ||
+      binding.expectedCallIds.length !== this.#executionHighlights.length ||
+      new Set(this.#executionHighlights.map(({ approvedCallId }) => approvedCallId)).size !== this.#executionHighlights.length ||
+      binding.expectedCallIds.some((id, index) =>
+        id !== approvedProbeIds[index] ||
+        id !== this.#executionHighlights[index]?.approvedCallId)
+    ) {
+      throw gatewayError("INVALID_MCP_GATEWAY_HIGHLIGHTS", "The MCP execution highlights request is invalid.");
+    }
+    return Object.freeze(this.#executionHighlights.map((highlight) => Object.freeze({ ...highlight })));
   }
 
   readRecordingArtifact(input) {
@@ -885,6 +1066,7 @@ export class McpGateway {
     this.#inFlightTool = null;
     this.#recordingArtifact = null;
     this.#evidenceArtifacts = [];
+    this.#executionHighlights = [];
     for (const request of this.#upstreamRequests) request.destroy();
     if (this.#fatalTriggered) return;
     this.#fatalTriggered = true;
@@ -1164,8 +1346,15 @@ export class McpGateway {
             }
             let recordingFileName = null;
             let evidenceFileName = null;
+            let geometry = null;
             try {
               const result = validateToolResponse(toolResponseChunks, contentType, authorization.parsed.id);
+              if (
+                authorization.tool.phase === "execution" &&
+                authorization.tool.name === "browser_evaluate"
+              ) {
+                geometry = clickGeometry(result, authorization.parsed.id);
+              }
               if (authorization.tool.name === "browser_stop_video") {
                 recordingFileName = recordingArtifactFileName(result, authorization.parsed.id);
               }
@@ -1210,6 +1399,17 @@ export class McpGateway {
                   fileName: evidenceFileName,
                 }));
               }
+              if (geometry !== null) {
+                if (this.#executionHighlights.some(({ approvedCallId }) =>
+                  approvedCallId === authorization.tool.approvedCallId)) {
+                  finish(new PolicyViolation("HIGHLIGHT_GEOMETRY_DUPLICATE", authorization.parsed?.id));
+                  return;
+                }
+                this.#executionHighlights.push(Object.freeze({
+                  approvedCallId: authorization.tool.approvedCallId,
+                  ...geometry,
+                }));
+              }
               this.#lastTimingMs = endedAtMs;
               this.#approvalIndex += 1;
               if (this.#approvalIndex === this.#approval.calls.length) this.#phase = "execution_complete";
@@ -1249,6 +1449,7 @@ export class McpGateway {
       this.#approval = null;
       this.#approvalIndex = 0;
       this.#executionTiming = [];
+      this.#executionHighlights = [];
       this.#recordingArtifact = null;
       this.#evidenceArtifacts = [];
       this.#lastTimingMs = 0;

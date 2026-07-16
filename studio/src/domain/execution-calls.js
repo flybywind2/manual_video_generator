@@ -3,6 +3,7 @@ import { canonicalPlan } from "./plan.js";
 
 export const ACTION_NARRATION_DWELL_SECONDS = 6;
 export const ACTION_RESULT_DWELL_SECONDS = 2;
+export const CLICK_GEOMETRY_FUNCTION = '(element) => { element.scrollIntoView({ behavior: "instant", block: "nearest", inline: "nearest" }); const { x, y, width, height } = element.getBoundingClientRect(); return { x, y, width, height }; }';
 
 function blockedPlan() {
   throw new StudioError("The plan contains a blocked step.", {
@@ -19,6 +20,19 @@ function freezeCall(id, tool, argumentsValue) {
     tool,
     arguments: Object.freeze(argumentsValue),
   });
+}
+
+function expandedCalls(calls) {
+  return calls.flatMap((call) => call.tool === "browser_click"
+    ? [
+        freezeCall(`${call.id}.highlight-bounds`, "browser_evaluate", {
+          ...(call.arguments.element === undefined ? {} : { element: call.arguments.element }),
+          target: call.arguments.target,
+          function: CLICK_GEOMETRY_FUNCTION,
+        }),
+        call,
+      ]
+    : [call]);
 }
 
 export function compileExecutionCalls(input) {
@@ -52,7 +66,7 @@ export function compileExecutionCalls(input) {
       freezeCall(`${step.id}.narration-dwell`, "browser_wait_for", {
         time: ACTION_NARRATION_DWELL_SECONDS,
       }),
-      ...step.calls,
+      ...expandedCalls(step.calls),
       ...(waitOnly
         ? []
         : [freezeCall(`${step.id}.result-dwell`, "browser_wait_for", {
