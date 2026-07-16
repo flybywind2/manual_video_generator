@@ -41,7 +41,7 @@ function readyRuntimeOverrides(overrides = {}) {
     ffprobe: path.join(root, "tools", "ffprobe.exe"),
   };
   const versions = {
-    opencode: "1.4.1",
+    opencode: "1.17.19",
     playwrightMcp: "0.0.78",
     python: "3.13.14",
     supertonic: "1.3.1",
@@ -58,11 +58,12 @@ function readyRuntimeOverrides(overrides = {}) {
   };
 }
 
-test("buildConfig pins every version-sensitive runtime exactly", () => {
+test("buildConfig records the OpenCode minimum and fallback versions", () => {
   const config = buildConfig({ root, env: {} });
 
   assert.deepEqual(config.versions, {
-    opencode: "1.4.1",
+    opencode: "1.17.19",
+    opencodeFallback: "1.18.2",
     playwrightMcp: "0.0.78",
     python: "3.13.14",
     supertonic: "1.3.1",
@@ -124,7 +125,7 @@ test("inspectRuntime discovers the project-owned Supertonic sidecar without a gl
     version: async (tool, executable) => {
       seen.push([tool, executable]);
       return ({
-        opencode: "1.4.1",
+        opencode: "1.17.19",
         playwrightMcp: "0.0.78",
         python: "3.13.14",
         supertonic: "1.3.1",
@@ -145,7 +146,7 @@ test("inspectRuntime discovers the project-owned Supertonic sidecar without a gl
 test("the production Supertonic probe uses its real version subcommand", async () => {
   const invocations = [];
   const versions = {
-    opencode: "1.4.1",
+    opencode: "1.17.19",
     playwrightMcp: "0.0.78",
     python: "3.13.14",
     supertonic: "1.3.1",
@@ -222,7 +223,7 @@ test("inspectRuntime reports missing and mismatched tools independently", async 
     locate: async (tool, context) =>
       tool === "ffmpeg" ? null : defaults.locate(tool, context),
     version: async (tool, executable, context) => ({
-      opencode: "1.4.0",
+      opencode: "1.17.18",
       playwrightMcp: "0.0.77",
     })[tool] ?? defaults.version(tool, executable, context),
   });
@@ -230,7 +231,7 @@ test("inspectRuntime reports missing and mismatched tools independently", async 
   assert.equal(report.ready, false);
   assert.equal(report.checks.node.status, "mismatch");
   assert.equal(report.checks.opencode.status, "mismatch");
-  assert.equal(report.checks.opencode.expected, "1.4.1");
+  assert.equal(report.checks.opencode.expected, "1.17.19");
   assert.equal(report.checks.playwrightMcp.status, "mismatch");
   assert.equal(report.checks.ffmpeg.status, "missing");
   assert.equal(report.checks.ffprobe.status, "ready");

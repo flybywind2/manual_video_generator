@@ -1,9 +1,15 @@
 import path from "node:path";
 
+import {
+  OPEN_CODE_FALLBACK_VERSION,
+  OPEN_CODE_MINIMUM_VERSION,
+} from "./runtime/opencode-installation.js";
+
 const DEFAULT_PORT = 4317;
 
 export const VERSION_PINS = Object.freeze({
-  opencode: "1.4.1",
+  opencode: OPEN_CODE_MINIMUM_VERSION,
+  opencodeFallback: OPEN_CODE_FALLBACK_VERSION,
   playwrightMcp: "0.0.78",
   python: "3.13.14",
   supertonic: "1.3.1",
