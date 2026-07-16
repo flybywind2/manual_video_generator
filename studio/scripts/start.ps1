@@ -58,8 +58,24 @@ if ([bool]$WhatIfPreference) {
     exit $LASTEXITCODE
 }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BootstrapScript -RuntimeRoot $RuntimeRoot -CacheRoot $CacheRoot
-if ($LASTEXITCODE -ne 0) {
+$bootstrapOutput = . $BootstrapScript -RuntimeRoot $RuntimeRoot -CacheRoot $CacheRoot
+if (@($bootstrapOutput).Count -ne 1) {
+    throw "Manual Video Studio prerequisites are not ready."
+}
+try {
+    $bootstrapStatus = $bootstrapOutput | ConvertFrom-Json -ErrorAction Stop
+} catch {
+    throw "Manual Video Studio prerequisites are not ready."
+}
+if ($bootstrapStatus.ready -ne $true) {
+    throw "Manual Video Studio prerequisites are not ready."
+}
+if (
+    -not $env:MANUAL_STUDIO_OPENCODE_PATH -or
+    -not [System.IO.Path]::IsPathRooted($env:MANUAL_STUDIO_OPENCODE_PATH) -or
+    [System.IO.Path]::GetExtension($env:MANUAL_STUDIO_OPENCODE_PATH) -ine ".exe" -or
+    $env:MANUAL_STUDIO_OPENCODE_VERSION -notmatch "^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$"
+) {
     throw "Manual Video Studio prerequisites are not ready."
 }
 if (

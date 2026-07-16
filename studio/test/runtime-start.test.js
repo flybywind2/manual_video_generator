@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { startStudio } from "../src/index.js";
+
+const studioRoot = join(import.meta.dirname, "..");
+
+test("start.ps1 dot-sources normal bootstrap so the selected OpenCode reaches Node", async () => {
+  const script = await readFile(join(studioRoot, "scripts", "start.ps1"), "utf8");
+
+  assert.match(script, /\$bootstrapOutput\s*=\s*\.\s+\$BootstrapScript/iu);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_PATH/iu);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_VERSION/iu);
+  assert.match(script, /&\s+node\.exe\s+"src[\\/]index\.js"/iu);
+  assert.match(script, /if\s*\(\$Check\)[\s\S]*?-File\s+\$BootstrapScript\s+-Check/iu);
+  assert.match(script, /WhatIfPreference[\s\S]*?-File\s+\$BootstrapScript\s+-WhatIf/iu);
+  assert.doesNotMatch(
+    script,
+    /\.\s+\$BootstrapScript[^\r\n]*[\s\S]{0,240}\$LASTEXITCODE/iu,
+  );
+});
 
 async function availablePort() {
   const server = net.createServer();

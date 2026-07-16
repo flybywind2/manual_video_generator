@@ -52,29 +52,82 @@ function validPlan(overrides = {}) {
   };
 }
 
-test("bootstrap pins and checks every supported engine with a no-mutation check mode", async () => {
+test("bootstrap delegates compatible OpenCode selection to the project runtime wrapper", async () => {
   const script = await source("scripts/bootstrap.ps1");
 
   assert.match(script, /SupportsShouldProcess/u);
   assert.match(script, /\[switch\]\$Check/u);
   assert.match(script, /22/u);
-  assert.match(script, /ExpectedOpenCode\s*=\s*"1\.4\.1"/iu);
+  assert.match(script, /ExpectedOpenCodeMinimum\s*=\s*"1\.17\.19"/iu);
+  assert.match(script, /ExpectedOpenCodeFallback\s*=\s*"1\.18\.2"/iu);
+  assert.match(script, /OpenCodeRuntimeScript[^\r\n]*opencode-runtime\.mjs/iu);
+  assert.match(script, /OpenCodeRuntimeRoot[^\r\n]*\.runtime[\\/]opencode/iu);
+  assert.match(script, /Resolve-OpenCodeRuntime/iu);
+  assert.match(script, /\$ReadOnly[\s\S]*?"check"[\s\S]*?"prepare"/iu);
+  assert.match(
+    script,
+    /&\s+\$NodePath\s+\$OpenCodeRuntimeScript\s+\$Mode\s+\$StudioRoot\s+\$OpenCodeRuntimeRoot/iu,
+  );
+  assert.match(script, /@\(\$resolverOutput\)\.Count\s+-ne\s+1/iu);
+  assert.match(script, /ConvertFrom-Json/iu);
+  assert.match(script, /AllowedOpenCodeSources/iu);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_PATH/iu);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_VERSION/iu);
   assert.match(script, /3\.13\.14/u);
   assert.match(script, /supertonic[^\r\n]*1\.3\.1|1\.3\.1[^\r\n]*supertonic/iu);
   assert.match(script, /@playwright\/mcp[^\r\n]*0\.0\.78|0\.0\.78[^\r\n]*@playwright\/mcp/iu);
   assert.match(script, /hyperframes[^\r\n]*0\.7\.57|0\.7\.57[^\r\n]*hyperframes/iu);
   assert.match(script, /ExpectedFFmpeg\s*=\s*"8\.1\.1"/iu);
   assert.match(script, /Install-WingetPackage\s+-Id\s+"Gyan\.FFmpeg"\s+-Version\s+\$ExpectedFFmpeg/iu);
-  assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$opencodePath/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffmpegPath/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffprobePath/iu);
-  assert.match(script, /opencode-ai@1\.4\.1/iu);
-  assert.match(script, /\$opencodeVersion\s+-eq\s+\$ExpectedOpenCode/iu);
+  assert.doesNotMatch(script, /opencode-ai|npm[^\r\n]*(?:--global|-g)[^\r\n]*opencode/iu);
+  assert.doesNotMatch(script, /Get-CommandPath\s+"opencode(?:\.exe)?"/iu);
+  assert.doesNotMatch(script, /1\.4\.1/u);
   assert.match(script, /\$ffmpegVersion\s+-eq\s+\$ExpectedFFmpeg/iu);
   assert.match(script, /\$ffprobeVersion\s+-eq\s+\$ExpectedFFmpeg/iu);
   assert.match(script, /npm(?:\.cmd)?[^\r\n]*ci/iu);
   assert.match(script, /SUPERTONIC_CACHE_DIR/u);
   assert.match(script, /data[\\/]cache[\\/]supertonic-3/iu);
+});
+
+test("bootstrap validates one sanitized resolver report and never embeds raw child output in errors", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(script, /Test-OpenCodeRuntimeReport/iu);
+  assert.match(script, /minimum[^\r\n]*ExpectedOpenCodeMinimum/iu);
+  assert.match(script, /fallback[^\r\n]*ExpectedOpenCodeFallback/iu);
+  assert.match(script, /\.exe/iu);
+  assert.match(script, /IsPathRooted|\[System\.IO\.Path\]::IsPathFullyQualified/iu);
+  assert.match(script, /resolverExitCode/iu);
+  assert.doesNotMatch(
+    script,
+    /throw\s+"[^"\r\n]*\$(?:resolverOutput|resolverLine|rawOutput|childOutput|stderr)/iu,
+  );
+  assert.doesNotMatch(script, /Write-(?:Host|Output)[^\r\n]*\$(?:resolverOutput|resolverLine|rawOutput)/iu);
+  assert.doesNotMatch(script, /malicious-resolver-secret/u);
+});
+
+test("bootstrap emits only its final status and enforces JavaScript-safe version components", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(script, /\$null\s*=\s*&\s+\$FilePath\s+@Arguments/iu);
+  assert.match(
+    script,
+    /\$null\s*=\s*&\s+powershell\.exe[^\r\n]*\$SupertonicScript[^\r\n]*-Ensure/iu,
+  );
+  assert.match(script, /9007199254740991/u);
+});
+
+test("doctor resolves OpenCode in check mode and reports the selected actual version", async () => {
+  const script = await source("scripts/doctor.mjs");
+
+  assert.match(script, /resolveOpenCodeInstallation/iu);
+  assert.match(script, /mode:\s*"check"/u);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_PATH/u);
+  assert.match(script, /MANUAL_STUDIO_OPENCODE_VERSION/u);
+  assert.match(script, /inspectRuntime\(\{[^}]*environment/isu);
+  assert.doesNotMatch(script, /mode:\s*"prepare"/u);
 });
 
 test("npm start delegates to the only supported PowerShell entrypoint", async () => {

@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, readFile } from "node:fs/promises";
+import { access, lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { SupertonicClient } from "./adapters/supertonic-client.js";
+import { supportsOpenCodeVersion } from "./runtime/opencode-installation.js";
 
 const execFileAsync = promisify(execFile);
+const STABLE_VERSION_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const SAFE_REASONS = new Set([
   "not_found",
   "lookup_failed",
@@ -61,6 +63,114 @@ function safeReason(error, fallback) {
 function normalizeVersion(output) {
   const match = String(output ?? "").match(/(?:^|[^\d])(\d+\.\d+(?:\.\d+)?)(?:[^\d]|$)/);
   return match?.[1] ?? null;
+}
+
+function normalizeToolVersion(tool, output) {
+  if (tool !== "opencode") {
+    return normalizeVersion(output);
+  }
+  const value = String(output ?? "").trim();
+  return STABLE_VERSION_PATTERN.test(value) ? value : null;
+}
+
+function environmentEntry(environment, name) {
+  if (environment === null || (typeof environment !== "object" && typeof environment !== "function")) {
+    return Object.freeze({ present: false, value: undefined });
+  }
+
+  try {
+    for (const key of Reflect.ownKeys(environment)) {
+      if (typeof key !== "string" || key.toUpperCase() !== name) {
+        continue;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(environment, key);
+      return Object.freeze({
+        present: true,
+        value: descriptor && "value" in descriptor ? descriptor.value : undefined,
+      });
+    }
+  } catch {
+    return Object.freeze({ present: true, value: undefined });
+  }
+
+  return Object.freeze({ present: false, value: undefined });
+}
+
+function containsTraversal(value) {
+  return value.split(/[\\/]+/u).some((part) => part === "." || part === "..");
+}
+
+function isDevicePath(value) {
+  if (
+    /^(?:\\\\|\/\/)[.?](?:\\|\/)/u.test(value)
+    || /^(?:\\\\|\/\/)globalroot(?:\\|\/)/iu.test(value)
+  ) {
+    return true;
+  }
+  return value
+    .replace(/^[A-Za-z]:/u, "")
+    .split(/[\\/]+/u)
+    .filter(Boolean)
+    .some((part) => /^(?:con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu.test(part));
+}
+
+function selectedOpenCodePath(value) {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 32_767
+    || value.includes("\0")
+    || value.trim() !== value
+    || !path.isAbsolute(value)
+    || containsTraversal(value)
+    || isDevicePath(value)
+    || path.extname(value).toLowerCase() !== ".exe"
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function selectedOpenCode(environment) {
+  const pathEntry = environmentEntry(environment, "MANUAL_STUDIO_OPENCODE_PATH");
+  const versionEntry = environmentEntry(environment, "MANUAL_STUDIO_OPENCODE_VERSION");
+  if (!pathEntry.present && !versionEntry.present) {
+    return null;
+  }
+
+  const executable = pathEntry.present ? selectedOpenCodePath(pathEntry.value) : null;
+  const version = versionEntry.present && typeof versionEntry.value === "string"
+    ? versionEntry.value
+    : null;
+  if (
+    !pathEntry.present
+    || !versionEntry.present
+    || executable === null
+    || version === null
+    || !supportsOpenCodeVersion(version)
+  ) {
+    return Object.freeze({ valid: false });
+  }
+  return Object.freeze({ valid: true, executable, version });
+}
+
+function sameCanonicalPath(left, right) {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+async function defaultInspectSelectedExecutable(executable) {
+  const entry = await lstat(executable);
+  const canonicalPath = await realpath(executable);
+  await access(executable, fsConstants.R_OK);
+  return Object.freeze({
+    canonicalPath,
+    isRegularFile: entry.isFile(),
+    isReparsePoint: entry.isSymbolicLink() || !sameCanonicalPath(canonicalPath, executable),
+  });
 }
 
 function packageDirectory(root, packageName) {
@@ -227,17 +337,18 @@ async function defaultVersion(tool, executable, { config, spec, location, runCom
 }
 
 function expectedVersion(spec, config) {
-  return spec.expectedVersionKey ? config.versions[spec.expectedVersionKey] : spec.expected;
+  const expected = spec.expectedVersionKey ? config.versions[spec.expectedVersionKey] : spec.expected;
+  return spec.key === "opencode" ? `>=${expected}` : expected;
 }
 
-function matchesExpected(actual, expected) {
+function matchesExpected(tool, actual, expected) {
   if (!actual) {
     return false;
   }
   if (expected === "installed") {
     return true;
   }
-  return actual === expected;
+  return tool === "opencode" ? supportsOpenCodeVersion(actual) : actual === expected;
 }
 
 function candidatesFor(spec) {
@@ -295,7 +406,8 @@ async function inspectTool(spec, config, dependencies) {
     }
 
     try {
-      const actual = normalizeVersion(
+      const actual = normalizeToolVersion(
+        spec.key,
         await version(spec.key, location.executable, {
           config,
           spec,
@@ -304,7 +416,7 @@ async function inspectTool(spec, config, dependencies) {
           runCommand,
         }),
       );
-      if (matchesExpected(actual, expected)) {
+      if (matchesExpected(spec.key, actual, expected)) {
         return freezeCheck({ status: "ready", expected, actual });
       }
       mismatch = freezeCheck({
@@ -331,13 +443,78 @@ async function inspectTool(spec, config, dependencies) {
   });
 }
 
+async function inspectSelectedOpenCode(spec, config, selection, dependencies) {
+  const expected = expectedVersion(spec, config);
+  if (selection?.valid !== true) {
+    return freezeCheck({
+      status: "mismatch",
+      expected,
+      actual: null,
+      reason: "selection_invalid",
+    });
+  }
+
+  let inspection;
+  try {
+    inspection = await dependencies.inspectSelectedExecutable(selection.executable);
+  } catch {
+    inspection = null;
+  }
+  if (
+    !inspection
+    || inspection.isRegularFile !== true
+    || inspection.isReparsePoint !== false
+    || typeof inspection.canonicalPath !== "string"
+    || !sameCanonicalPath(inspection.canonicalPath, selection.executable)
+  ) {
+    return freezeCheck({
+      status: "mismatch",
+      expected,
+      actual: null,
+      reason: "selection_invalid",
+    });
+  }
+
+  const location = Object.freeze({ executable: selection.executable, args: [] });
+  try {
+    const actual = normalizeToolVersion(
+      spec.key,
+      await dependencies.version(spec.key, selection.executable, {
+        config,
+        spec,
+        candidate: location,
+        location,
+        runCommand: dependencies.runCommand,
+      }),
+    );
+    if (actual === selection.version) {
+      return freezeCheck({ status: "ready", expected, actual });
+    }
+    return freezeCheck({
+      status: "mismatch",
+      expected,
+      actual,
+      reason: "selected_version_drift",
+    });
+  } catch (error) {
+    return freezeCheck({
+      status: "mismatch",
+      expected,
+      actual: null,
+      reason: safeReason(error, "probe_failed"),
+    });
+  }
+}
+
 export async function inspectRuntime({
   config,
+  environment = process.env,
   nodeVersion = process.version,
   locatorExec = execFileAsync,
   platform = process.platform,
   findExecutable,
   locate = defaultLocate,
+  inspectSelectedExecutable = defaultInspectSelectedExecutable,
   runCommand = runVersionCommand,
   version = defaultVersion,
 } = {}) {
@@ -348,6 +525,7 @@ export async function inspectRuntime({
   const actualNode = normalizeVersion(nodeVersion);
   const nodeMajor = Number.parseInt(actualNode?.split(".")[0] ?? "", 10);
   const nodeReady = nodeMajor >= 22;
+  const openCodeSelection = selectedOpenCode(environment);
   const commandLocator = findExecutable ?? ((command) =>
     locateCommand(command, { locatorExec, platform }));
   const checks = {
@@ -360,12 +538,16 @@ export async function inspectRuntime({
   };
 
   for (const spec of TOOL_SPECS) {
-    checks[spec.key] = await inspectTool(spec, config, {
+    const dependencies = {
       findExecutable: commandLocator,
       locate,
+      inspectSelectedExecutable,
       runCommand,
       version,
-    });
+    };
+    checks[spec.key] = spec.key === "opencode" && openCodeSelection !== null
+      ? await inspectSelectedOpenCode(spec, config, openCodeSelection, dependencies)
+      : await inspectTool(spec, config, dependencies);
   }
 
   Object.freeze(checks);

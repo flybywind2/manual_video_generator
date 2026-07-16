@@ -17,13 +17,17 @@ if (-not $CacheRoot) {
 }
 
 $ExpectedNodeMajor = 22
-$ExpectedOpenCode = "1.4.1"
+$ExpectedOpenCodeMinimum = "1.17.19"
+$ExpectedOpenCodeFallback = "1.18.2"
 $ExpectedPython = "3.13.14"
 $ExpectedSupertonic = "1.3.1"
 $ExpectedPlaywrightMcp = "0.0.78" # @playwright/mcp
 $ExpectedHyperFrames = "0.7.57"
 $ExpectedFFmpeg = "8.1.1"
 $SupertonicScript = Join-Path $PSScriptRoot "supertonic.ps1"
+$OpenCodeRuntimeScript = Join-Path $PSScriptRoot "opencode-runtime.mjs"
+$OpenCodeRuntimeRoot = Join-Path $StudioRoot ".runtime\opencode"
+$AllowedOpenCodeSources = @("explicit", "project", "path", "npm-global")
 $ReadOnly = $Check -or [bool]$WhatIfPreference
 $env:SUPERTONIC_CACHE_DIR = $CacheRoot
 
@@ -36,9 +40,10 @@ function Invoke-Checked {
 
     Push-Location $WorkingDirectory
     try {
-        & $FilePath @Arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "A required bootstrap command failed with exit code $LASTEXITCODE."
+        $null = & $FilePath @Arguments
+        $commandExitCode = $LASTEXITCODE
+        if ($commandExitCode -ne 0) {
+            throw "A required bootstrap command failed with exit code $commandExitCode."
         }
     } finally {
         Pop-Location
@@ -83,6 +88,154 @@ function Get-SemanticVersion {
         return $null
     }
     return $match.Groups[1].Value
+}
+
+function Test-ExactPropertySet {
+    param(
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][string[]]$Expected
+    )
+
+    if ($null -eq $Value -or $Value -isnot [pscustomobject]) {
+        return $false
+    }
+    $actual = @($Value.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($actual.Count -ne $Expected.Count) {
+        return $false
+    }
+    foreach ($name in $Expected) {
+        if ($actual -cnotcontains $name) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-SupportedOpenCodeVersion {
+    param([string]$Version)
+
+    if (-not $Version) {
+        return $false
+    }
+    $match = [regex]::Match($Version, "^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+    if (-not $match.Success) {
+        return $false
+    }
+    try {
+        $actual = @(
+            [uint64]::Parse($match.Groups[1].Value),
+            [uint64]::Parse($match.Groups[2].Value),
+            [uint64]::Parse($match.Groups[3].Value)
+        )
+    } catch {
+        return $false
+    }
+    $maximumSafeInteger = [uint64]9007199254740991
+    if (@($actual | Where-Object { $_ -gt $maximumSafeInteger }).Count -ne 0) {
+        return $false
+    }
+    $minimum = @([uint64]1, [uint64]17, [uint64]19)
+    for ($index = 0; $index -lt $minimum.Count; $index += 1) {
+        if ($actual[$index] -gt $minimum[$index]) {
+            return $true
+        }
+        if ($actual[$index] -lt $minimum[$index]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-SafeOpenCodePath {
+    param([string]$PathValue)
+
+    if (
+        -not $PathValue -or
+        $PathValue.Length -gt 32767 -or
+        $PathValue.Contains([char]0) -or
+        $PathValue.Trim() -cne $PathValue -or
+        -not [System.IO.Path]::IsPathRooted($PathValue) -or
+        $PathValue -match "^(?:\\\\|//)[.?](?:\\|/)" -or
+        $PathValue -match "(?:^|[\\/])\.{1,2}(?:[\\/]|$)" -or
+        [System.IO.Path]::GetExtension($PathValue) -ine ".exe"
+    ) {
+        return $false
+    }
+    try {
+        return [System.IO.Path]::GetFullPath($PathValue) -ceq $PathValue
+    } catch {
+        return $false
+    }
+}
+
+function Test-OpenCodeRuntimeReport {
+    param(
+        [Parameter(Mandatory = $true)]$Report,
+        [Parameter(Mandatory = $true)][int]$ResolverExitCode
+    )
+
+    if (
+        $null -eq $Report -or
+        $Report.ready -isnot [bool] -or
+        $Report.minimum -isnot [string] -or
+        $Report.fallback -isnot [string] -or
+        $Report.minimum -cne $ExpectedOpenCodeMinimum -or
+        $Report.fallback -cne $ExpectedOpenCodeFallback
+    ) {
+        return $false
+    }
+
+    if ($Report.ready) {
+        if (-not (Test-ExactPropertySet -Value $Report -Expected @("ready", "minimum", "fallback", "path", "source", "version"))) {
+            return $false
+        }
+        return (
+            $ResolverExitCode -eq 0 -and
+            $Report.path -is [string] -and
+            (Test-SafeOpenCodePath -PathValue $Report.path) -and
+            $Report.source -is [string] -and
+            $AllowedOpenCodeSources -ccontains $Report.source -and
+            $Report.version -is [string] -and
+            (Test-SupportedOpenCodeVersion -Version $Report.version)
+        )
+    }
+
+    if (-not (Test-ExactPropertySet -Value $Report -Expected @("ready", "minimum", "fallback", "path", "source", "version", "code"))) {
+        return $false
+    }
+    return (
+        $ResolverExitCode -eq 1 -and
+        $null -eq $Report.path -and
+        $null -eq $Report.source -and
+        $null -eq $Report.version -and
+        $Report.code -is [string] -and
+        $Report.code -ceq "OPENCODE_UNAVAILABLE"
+    )
+}
+
+function Resolve-OpenCodeRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodePath,
+        [Parameter(Mandatory = $true)][ValidateSet("check", "prepare")][string]$Mode
+    )
+
+    if (-not (Test-SafeOpenCodePath -PathValue $NodePath)) {
+        throw "The OpenCode runtime resolver could not be validated."
+    }
+    $resolverOutput = @(& $NodePath $OpenCodeRuntimeScript $Mode $StudioRoot $OpenCodeRuntimeRoot 2>$null)
+    $resolverExitCode = $LASTEXITCODE
+    if (@($resolverOutput).Count -ne 1 -or $resolverOutput[0] -isnot [string]) {
+        throw "The OpenCode runtime resolver could not be validated."
+    }
+    try {
+        $report = $resolverOutput[0] | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "The OpenCode runtime resolver could not be validated."
+    }
+    if (-not (Test-OpenCodeRuntimeReport -Report $report -ResolverExitCode $resolverExitCode)) {
+        throw "The OpenCode runtime resolver could not be validated."
+    }
+    return $report
 }
 
 function Get-NodeStatus {
@@ -199,21 +352,6 @@ function Prepare-Runtime {
         }
     }
 
-    $opencodePath = Get-CommandPath "opencode.exe"
-    $opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
-    $opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
-    if ($opencodeVersion -ne $ExpectedOpenCode) {
-        if ($PSCmdlet.ShouldProcess("opencode-ai", "Install OpenCode CLI")) {
-            Invoke-Checked -FilePath $npm -Arguments @("install", "--global", "opencode-ai@1.4.1")
-        }
-        $opencodePath = Get-CommandPath "opencode.exe"
-        $opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
-        $opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
-        if ($opencodeVersion -ne $ExpectedOpenCode) {
-            throw "OpenCode 1.4.1 is required. Reopen the terminal and run start.ps1 again."
-        }
-    }
-
     $python = Get-PythonStatus
     if (-not $python.ready) {
         Install-WingetPackage -Id "Python.Python.3.13" -Version $ExpectedPython
@@ -240,8 +378,9 @@ function Prepare-Runtime {
     }
 
     if ($PSCmdlet.ShouldProcess($RuntimeRoot, "Prepare Supertonic 1.3.1 and download supertonic-3")) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SupertonicScript -Ensure -Download -RuntimeRoot $RuntimeRoot
-        if ($LASTEXITCODE -ne 0) {
+        $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SupertonicScript -Ensure -Download -RuntimeRoot $RuntimeRoot
+        $supertonicExitCode = $LASTEXITCODE
+        if ($supertonicExitCode -ne 0) {
             throw "The pinned Supertonic runtime could not be prepared."
         }
     }
@@ -254,21 +393,45 @@ if (-not $ReadOnly) {
 $node = Get-NodeStatus
 $python = Get-PythonStatus
 $supertonic = Get-SupertonicStatus
-$opencodePath = Get-CommandPath "opencode.exe"
 $ffmpegPath = Get-CommandPath "ffmpeg.exe"
 $ffprobePath = Get-CommandPath "ffprobe.exe"
-$opencodeOutput = Get-VersionOutput -FilePath $opencodePath -Arguments @("--version")
 $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
 $ffprobeOutput = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
-$opencodeVersion = Get-SemanticVersion -Output $opencodeOutput
 $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
 $ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
 $playwrightVersion = Get-InstalledPackageVersion "@playwright/mcp"
 $hyperframesVersion = Get-InstalledPackageVersion "hyperframes"
 
+$openCode = [pscustomobject]@{
+    ready = $false
+    minimum = $ExpectedOpenCodeMinimum
+    fallback = $ExpectedOpenCodeFallback
+    path = $null
+    source = $null
+    version = $null
+    code = "OPENCODE_UNAVAILABLE"
+}
+if ($node.ready) {
+    $resolverMode = "check"
+    if (-not $ReadOnly -and $PSCmdlet.ShouldProcess($OpenCodeRuntimeRoot, "Prepare compatible OpenCode runtime")) {
+        $resolverMode = "prepare"
+    }
+    $openCode = Resolve-OpenCodeRuntime -NodePath $node.path -Mode $resolverMode
+}
+if ($openCode.ready) {
+    $env:MANUAL_STUDIO_OPENCODE_PATH = $openCode.path
+    $env:MANUAL_STUDIO_OPENCODE_VERSION = $openCode.version
+}
+
 $checks = [ordered]@{
     node = [ordered]@{ ready = $node.ready; expected = ">=22"; actual = $node.actual }
-    opencode = [ordered]@{ ready = $opencodeVersion -eq $ExpectedOpenCode; expected = $ExpectedOpenCode; actual = $opencodeVersion }
+    opencode = [ordered]@{
+        ready = $openCode.ready
+        expected = ">=$ExpectedOpenCodeMinimum"
+        fallback = $ExpectedOpenCodeFallback
+        actual = $openCode.version
+        source = $openCode.source
+    }
     python = [ordered]@{ ready = $python.ready; expected = $ExpectedPython; actual = $python.actual }
     supertonic = [ordered]@{ ready = $supertonic.ready; expected = $ExpectedSupertonic; actual = $supertonic.actual; modelReady = $supertonic.modelReady }
     playwrightMcp = [ordered]@{ ready = $playwrightVersion -eq $ExpectedPlaywrightMcp; expected = $ExpectedPlaywrightMcp; actual = $playwrightVersion }

@@ -231,10 +231,155 @@ test("inspectRuntime reports missing and mismatched tools independently", async 
   assert.equal(report.ready, false);
   assert.equal(report.checks.node.status, "mismatch");
   assert.equal(report.checks.opencode.status, "mismatch");
-  assert.equal(report.checks.opencode.expected, "1.17.19");
+  assert.equal(report.checks.opencode.expected, ">=1.17.19");
   assert.equal(report.checks.playwrightMcp.status, "mismatch");
   assert.equal(report.checks.ffmpeg.status, "missing");
   assert.equal(report.checks.ffprobe.status, "ready");
+});
+
+test("inspectRuntime accepts stable OpenCode releases at or above the compatibility floor", async (t) => {
+  for (const version of ["1.17.19", "1.18.2", "2.0.0"]) {
+    await t.test(version, async () => {
+      const defaults = readyRuntimeOverrides({
+        version: async (tool, executable, context) =>
+          tool === "opencode" ? version : readyRuntimeOverrides().version(tool, executable, context),
+      });
+      const report = await inspectRuntime({
+        config: buildConfig({ root, env: {} }),
+        ...defaults,
+      });
+
+      assert.equal(report.checks.opencode.status, "ready");
+      assert.equal(report.checks.opencode.expected, ">=1.17.19");
+      assert.equal(report.checks.opencode.actual, version);
+    });
+  }
+});
+
+test("inspectRuntime rejects old, malformed, and prerelease OpenCode versions", async (t) => {
+  for (const version of ["1.17.18", "1.18.2-beta.1", "version unknown"]) {
+    await t.test(version, async () => {
+      const defaults = readyRuntimeOverrides({
+        version: async (tool, executable, context) =>
+          tool === "opencode" ? version : readyRuntimeOverrides().version(tool, executable, context),
+      });
+      const report = await inspectRuntime({
+        config: buildConfig({ root, env: {} }),
+        ...defaults,
+      });
+
+      assert.equal(report.checks.opencode.status, "mismatch");
+      assert.equal(report.checks.opencode.expected, ">=1.17.19");
+      assert.equal(report.checks.opencode.reason, "version_mismatch");
+    });
+  }
+});
+
+test("inspectRuntime consumes one safe selected OpenCode path and detects live version drift", async () => {
+  const selectedPath = path.join(root, ".runtime", "opencode", "opencode.exe");
+  const defaults = readyRuntimeOverrides();
+  const seen = [];
+  const report = await inspectRuntime({
+    config: buildConfig({ root, env: {} }),
+    environment: {
+      MANUAL_STUDIO_OPENCODE_PATH: selectedPath,
+      MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2",
+    },
+    ...defaults,
+    inspectSelectedExecutable: async (candidate) => ({
+      canonicalPath: candidate,
+      isRegularFile: true,
+      isReparsePoint: false,
+    }),
+    locate: async (tool, context) => {
+      if (tool === "opencode") throw new Error("PATH discovery must not run");
+      return defaults.locate(tool, context);
+    },
+    version: async (tool, executable, context) => {
+      if (tool === "opencode") {
+        seen.push(executable);
+        return "1.18.3";
+      }
+      return defaults.version(tool, executable, context);
+    },
+  });
+
+  assert.deepEqual(seen, [selectedPath]);
+  assert.equal(report.checks.opencode.status, "mismatch");
+  assert.equal(report.checks.opencode.expected, ">=1.17.19");
+  assert.equal(report.checks.opencode.actual, "1.18.3");
+  assert.equal(report.checks.opencode.reason, "selected_version_drift");
+});
+
+test("inspectRuntime rejects non-regular, reparse, and non-canonical selected executables before probing", async (t) => {
+  const selectedPath = path.join(root, ".runtime", "opencode", "opencode.exe");
+  const invalidInspections = [
+    { canonicalPath: selectedPath, isRegularFile: false, isReparsePoint: false },
+    { canonicalPath: selectedPath, isRegularFile: true, isReparsePoint: true },
+    {
+      canonicalPath: path.join(root, "elsewhere", "opencode.exe"),
+      isRegularFile: true,
+      isReparsePoint: false,
+    },
+  ];
+
+  for (const inspection of invalidInspections) {
+    await t.test(JSON.stringify(inspection), async () => {
+      const defaults = readyRuntimeOverrides();
+      let opencodeExecutions = 0;
+      const report = await inspectRuntime({
+        config: buildConfig({ root, env: {} }),
+        environment: {
+          MANUAL_STUDIO_OPENCODE_PATH: selectedPath,
+          MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2",
+        },
+        ...defaults,
+        inspectSelectedExecutable: async () => inspection,
+        version: async (tool, executable, context) => {
+          if (tool === "opencode") opencodeExecutions += 1;
+          return defaults.version(tool, executable, context);
+        },
+      });
+
+      assert.equal(opencodeExecutions, 0);
+      assert.equal(report.checks.opencode.status, "mismatch");
+      assert.equal(report.checks.opencode.reason, "selection_invalid");
+    });
+  }
+});
+
+test("inspectRuntime never executes unsafe selected OpenCode overrides", async (t) => {
+  const unsafePaths = [
+    "opencode.exe",
+    path.join(root, "tools", "opencode.cmd"),
+    `${path.join(root, "tools", "opencode.exe")} `,
+  ];
+
+  for (const selectedPath of unsafePaths) {
+    await t.test(JSON.stringify(selectedPath), async () => {
+      const defaults = readyRuntimeOverrides();
+      let opencodeExecutions = 0;
+      const report = await inspectRuntime({
+        config: buildConfig({ root, env: {} }),
+        environment: {
+          MANUAL_STUDIO_OPENCODE_PATH: selectedPath,
+          MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2",
+        },
+        ...defaults,
+        version: async (tool, executable, context) => {
+          if (tool === "opencode") {
+            opencodeExecutions += 1;
+          }
+          return defaults.version(tool, executable, context);
+        },
+      });
+
+      assert.equal(opencodeExecutions, 0);
+      assert.equal(report.checks.opencode.status, "mismatch");
+      assert.equal(report.checks.opencode.expected, ">=1.17.19");
+      assert.equal(report.checks.opencode.reason, "selection_invalid");
+    });
+  }
 });
 
 test("inspectServiceHealth requires the live pinned Supertonic sidecar", async () => {
