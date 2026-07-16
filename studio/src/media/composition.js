@@ -388,7 +388,8 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .replaceAll("'", "&#39;")
+    .replace(/\r\n?|\n/gu, "&#10;");
 }
 
 function seconds(milliseconds) {
@@ -431,13 +432,7 @@ function highlightClip(sceneId, highlight, highlightIndex, trackIndex) {
     `--click-y:${clickY}px`,
     `--pulse-delay:${seconds(highlight.startMs)}s`,
   ].join(";");
-  return [
-    `      <div id="highlight-${sceneId}-${highlightIndex}" class="click-highlight clip" data-start="${seconds(highlight.startMs)}" data-duration="0.9" data-track-index="${trackIndex}" style="${style}">`,
-    '        <span class="click-target"></span>',
-    '        <span class="click-ripple click-ripple-primary"></span>',
-    '        <span class="click-ripple click-ripple-secondary"></span>',
-    "      </div>",
-  ].join("\n");
+  return `<div id="highlight-${sceneId}-${highlightIndex}" class="click-highlight clip" data-start="${seconds(highlight.startMs)}" data-duration="0.9" data-track-index="${trackIndex}" style="${style}"><span class="click-target"></span><span class="click-ripple click-ripple-primary"></span><span class="click-ripple click-ripple-secondary"></span></div>`;
 }
 
 function sceneClips(
@@ -470,7 +465,7 @@ function sceneClips(
     `      <div id="chapter-${scene.id}" class="chapter-card clip" data-start="${outputStart}" data-duration="${chapterDuration}" data-track-index="${chapterTrackStart + sceneIndex}">${escapeHtml(scene.chapter)}</div>`,
     `      <div id="caption-${scene.id}" class="caption clip" data-start="${narrationStart}" data-duration="${narrationDuration}" data-track-index="${captionTrackStart + sceneIndex}">${escapeHtml(scene.caption.text)}</div>`,
   );
-  return lines.join("\n");
+  return lines.join("");
 }
 
 export function mediaPlanDigest(mediaPlan) {

@@ -30,6 +30,41 @@ import { runProcess } from "../../src/process/process-runner.js";
 const studioRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const execFileAsync = promisify(execFile);
 
+function fiftyCueMediaPlan() {
+  const scenes = Array.from({ length: 50 }, (_, index) => {
+    const sceneNumber = index + 1;
+    const sourceStartMs = index * 2_000;
+    const id = `step-${String(sceneNumber).padStart(2, "0")}`;
+    return {
+      id,
+      sourceStartMs,
+      sourceEndMs: sourceStartMs + 2_000,
+      caption: `${sceneNumber}번째 클릭 위치를 안내합니다.`,
+      chapter: `${sceneNumber}번째 클릭`,
+      highlights: [
+        {
+          callId: `${id}.click`,
+          sourceAtMs: sourceStartMs + 500,
+          x: 120 + index,
+          y: 160 + index,
+          width: 320,
+          height: 72,
+        },
+      ],
+    };
+  });
+  return createMediaPlan({
+    recordingPath: "composition/media/normalized.mp4",
+    scenes,
+    narrations: scenes.map((scene) => ({
+      sceneId: scene.id,
+      path: "composition/narration/shared.wav",
+      durationMs: 2_000,
+      text: scene.caption,
+    })),
+  });
+}
+
 async function jobProject(t) {
   const jobRoot = await mkdtemp(join(tmpdir(), "manual-studio-hyperframes-"));
   t.after(() => rm(jobRoot, {
@@ -349,6 +384,43 @@ test("check rejects nested warnings even when HyperFrames reports top-level ok",
     adapter.check({ jobRoot, projectPath }),
     { code: "HYPERFRAMES_VALIDATION_FAILED" },
   );
+});
+
+test("pinned HyperFrames lint accepts a 50-cue composition without warnings", async (t) => {
+  const { jobRoot, projectPath } = await jobProject(t);
+  await Promise.all([
+    mkdir(join(projectPath, "media"), { recursive: true }),
+    mkdir(join(projectPath, "narration"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(projectPath, "media", "normalized.mp4"), "fixture"),
+    writeFile(join(projectPath, "narration", "shared.wav"), "fixture"),
+  ]);
+  await writeComposition({
+    jobRoot,
+    templatePath: join(studioRoot, "templates", "hyperframes", "index.html"),
+    outputPath: join(projectPath, "index.html"),
+    mediaPlan: fiftyCueMediaPlan(),
+  });
+
+  let commandResult = null;
+  const adapter = new HyperframesAdapter({
+    studioRoot,
+    run: async (options) => {
+      commandResult = await runProcess(options);
+      return commandResult;
+    },
+  });
+  let lint;
+  try {
+    lint = await adapter.lint({ jobRoot, projectPath });
+  } catch (error) {
+    t.diagnostic(JSON.stringify(commandResult));
+    throw error;
+  }
+  assert.equal(lint.errorCount, 0);
+  assert.equal(lint.warningCount, 0);
+  assert.deepEqual(lint.findings, []);
 });
 
 async function locate(command) {

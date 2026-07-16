@@ -102,6 +102,37 @@ function twoSceneManifest() {
   });
 }
 
+function fiftyCueManifest() {
+  return createMediaPlan({
+    recordingPath: "composition/media/normalized.mp4",
+    scenes: [
+      {
+        id: "step-1",
+        sourceStartMs: 0,
+        sourceEndMs: 60_000,
+        caption: Array.from({ length: 350 }, () => "클릭 안내").join("\n"),
+        chapter: "대규모 클릭 안내",
+        highlights: Array.from({ length: 50 }, (_, index) => ({
+          callId: `step-1.click-${String(index).padStart(2, "0")}`,
+          sourceAtMs: 1_000 + index * 1_000,
+          x: 120 + index,
+          y: 160 + index,
+          width: 320,
+          height: 72,
+        })),
+      },
+    ],
+    narrations: [
+      {
+        sceneId: "step-1",
+        path: "composition/narration/step-1.wav",
+        durationMs: 60_000,
+        text: "50개의 클릭 위치를 순서대로 안내합니다.",
+      },
+    ],
+  });
+}
+
 test("fixed template compilation is deterministic and assigns a stable composition id", async () => {
   const template = await readFile(templatePath, "utf8");
   const mediaPlan = manifest();
@@ -329,6 +360,17 @@ test("duplicate scene ids fail before composition clips can reuse DOM ids", asyn
       return true;
     },
   );
+});
+
+test("an accepted 50-cue composition stays within the pinned HyperFrames line budget", async () => {
+  const html = compileComposition({
+    template: await readFile(templatePath, "utf8"),
+    mediaPlan: fiftyCueManifest(),
+    projectPath: "composition",
+  });
+  const lineCount = html.split(/\r?\n/u).length;
+
+  assert.equal(lineCount <= 300, true, `compiled composition has ${lineCount} lines`);
 });
 
 test("the fixed template renders full-frame finite 900 ms purple-blue target and ripple animations", async () => {
