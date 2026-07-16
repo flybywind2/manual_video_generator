@@ -18,7 +18,7 @@ import {
   verifyLoopbackPortOwner,
   verifyPlaywrightMcpReady,
 } from "../../src/adapters/browser-runtime.js";
-import { CLICK_GEOMETRY_FUNCTION } from "../../src/domain/execution-calls.js";
+import { CLICK_GEOMETRY_FUNCTION, compileExecutionCalls } from "../../src/domain/execution-calls.js";
 import { JobStore } from "../../src/jobs/job-store.js";
 
 const require = createRequire(import.meta.url);
@@ -789,7 +789,7 @@ test("BrowserRuntime revalidates exact highlight binding and returns immutable o
     {
       id: "step-01.click.highlight-bounds",
       tool: "browser_evaluate",
-      arguments: { element: "저장", target: "button-save", function: CLICK_GEOMETRY_FUNCTION },
+      arguments: { element: "저장", target: "button-save", function: CLICK_GEOMETRY_FUNCTION, _meta: { json: true } },
     },
     { id: "step-01.click", tool: "browser_click", arguments: { element: "저장", target: "button-save" } },
   ];
@@ -2370,6 +2370,17 @@ async function listen(server) {
   return server.address().port;
 }
 
+async function unusedLoopbackPort(excludedPort) {
+  while (true) {
+    const server = createServer();
+    const port = await listen(server);
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.close((error) => error ? rejectPromise(error) : resolvePromise());
+    });
+    if (port !== excludedPort) return port;
+  }
+}
+
 test("actual Edge automatic login seals only after a credential redirect reaches the target", {
   skip: process.platform !== "win32",
   timeout: 45_000,
@@ -2563,6 +2574,96 @@ test("production BrowserRuntime keeps automatic login alive through the MCP read
   await startRuntime(runtime, job);
   await runtime.sealAuthentication(jobId);
   assert.equal(authenticated, true);
+});
+
+test("production BrowserRuntime captures click geometry from the installed Playwright MCP 0.0.78 response", {
+  skip: process.platform !== "win32",
+  timeout: 60_000,
+}, async (t) => {
+  let server;
+  let runtime;
+  const jobId = randomUUID();
+  const studioRoot = path.resolve(".");
+  t.after(async () => {
+    if (runtime) await runtime.stop().catch(() => undefined);
+    server?.closeIdleConnections?.();
+    server?.closeAllConnections?.();
+    if (server?.listening) {
+      await new Promise((resolvePromise) => server.close(resolvePromise));
+    }
+    await rm(path.join(studioRoot, "data", "jobs", jobId), { recursive: true, force: true });
+  });
+
+  server = createServer((_request, response) => {
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    response.end('<!doctype html><title>Geometry fixture</title><button id="geometry-target" style="position:absolute;left:40px;top:50px;width:120px;height:40px;box-sizing:border-box">Capture geometry</button>');
+  });
+  const fixturePort = await listen(server);
+  const origin = `http://127.0.0.1:${fixturePort}`;
+  const targetUrl = `${origin}/app`;
+  const publicPort = await unusedLoopbackPort();
+  const rawPort = await unusedLoopbackPort(publicPort);
+  runtime = new BrowserRuntime({
+    studioRoot,
+    mcpPackageDir: path.join(studioRoot, "node_modules", "@playwright", "mcp"),
+    port: publicPort,
+    rawPort,
+    env: { Path: process.env.Path ?? "" },
+    readinessTimeoutMs: 15_000,
+  });
+  const originPolicy = createOriginPolicy({ targetOrigin: origin, authOrigins: [], resourceOrigins: [] });
+  const active = await startRuntime(runtime, {
+    id: jobId,
+    targetUrl,
+    originPolicy,
+    blockedOrigins: [],
+    auth: { mode: "manual" },
+  });
+  const compiled = compileExecutionCalls({
+    schemaVersion: "1.1",
+    targetUrl,
+    targetOrigin: origin,
+    authOrigins: [],
+    resourceOrigins: [],
+    successCriteria: ["Geometry fixture is visible"],
+    forbiddenActions: ["사용자 데이터 변경"],
+    captureSettings: { width: 1920, height: 1080, fps: 30 },
+    steps: [{
+      id: "step-01",
+      action: "Capture the button geometry",
+      expected: "The button remains visible",
+      narration: "Capture the button position.",
+      risk: "safe",
+      calls: [{
+        id: "step-01.click",
+        tool: "browser_click",
+        arguments: {
+          element: "Capture geometry",
+          target: 'getByRole("button", { name: "Capture geometry", exact: true })',
+        },
+      }],
+    }],
+  });
+  const probeIndex = compiled.findIndex(({ id }) => id === "step-01.click.highlight-bounds");
+  const calls = [compiled[probeIndex], compiled[probeIndex + 1]];
+  const binding = { jobId, generation: active.generation, planDigest: "7".repeat(64) };
+  runtime.installApproval({ ...binding, calls });
+
+  await runtime.executeApproval(binding);
+
+  assert.deepEqual(runtime.readExecutionHighlights({
+    ...binding,
+    expectedCallIds: [calls[0].id],
+  }), [{
+    approvedCallId: "step-01.click.highlight-bounds",
+    x: 40,
+    y: 50,
+    width: 120,
+    height: 40,
+  }]);
 });
 
 test("browser bootstrap blocks redirects, subresources, OOPIFs, popups, WebSockets and service workers before attacker hit", {

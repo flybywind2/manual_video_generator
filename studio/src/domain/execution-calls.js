@@ -4,6 +4,7 @@ import { canonicalPlan } from "./plan.js";
 export const ACTION_NARRATION_DWELL_SECONDS = 6;
 export const ACTION_RESULT_DWELL_SECONDS = 2;
 export const CLICK_GEOMETRY_FUNCTION = '(element) => { element.scrollIntoView({ behavior: "instant", block: "nearest", inline: "nearest" }); const { x, y, width, height } = element.getBoundingClientRect(); return { x, y, width, height }; }';
+const CLICK_GEOMETRY_RESPONSE_META = Object.freeze({ json: true });
 
 function blockedPlan() {
   throw new StudioError("The plan contains a blocked step.", {
@@ -29,6 +30,7 @@ function expandedCalls(calls) {
           ...(call.arguments.element === undefined ? {} : { element: call.arguments.element }),
           target: call.arguments.target,
           function: CLICK_GEOMETRY_FUNCTION,
+          _meta: CLICK_GEOMETRY_RESPONSE_META,
         }),
         call,
       ]

@@ -41,7 +41,7 @@ test("execution calls deterministically wrap exact approved actions with recordi
     { id: "system.show-actions", tool: "browser_video_show_actions", arguments: { cursor: "pointer", duration: 700, position: "top-right" } },
     { id: "step-01.chapter", tool: "browser_video_chapter", arguments: { description: "프로젝트 목록이 표시됨", duration: 800, title: "프로젝트 메뉴 열기" } },
     { id: "step-01.narration-dwell", tool: "browser_wait_for", arguments: { time: 6 } },
-    { id: "step-01.click.highlight-bounds", tool: "browser_evaluate", arguments: { element: "프로젝트 메뉴", target: 'getByRole("link", { name: "프로젝트 메뉴", exact: true })', function: CLICK_GEOMETRY_FUNCTION } },
+    { id: "step-01.click.highlight-bounds", tool: "browser_evaluate", arguments: { element: "프로젝트 메뉴", target: 'getByRole("link", { name: "프로젝트 메뉴", exact: true })', function: CLICK_GEOMETRY_FUNCTION, _meta: { json: true } } },
     { id: "step-01.click", tool: "browser_click", arguments: { element: "프로젝트 메뉴", target: 'getByRole("link", { name: "프로젝트 메뉴", exact: true })' } },
     { id: "step-01.wait", tool: "browser_wait_for", arguments: { text: "프로젝트" } },
     { id: "step-01.result-dwell", tool: "browser_wait_for", arguments: { time: 2 } },
@@ -54,6 +54,7 @@ test("execution calls deterministically wrap exact approved actions with recordi
   assert.equal(Object.isFrozen(calls[3].arguments), true);
   assert.equal(Object.isFrozen(calls[4]), true);
   assert.equal(Object.isFrozen(calls[4].arguments), true);
+  assert.equal(Object.isFrozen(calls[4].arguments._meta), true);
 });
 
 test("every click receives exactly one immediately preceding geometry probe and non-click calls receive none", () => {
@@ -79,6 +80,7 @@ test("every click receives exactly one immediately preceding geometry probe and 
         ...(click.arguments.element === undefined ? {} : { element: click.arguments.element }),
         target: click.arguments.target,
         function: executionCallsModule.CLICK_GEOMETRY_FUNCTION,
+        _meta: { json: true },
       },
     });
   }

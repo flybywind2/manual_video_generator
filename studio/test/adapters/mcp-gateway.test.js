@@ -28,6 +28,7 @@ function clickCalls(id, target, element) {
         ...(element === undefined ? {} : { element }),
         target,
         function: CLICK_GEOMETRY_FUNCTION,
+        _meta: { json: true },
       },
     },
     {
@@ -774,12 +775,16 @@ test("click geometry capture rejects every non-canonical or unsafe evaluate resu
 
 test("approval accepts evaluate only as an exact generated probe immediately before its matching click", async (t) => {
   const baseCalls = clickCalls("step-01.click", "approved-target", "승인 대상");
+  const { _meta: _ignoredMeta, ...probeWithoutMeta } = baseCalls[0].arguments;
   const cases = [
     { name: "reordered probe", calls: [baseCalls[1], baseCalls[0]] },
     { name: "wrong generated id", calls: [{ ...baseCalls[0], id: "step-01.wrong.highlight-bounds" }, baseCalls[1]] },
     { name: "mutated function", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, function: "(element) => ({ x: 0, y: 0, width: 1, height: 1 })" } }, baseCalls[1]] },
     { name: "mutated target", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, target: "other-target" } }, baseCalls[1]] },
     { name: "mutated element", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, element: "다른 대상" } }, baseCalls[1]] },
+    { name: "missing JSON metadata", calls: [{ ...baseCalls[0], arguments: probeWithoutMeta }, baseCalls[1]] },
+    { name: "disabled JSON metadata", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, _meta: { json: false } } }, baseCalls[1]] },
+    { name: "extra JSON metadata", calls: [{ ...baseCalls[0], arguments: { ...baseCalls[0].arguments, _meta: { json: true, raw: true } } }, baseCalls[1]] },
     { name: "arbitrary evaluate", calls: [{ id: "step-01.evaluate", tool: "browser_evaluate", arguments: baseCalls[0].arguments }] },
   ];
 

@@ -1382,8 +1382,9 @@ export class BrowserRuntime {
         if (probe.tool !== "browser_evaluate") continue;
         const click = approval.calls[index + 1];
         const expectedKeys = Object.hasOwn(click?.arguments ?? {}, "element")
-          ? ["element", "target", "function"]
-          : ["target", "function"];
+          ? ["element", "target", "function", "_meta"]
+          : ["target", "function", "_meta"];
+        const responseMeta = probe.arguments._meta;
         if (
           !click ||
           click.tool !== "browser_click" ||
@@ -1391,6 +1392,10 @@ export class BrowserRuntime {
           Reflect.ownKeys(probe.arguments).length !== expectedKeys.length ||
           Reflect.ownKeys(probe.arguments).some((key) => typeof key !== "string" || !expectedKeys.includes(key)) ||
           probe.arguments.function !== CLICK_GEOMETRY_FUNCTION ||
+          !isPlain(responseMeta) ||
+          Reflect.ownKeys(responseMeta).length !== 1 ||
+          Reflect.ownKeys(responseMeta).some((key) => key !== "json") ||
+          responseMeta.json !== true ||
           probe.arguments.target !== click.arguments.target ||
           (Object.hasOwn(click.arguments, "element") && probe.arguments.element !== click.arguments.element)
         ) {

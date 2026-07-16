@@ -346,13 +346,18 @@ function isExactGeometryProbe(probe, click) {
   const probeArguments = probe.arguments;
   const clickArguments = click.arguments;
   const expectedKeys = Object.hasOwn(clickArguments, "element")
-    ? ["element", "target", "function"]
-    : ["target", "function"];
+    ? ["element", "target", "function", "_meta"]
+    : ["target", "function", "_meta"];
+  const responseMeta = dataValue(probeArguments, "_meta", true);
   return (
     probe.id === `${click.id}.highlight-bounds` &&
     Reflect.ownKeys(probeArguments).length === expectedKeys.length &&
     Reflect.ownKeys(probeArguments).every((key) => typeof key === "string" && expectedKeys.includes(key)) &&
     dataValue(probeArguments, "function", true) === CLICK_GEOMETRY_FUNCTION &&
+    isPlain(responseMeta) &&
+    Reflect.ownKeys(responseMeta).length === 1 &&
+    Reflect.ownKeys(responseMeta).every((key) => key === "json") &&
+    dataValue(responseMeta, "json", true) === true &&
     dataValue(probeArguments, "target", true) === dataValue(clickArguments, "target", true) &&
     (!Object.hasOwn(clickArguments, "element") ||
       dataValue(probeArguments, "element", true) === dataValue(clickArguments, "element", true))
