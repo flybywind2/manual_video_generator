@@ -427,3 +427,19 @@ test("README documents the one supported start path, privacy, disclosures, and f
   assert.match(readme, /node\s+scripts[\\/]verify\.mjs\s+--artifact[^\r\n]*--plan/iu);
   assert.doesNotMatch(readme, /(?:password|secret|token)\s*[=:]\s*[^<\s$]+/iu);
 });
+
+test("README documents the supported OpenCode runtime contract and company PC diagnosis", async () => {
+  const readme = await source("README.md");
+
+  assert.match(readme, /OpenCode[^\r\n]*>=\s*1\.17\.19/iu);
+  assert.match(readme, /호환[^\r\n]*네이티브[^\r\n]*\.exe[^\r\n]*재사용/iu);
+  assert.match(readme, /프로젝트[^\r\n]*폴백[^\r\n]*1\.18\.2/iu);
+  assert.match(readme, /opencode\.cmd[^\r\n]*opencode\.ps1[^\r\n]*(?:실행하지|사용하지)/iu);
+  assert.match(readme, /회사 PC/iu);
+  assert.match(readme, /scripts[\\/]start\.ps1\s+-Check/iu);
+  assert.match(readme, /where\.exe\s+opencode\.exe/iu);
+  assert.match(readme, /opencode\.exe\s+--version/iu);
+  assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH/u);
+  assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH/u);
+  assert.doesNotMatch(readme, /OpenCode\s*\|\s*`1\.4\.1`/iu);
+});

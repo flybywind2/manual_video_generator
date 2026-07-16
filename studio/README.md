@@ -10,7 +10,7 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ```
 
-이 명령은 고정 버전을 검사·준비하고 Supertonic sidecar를 숨김 창으로 시작한 다음 Node.js 서비스를 `http://127.0.0.1:4317`에서 실행합니다. 종료는 같은 터미널에서 `Ctrl+C`를 누릅니다. 포트를 바꾸려면 `-Port 4318`처럼 지정할 수 있습니다.
+이 명령은 요구 버전을 검사·준비하고 Supertonic sidecar를 숨김 창으로 시작한 다음 Node.js 서비스를 `http://127.0.0.1:4317`에서 실행합니다. 종료는 같은 터미널에서 `Ctrl+C`를 누릅니다. 포트를 바꾸려면 `-Port 4318`처럼 지정할 수 있습니다.
 
 설치나 프로세스 시작 없이 상태만 확인하려면 같은 진입점의 점검 모드를 사용합니다.
 
@@ -24,13 +24,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 
 | 엔진 | 고정/요구 버전 | 역할 |
 |---|---:|---|
-| OpenCode | `1.4.1` | 프롬프트 해석, 계획 생성, 실행 보고서 판정 |
+| OpenCode | `>=1.17.19` | 프롬프트 해석, 계획 생성, 실행 보고서 판정 |
 | Playwright MCP | `0.0.78` | 허용된 origin과 정확히 승인된 호출만 수행하는 브라우저 조작·녹화 |
 | Supertonic | `1.3.1` / Python `3.13.14` | 로컬 한국어 44.1 kHz 내레이션 합성 |
 | HyperFrames | `0.7.57` | 캡션·챕터·하이라이트 타임라인 구성과 렌더링 |
 | FFmpeg / FFprobe | `8.1.1` | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
 
-Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 정확한 npm 버전으로 준비하며 Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
+Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 호환되는 네이티브 `opencode.exe`를 재사용합니다. 명시적으로 지정된 실행 파일, 프로젝트 런타임, PATH의 모든 네이티브 실행 파일, 전역 npm 패키지가 선언한 네이티브 실행 파일을 순서대로 검증하며, 버전이 `1.17.19` 이상인 첫 후보를 선택합니다. 이미 설치된 호환 후보가 없을 때만 정확한 프로젝트 로컬 폴백 `1.18.2`를 `.runtime/opencode`에 준비합니다. `opencode.cmd`와 `opencode.ps1` 같은 command shim은 실행하지 않습니다.
+
+Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
+
+### 회사 PC에서 OpenCode 진단과 시작
+
+회사 PC에서 pull한 뒤 PowerShell로 `studio` 디렉터리에 들어가 다음 순서로 확인하세요.
+
+```powershell
+git pull --ff-only
+where.exe opencode.exe
+opencode.exe --version
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
+```
+
+`where.exe`와 직접 버전 명령은 PC에 설치된 네이티브 후보를 보여 주고, `-Check` 결과의 `checks.opencode.actual`은 Studio가 실제 선택한 버전을 보여 줍니다. PATH의 첫 후보가 오래된 `1.4.1`이어도 뒤에 있는 호환 후보를 계속 검사합니다. 첫 실행 전 호환 후보가 전혀 없으면 `-Check`는 설치 없이 불일치를 보고할 수 있으며, 일반 시작 명령이 프로젝트 폴백을 준비합니다.
 
 ## 사용 흐름
 
@@ -99,6 +115,15 @@ node scripts/verify.mjs --artifact "data/jobs/<job-id>/artifacts/final.mp4" --pl
 | `MANUAL_STUDIO_SMOKE_CREDENTIAL_ID` | 자동 로그인일 때 사용할 origin-bound credential ID |
 
 스모크가 timeout, API 오류 또는 `Ctrl+C`로 중단되면 이미 생성한 작업에 취소를 최선 노력으로 요청한 뒤 원래 오류를 반환합니다.
+
+실제 OpenCode 설치본에 대한 계약 테스트는 명시적으로 opt-in합니다. 두 변수에는 command shim이 아니라 각각 해당 버전의 네이티브 `opencode.exe` 절대 경로를 넣으세요. 변수가 없으면 관련 실버전 테스트만 건너뜁니다.
+
+```powershell
+$env:MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH = "C:\path\to\opencode-1.17.19.exe"
+$env:MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH = "C:\path\to\opencode-1.18.2.exe"
+node --test test/adapters/opencode-config.test.js test/adapters/opencode-server.test.js
+Remove-Item Env:MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH, Env:MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH
+```
 
 ## 생성물 고지와 라이선스
 
