@@ -352,6 +352,12 @@ test("check rejects nested warnings even when HyperFrames reports top-level ok",
 });
 
 async function locate(command) {
+  const override = command === "ffmpeg"
+    ? process.env.MANUAL_STUDIO_FFMPEG_PATH
+    : process.env.MANUAL_STUDIO_FFPROBE_PATH;
+  if (typeof override === "string" && override.length > 0) {
+    return override;
+  }
   const locator = process.platform === "win32" ? "where.exe" : "which";
   try {
     const { stdout } = await execFileAsync(locator, [command], {
@@ -373,6 +379,43 @@ async function availablePort() {
   const port = server.address().port;
   await new Promise((accept, reject) => server.close((error) => error ? reject(error) : accept()));
   return port;
+}
+
+async function sampleRenderedRegion(ffmpeg, filePath, {
+  atSeconds,
+  x,
+  y,
+  width,
+  height,
+}) {
+  const { stdout } = await execFileAsync(
+    ffmpeg,
+    [
+      "-hide_banner", "-loglevel", "error",
+      "-ss", atSeconds.toFixed(3), "-i", filePath,
+      "-vf", `crop=${width}:${height}:${x}:${y}`,
+      "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ],
+    { encoding: null, maxBuffer: width * height * 4, windowsHide: true },
+  );
+  assert.equal(Buffer.isBuffer(stdout), true);
+  assert.equal(stdout.length, width * height * 3);
+  return stdout;
+}
+
+function changedPixelCount(left, right) {
+  assert.equal(left.length, right.length);
+  let changed = 0;
+  for (let offset = 0; offset < left.length; offset += 3) {
+    const channelDelta =
+      Math.abs(left[offset] - right[offset]) +
+      Math.abs(left[offset + 1] - right[offset + 1]) +
+      Math.abs(left[offset + 2] - right[offset + 2]);
+    if (channelDelta >= 24) {
+      changed += 1;
+    }
+  }
+  return changed;
 }
 
 test("live golden composition passes lint, check, preview, strict render, and FFprobe", async (t) => {
@@ -408,7 +451,7 @@ test("live golden composition passes lint, check, preview, strict render, and FF
       [
         "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "color=c=#302b63:size=1920x1080:rate=30",
-        "-t", "0.6", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-t", "2.4", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
         "-an", "-movflags", "+faststart", "-y", recordingPath,
       ],
       { windowsHide: true },
@@ -418,7 +461,7 @@ test("live golden composition passes lint, check, preview, strict render, and FF
       [
         "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
-        "-t", "0.6", "-ac", "1", "-c:a", "pcm_s16le", "-y", narrationPath,
+        "-t", "2.4", "-ac", "1", "-c:a", "pcm_s16le", "-y", narrationPath,
       ],
       { windowsHide: true },
     ),
@@ -429,17 +472,34 @@ test("live golden composition passes lint, check, preview, strict render, and FF
       {
         id: "step-1",
         sourceStartMs: 0,
-        sourceEndMs: 600,
+        sourceEndMs: 2_400,
         caption: "설정 메뉴를 선택합니다.",
         chapter: "설정 열기",
-        highlight: { x: 120, y: 160, width: 320, height: 72 },
+        highlights: [
+          {
+            callId: "step-1.first-click",
+            sourceAtMs: 300,
+            x: 120,
+            y: 240,
+            width: 320,
+            height: 72,
+          },
+          {
+            callId: "step-1.second-click",
+            sourceAtMs: 1_300,
+            x: 900,
+            y: 500,
+            width: 260,
+            height: 90,
+          },
+        ],
       },
     ],
     narrations: [
       {
         sceneId: "step-1",
         path: "composition/narration/step-1.wav",
-        durationMs: 600,
+        durationMs: 2_400,
         text: "설정 메뉴를 선택합니다.",
       },
     ],
@@ -450,6 +510,8 @@ test("live golden composition passes lint, check, preview, strict render, and FF
     outputPath: join(projectPath, "index.html"),
     mediaPlan,
   });
+  const compositionHtml = await readFile(join(projectPath, "index.html"), "utf8");
+  assert.equal((compositionHtml.match(/class="click-highlight clip"/gu) ?? []).length, 2);
 
   const commandResults = [];
   const adapter = new HyperframesAdapter({
@@ -490,5 +552,43 @@ test("live golden composition passes lint, check, preview, strict render, and FF
   });
   assert.equal(quality.videoCodec, "h264");
   assert.equal(quality.audioCodec, "aac");
+  assert.equal(quality.width, 1_920);
+  assert.equal(quality.height, 1_080);
+  assert.equal(quality.fps, 30);
   assert.equal(quality.durationDriftMs <= 500, true);
+
+  for (const sample of [
+    {
+      region: { x: 80, y: 200, width: 400, height: 160 },
+      before: 0.1,
+      during: 0.55,
+      after: 1.25,
+    },
+    {
+      region: { x: 850, y: 450, width: 360, height: 190 },
+      before: 1.25,
+      during: 1.65,
+      after: 2.3,
+    },
+  ]) {
+    const before = await sampleRenderedRegion(ffmpeg, outputPath, {
+      atSeconds: sample.before,
+      ...sample.region,
+    });
+    const during = await sampleRenderedRegion(ffmpeg, outputPath, {
+      atSeconds: sample.during,
+      ...sample.region,
+    });
+    const after = await sampleRenderedRegion(ffmpeg, outputPath, {
+      atSeconds: sample.after,
+      ...sample.region,
+    });
+    const beforeToDuring = changedPixelCount(before, during);
+    const duringToAfter = changedPixelCount(during, after);
+    const beforeToAfter = changedPixelCount(before, after);
+    const evidence = JSON.stringify({ beforeToDuring, duringToAfter, beforeToAfter });
+    assert.equal(beforeToDuring > 300, true, evidence);
+    assert.equal(duringToAfter > 300, true, evidence);
+    assert.equal(beforeToAfter < 100, true, evidence);
+  }
 });

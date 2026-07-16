@@ -13,7 +13,22 @@
       .narration-audio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
       .chapter-card { position: absolute; top: 42px; left: 54px; z-index: 30; max-width: 760px; padding: 16px 24px; border: 1px solid rgba(181, 166, 255, 0.72); border-radius: 14px; color: #ffffff; background: rgba(22, 18, 55, 0.88); box-shadow: 0 12px 40px rgba(36, 26, 84, 0.28); font-size: 28px; font-weight: 700; line-height: 1.35; }
       .caption { position: absolute; left: 240px; right: 240px; bottom: 54px; z-index: 40; padding: 22px 30px; border-radius: 18px; color: #ffffff; background: rgba(7, 9, 24, 0.88); box-shadow: 0 14px 48px rgba(0, 0, 0, 0.34); font-size: 36px; font-weight: 700; line-height: 1.45; text-align: center; word-break: keep-all; }
-      .action-highlight { position: absolute; z-index: 20; border: 5px solid #8f7cff; border-radius: 12px; box-shadow: 0 0 0 7px rgba(143, 124, 255, 0.24), 0 0 38px rgba(76, 111, 255, 0.44); pointer-events: none; }
+      .click-highlight { position: absolute; inset: 0; width: 1920px; height: 1080px; z-index: 20; overflow: hidden; pointer-events: none; }
+      .click-target { position: absolute; left: var(--target-x); top: var(--target-y); width: var(--target-width); height: var(--target-height); border: 5px solid #8f7cff; border-radius: 16px; background: rgba(76, 111, 255, 0.08); box-shadow: 0 0 0 7px rgba(143, 124, 255, 0.24), 0 0 42px rgba(76, 111, 255, 0.64); transform-origin: center; animation: click-target-pulse 900ms cubic-bezier(0.16, 1, 0.3, 1) 1 both; animation-delay: var(--pulse-delay); }
+      .click-ripple { position: absolute; left: var(--click-x); top: var(--click-y); width: 30px; height: 30px; border: 4px solid #8f7cff; border-radius: 999px; transform: translate(-50%, -50%) scale(0.35); animation: click-ripple-pulse 900ms cubic-bezier(0.16, 1, 0.3, 1) 1 both; animation-delay: var(--pulse-delay); }
+      .click-ripple-primary { border-color: #8f7cff; }
+      .click-ripple-secondary { width: 20px; height: 20px; border-color: #4c6fff; }
+      @keyframes click-target-pulse {
+        0% { opacity: 0; transform: scale(0.94); }
+        16% { opacity: 1; transform: scale(1); }
+        72% { opacity: 0.92; transform: scale(1); }
+        100% { opacity: 0; transform: scale(1.03); }
+      }
+      @keyframes click-ripple-pulse {
+        0% { opacity: 0; transform: translate(-50%, -50%) scale(0.35); }
+        12% { opacity: 1; }
+        100% { opacity: 0; transform: translate(-50%, -50%) scale(4.2); }
+      }
     </style>
   </head>
   <body>

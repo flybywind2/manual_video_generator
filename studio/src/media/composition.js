@@ -21,6 +21,8 @@ const TEMPLATE_SLOTS = Object.freeze([
 ]);
 const PROJECT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const SAFE_CALL_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/u;
+const HIGHLIGHT_DURATION_MS = 900;
 const MAX_CANONICAL_NODES = 20_000;
 
 function compositionError(code, reason) {
@@ -123,12 +125,12 @@ function exactObject(value, fields, reason) {
   return result;
 }
 
-function denseArray(value, reason) {
+function denseArray(value, reason, { minimum = 1, maximum = 100 } = {}) {
   if (
     !Array.isArray(value) ||
     Object.getPrototypeOf(value) !== Array.prototype ||
-    value.length < 1 ||
-    value.length > 100 ||
+    value.length < minimum ||
+    value.length > maximum ||
     Reflect.ownKeys(value).length !== value.length + 1
   ) {
     compositionError("INVALID_MEDIA_PLAN", reason);
@@ -225,7 +227,7 @@ function normalizedManifest(mediaPlan) {
     ["schemaVersion", "video", "recordingPath", "scenes", "captions", "chapters"],
     "manifest",
   );
-  if (root.schemaVersion !== "1.0") {
+  if (root.schemaVersion !== "1.1") {
     compositionError("INVALID_MEDIA_PLAN", "schema_version");
   }
   const video = exactObject(root.video, ["width", "height", "fps", "durationMs"], "video");
@@ -240,10 +242,11 @@ function normalizedManifest(mediaPlan) {
     compositionError("INVALID_MEDIA_PLAN", "video_contract");
   }
   const recordingPath = assetPath(root.recordingPath, ".mp4");
+  const highlightCallIds = new Set();
   const scenes = denseArray(root.scenes, "scenes").map((candidate) => {
     const scene = exactObject(
       candidate,
-      ["id", "source", "output", "narration", "caption", "chapter", "highlight", "driftMs"],
+      ["id", "source", "output", "narration", "caption", "chapter", "highlights", "driftMs"],
       "scene",
     );
     if (typeof scene.id !== "string" || !SAFE_ID.test(scene.id)) {
@@ -291,16 +294,54 @@ function normalizedManifest(mediaPlan) {
     ) {
       compositionError("INVALID_MEDIA_PLAN", "scene_timing");
     }
-    let highlight = null;
-    if (scene.highlight !== null) {
-      highlight = exactObject(scene.highlight, ["x", "y", "width", "height"], "highlight");
-      for (const [name, value] of Object.entries(highlight)) {
-        integer(value, `highlight_${name}`, { minimum: name === "width" || name === "height" ? 1 : 0, maximum: 1_920 });
+    const highlights = denseArray(scene.highlights, "highlights", {
+      minimum: 0,
+      maximum: 100,
+    }).map((candidateHighlight, highlightIndex) => {
+      const highlight = exactObject(
+        candidateHighlight,
+        ["callId", "startMs", "durationMs", "x", "y", "width", "height"],
+        "highlight",
+      );
+      if (typeof highlight.callId !== "string" || !SAFE_CALL_ID.test(highlight.callId)) {
+        compositionError("INVALID_MEDIA_PLAN", "highlight_call_id");
+      }
+      for (const [name, value, options] of [
+        ["startMs", highlight.startMs, {}],
+        ["durationMs", highlight.durationMs, {}],
+        ["x", highlight.x, { maximum: 1_919 }],
+        ["y", highlight.y, { maximum: 1_079 }],
+        ["width", highlight.width, { minimum: 1, maximum: 1_920 }],
+        ["height", highlight.height, { minimum: 1, maximum: 1_080 }],
+      ]) {
+        integer(value, `highlight_${name}`, options);
+      }
+      if (
+        highlight.durationMs !== HIGHLIGHT_DURATION_MS ||
+        highlight.startMs < output.startMs ||
+        highlight.startMs + HIGHLIGHT_DURATION_MS > output.endMs
+      ) {
+        compositionError("INVALID_MEDIA_PLAN", "highlight_timing");
       }
       if (highlight.x + highlight.width > 1_920 || highlight.y + highlight.height > 1_080) {
         compositionError("INVALID_MEDIA_PLAN", "highlight_bounds");
       }
-    }
+      if (highlightCallIds.has(highlight.callId)) {
+        compositionError("INVALID_MEDIA_PLAN", "duplicate_highlight_call_id");
+      }
+      highlightCallIds.add(highlight.callId);
+      if (highlightIndex > 0) {
+        const previous = scene.highlights[highlightIndex - 1];
+        if (
+          previous.startMs > highlight.startMs ||
+          (previous.startMs === highlight.startMs &&
+            previous.callId.localeCompare(highlight.callId, "en") >= 0)
+        ) {
+          compositionError("INVALID_MEDIA_PLAN", "highlight_order");
+        }
+      }
+      return highlight;
+    });
     return {
       id: scene.id,
       source,
@@ -316,7 +357,7 @@ function normalizedManifest(mediaPlan) {
         endMs: caption.endMs,
       },
       chapter: safeText(scene.chapter, "chapter", 200),
-      highlight,
+      highlights,
       driftMs: scene.driftMs,
     };
   });
@@ -369,7 +410,38 @@ function projectAssetUrl(projectPath, targetPath) {
     .join("/");
 }
 
-function sceneClips(scene, recordingUrl, narrationUrl, sceneIndex) {
+function highlightClip(sceneId, highlight, highlightIndex, trackIndex) {
+  const targetLeft = Math.max(0, highlight.x - 12);
+  const targetTop = Math.max(0, highlight.y - 12);
+  const targetRight = Math.min(1_920, highlight.x + highlight.width + 12);
+  const targetBottom = Math.min(1_080, highlight.y + highlight.height + 12);
+  const clickX = highlight.x + highlight.width / 2;
+  const clickY = highlight.y + highlight.height / 2;
+  const style = [
+    `--target-x:${targetLeft}px`,
+    `--target-y:${targetTop}px`,
+    `--target-width:${targetRight - targetLeft}px`,
+    `--target-height:${targetBottom - targetTop}px`,
+    `--click-x:${clickX}px`,
+    `--click-y:${clickY}px`,
+    `--pulse-delay:${seconds(highlight.startMs)}s`,
+  ].join(";");
+  return [
+    `      <div id="highlight-${sceneId}-${highlightIndex}" class="click-highlight clip" data-start="${seconds(highlight.startMs)}" data-duration="0.9" data-track-index="${trackIndex}" style="${style}">`,
+    '        <span class="click-target"></span>',
+    '        <span class="click-ripple click-ripple-primary"></span>',
+    '        <span class="click-ripple click-ripple-secondary"></span>',
+    "      </div>",
+  ].join("\n");
+}
+
+function sceneClips(
+  scene,
+  recordingUrl,
+  narrationUrl,
+  sceneIndex,
+  { highlightTrackStart, chapterTrackStart, captionTrackStart },
+) {
   const outputStart = seconds(scene.output.startMs);
   const outputDuration = seconds(scene.output.durationMs);
   const narrationStart = seconds(scene.caption.startMs);
@@ -378,14 +450,21 @@ function sceneClips(scene, recordingUrl, narrationUrl, sceneIndex) {
   const lines = [
     `      <video id="video-${scene.id}" class="browser-video clip" src="${recordingUrl}" playsinline preload="auto" muted data-start="${outputStart}" data-duration="${outputDuration}" data-media-start="${seconds(scene.source.startMs)}" data-playback-rate="${playbackRate(scene.source.playbackRate)}" data-volume="0" data-track-index="0"></video>`,
     `      <audio id="narration-${scene.id}" class="narration-audio clip" src="${narrationUrl}" preload="auto" data-start="${narrationStart}" data-duration="${narrationDuration}" data-volume="1" data-track-index="10"></audio>`,
-    `      <div id="chapter-${scene.id}" class="chapter-card clip" data-start="${outputStart}" data-duration="${chapterDuration}" data-track-index="${40 + sceneIndex}">${escapeHtml(scene.chapter)}</div>`,
-    `      <div id="caption-${scene.id}" class="caption clip" data-start="${narrationStart}" data-duration="${narrationDuration}" data-track-index="${60 + sceneIndex}">${escapeHtml(scene.caption.text)}</div>`,
   ];
-  if (scene.highlight !== null) {
+  for (const [highlightIndex, highlight] of scene.highlights.entries()) {
     lines.push(
-      `      <div id="highlight-${scene.id}" class="action-highlight clip" data-start="${outputStart}" data-duration="${outputDuration}" data-track-index="${20 + sceneIndex}" style="left:${scene.highlight.x}px;top:${scene.highlight.y}px;width:${scene.highlight.width}px;height:${scene.highlight.height}px"></div>`,
+      highlightClip(
+        scene.id,
+        highlight,
+        highlightIndex,
+        highlightTrackStart + highlightIndex,
+      ),
     );
   }
+  lines.push(
+    `      <div id="chapter-${scene.id}" class="chapter-card clip" data-start="${outputStart}" data-duration="${chapterDuration}" data-track-index="${chapterTrackStart + sceneIndex}">${escapeHtml(scene.chapter)}</div>`,
+    `      <div id="caption-${scene.id}" class="caption clip" data-start="${narrationStart}" data-duration="${narrationDuration}" data-track-index="${captionTrackStart + sceneIndex}">${escapeHtml(scene.caption.text)}</div>`,
+  );
   return lines.join("\n");
 }
 
@@ -404,15 +483,25 @@ export function compileComposition({ template, mediaPlan, projectPath }) {
   const project = relativeProjectPath(projectPath, "unsafe_project_path");
   const manifest = normalizedManifest(mediaPlan);
   const recordingUrl = projectAssetUrl(project, manifest.recordingPath);
+  const highlightCount = manifest.scenes.reduce(
+    (count, scene) => count + scene.highlights.length,
+    0,
+  );
+  const chapterTrackStart = 20 + highlightCount;
+  const captionTrackStart = chapterTrackStart + manifest.scenes.length;
+  let highlightTrackStart = 20;
   const clips = manifest.scenes
-    .map((scene, sceneIndex) =>
-      sceneClips(
+    .map((scene, sceneIndex) => {
+      const sceneHtml = sceneClips(
         scene,
         recordingUrl,
         projectAssetUrl(project, scene.narration.path),
         sceneIndex,
-      ),
-    )
+        { highlightTrackStart, chapterTrackStart, captionTrackStart },
+      );
+      highlightTrackStart += scene.highlights.length;
+      return sceneHtml;
+    })
     .join("\n");
 
   return approvedTemplate

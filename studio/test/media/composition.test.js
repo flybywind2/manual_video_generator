@@ -15,7 +15,21 @@ import {
 const studioRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const templatePath = join(studioRoot, "templates", "hyperframes", "index.html");
 
-function manifest(caption = "프로젝트 <메뉴> & 설정을 선택합니다.") {
+function manifest(
+  caption = "프로젝트 <메뉴> & 설정을 선택합니다.",
+  {
+    highlights = [
+      {
+        callId: "step-1.click",
+        sourceAtMs: 1_200,
+        x: 120,
+        y: 160,
+        width: 320,
+        height: 72,
+      },
+    ],
+  } = {},
+) {
   return createMediaPlan({
     recordingPath: "composition/media/normalized.mp4",
     scenes: [
@@ -25,7 +39,7 @@ function manifest(caption = "프로젝트 <메뉴> & 설정을 선택합니다."
         sourceEndMs: 3_000,
         caption,
         chapter: "프로젝트 & 설정",
-        highlight: { x: 120, y: 160, width: 320, height: 72 },
+        highlights,
       },
     ],
     narrations: [
@@ -87,8 +101,51 @@ test("compiled clips use escaped text, relative in-job media, and separate muted
     /<audio id="narration-step-1" class="narration-audio clip"[^>]*src="narration\/step-1\.wav"[^>]*data-volume="1"/u,
   );
   assert.match(html, /class="caption clip"[^>]*data-start="0\.000"[^>]*data-duration="1\.900"/u);
-  assert.match(html, /class="action-highlight clip"/u);
+  assert.match(
+    html,
+    /<div id="highlight-step-1-0" class="click-highlight clip" data-start="0\.190" data-duration="0\.9" data-track-index="20" style="--target-x:108px;--target-y:148px;--target-width:344px;--target-height:96px;--click-x:280px;--click-y:196px;--pulse-delay:0\.190s">/u,
+  );
+  assert.match(html, /<span class="click-target"><\/span>/u);
+  assert.equal((html.match(/<span class="click-ripple click-ripple-(?:primary|secondary)"><\/span>/gu) ?? []).length, 2);
+  assert.doesNotMatch(html, /step-1\.click/u);
+  assert.doesNotMatch(html, /action-highlight/u);
   assert.doesNotMatch(html, /(?:src|href)="\.\.\//u);
+});
+
+test("click pulses pad and clamp target rectangles while keeping the original click center", async () => {
+  const html = compileComposition({
+    template: await readFile(templatePath, "utf8"),
+    mediaPlan: manifest("가장자리 클릭", {
+      highlights: [
+        {
+          callId: "step-1.top-left",
+          sourceAtMs: 1_000,
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10,
+        },
+        {
+          callId: "step-1.bottom-right",
+          sourceAtMs: 2_000,
+          x: 1_910,
+          y: 1_070,
+          width: 10,
+          height: 10,
+        },
+      ],
+    }),
+    projectPath: "composition",
+  });
+
+  assert.match(
+    html,
+    /id="highlight-step-1-0"[^>]*style="--target-x:0px;--target-y:0px;--target-width:22px;--target-height:22px;--click-x:5px;--click-y:5px;--pulse-delay:0\.000s"/u,
+  );
+  assert.match(
+    html,
+    /id="highlight-step-1-1"[^>]*style="--target-x:1898px;--target-y:1058px;--target-width:22px;--target-height:22px;--click-x:1915px;--click-y:1075px;--pulse-delay:0\.950s"/u,
+  );
 });
 
 test("multi-scene overlays use distinct tracks so strict HyperFrames lint stays warning-free", async () => {
@@ -98,7 +155,24 @@ test("multi-scene overlays use distinct tracks so strict HyperFrames lint stays 
     sourceEndMs: (index + 1) * 2_000,
     caption: `장면 ${index + 1} 안내`,
     chapter: `장면 ${index + 1}`,
-    highlight: { x: 100, y: 120, width: 300, height: 80 },
+    highlights: [
+      {
+        callId: `step-${index + 1}.first-click`,
+        sourceAtMs: index * 2_000 + 200,
+        x: 100,
+        y: 120,
+        width: 300,
+        height: 80,
+      },
+      {
+        callId: `step-${index + 1}.second-click`,
+        sourceAtMs: index * 2_000 + 1_100,
+        x: 520,
+        y: 360,
+        width: 200,
+        height: 60,
+      },
+    ],
   }));
   const mediaPlan = createMediaPlan({
     recordingPath: "composition/media/normalized.mp4",
@@ -119,9 +193,92 @@ test("multi-scene overlays use distinct tracks so strict HyperFrames lint stays 
     new RegExp(`class="${className} clip"[^>]*data-track-index="(\\d+)"`, "gu"),
   )].map((match) => match[1]);
 
-  assert.deepEqual(tracks("action-highlight"), ["20", "21", "22", "23", "24"]);
-  assert.deepEqual(tracks("chapter-card"), ["40", "41", "42", "43", "44"]);
-  assert.deepEqual(tracks("caption"), ["60", "61", "62", "63", "64"]);
+  assert.deepEqual(tracks("click-highlight"), ["20", "21", "22", "23", "24", "25", "26", "27", "28", "29"]);
+  assert.deepEqual(tracks("chapter-card"), ["30", "31", "32", "33", "34"]);
+  assert.deepEqual(tracks("caption"), ["35", "36", "37", "38", "39"]);
+  const allOverlayTracks = [
+    ...tracks("click-highlight"),
+    ...tracks("chapter-card"),
+    ...tracks("caption"),
+  ];
+  assert.equal(new Set(allOverlayTracks).size, allOverlayTracks.length);
+});
+
+test("schema 1.1 timed click cues are independently exact, dense, unique, sorted, and scene-bound", async () => {
+  const template = await readFile(templatePath, "utf8");
+  const compile = (mediaPlan) => compileComposition({ template, mediaPlan, projectPath: "composition" });
+  assert.doesNotThrow(() => compile(manifest("클릭 없음", { highlights: [] })));
+
+  const invalidPlans = [];
+  const schema = structuredClone(manifest());
+  schema.schemaVersion = "1.0";
+  invalidPlans.push(schema);
+
+  const extra = structuredClone(manifest());
+  extra.scenes[0].highlights[0].extra = true;
+  invalidPlans.push(extra);
+
+  const sparse = structuredClone(manifest());
+  sparse.scenes[0].highlights = new Array(1);
+  invalidPlans.push(sparse);
+
+  for (const [field, value] of [
+    ["startMs", -1],
+    ["startMs", 1.5],
+    ["durationMs", 899],
+    ["x", -1],
+    ["x", 1.5],
+    ["width", 0],
+  ]) {
+    const candidate = structuredClone(manifest());
+    candidate.scenes[0].highlights[0][field] = value;
+    invalidPlans.push(candidate);
+  }
+
+  const outside = structuredClone(manifest());
+  outside.scenes[0].highlights[0].startMs = outside.scenes[0].output.endMs - 899;
+  invalidPlans.push(outside);
+
+  const bounds = structuredClone(manifest());
+  bounds.scenes[0].highlights[0].x = 1_700;
+  invalidPlans.push(bounds);
+
+  const duplicate = structuredClone(manifest());
+  duplicate.scenes[0].highlights.push({ ...duplicate.scenes[0].highlights[0] });
+  invalidPlans.push(duplicate);
+
+  const unsorted = structuredClone(manifest());
+  unsorted.scenes[0].highlights = [
+    { ...unsorted.scenes[0].highlights[0], callId: "step-1.later", startMs: 800 },
+    { ...unsorted.scenes[0].highlights[0], callId: "step-1.earlier", startMs: 100 },
+  ];
+  invalidPlans.push(unsorted);
+
+  const unsafeId = structuredClone(manifest());
+  unsafeId.scenes[0].highlights[0].callId = '<img src=x onerror="alert(1)">';
+  invalidPlans.push(unsafeId);
+
+  for (const candidate of invalidPlans) {
+    assert.throws(() => compile(candidate), { code: "INVALID_MEDIA_PLAN" });
+  }
+});
+
+test("the fixed template renders full-frame finite 900 ms purple-blue target and ripple animations", async () => {
+  const html = compileComposition({
+    template: await readFile(templatePath, "utf8"),
+    mediaPlan: manifest(),
+    projectPath: "composition",
+  });
+
+  assert.match(html, /\.click-highlight\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;[^}]*width:\s*1920px;[^}]*height:\s*1080px;/u);
+  assert.match(html, /\.click-target\s*\{[^}]*var\(--target-x\)[^}]*var\(--target-y\)[^}]*var\(--target-width\)[^}]*var\(--target-height\)[^}]*#8f7cff/u);
+  assert.match(html, /\.click-ripple\s*\{[^}]*var\(--click-x\)[^}]*var\(--click-y\)[^}]*900ms[^}]*1\s+both/u);
+  assert.match(html, /animation-delay:\s*var\(--pulse-delay\)/u);
+  assert.match(html, /\.click-ripple-primary/u);
+  assert.match(html, /\.click-ripple-secondary/u);
+  assert.match(html, /@keyframes click-target-pulse/u);
+  assert.match(html, /@keyframes click-ripple-pulse/u);
+  assert.doesNotMatch(html, /animation[^;]*\binfinite\b/iu);
 });
 
 test("fixed template applies the validated playback rate before HyperFrames discovers media", async () => {
@@ -264,7 +421,7 @@ test("unapproved templates and unsafe project paths are rejected", async () => {
         sourceEndMs: 1_000,
         caption: "설정을 엽니다.",
         chapter: "설정",
-        highlight: null,
+        highlights: [],
       },
     ],
     narrations: [
