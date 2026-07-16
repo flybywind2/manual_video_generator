@@ -2362,22 +2362,32 @@ test("automatic login is a module-wide single flight across concurrent pages", a
   }
 });
 
-async function listen(server) {
+async function listen(server, port = 0) {
   await new Promise((resolvePromise, rejectPromise) => {
     server.once("error", rejectPromise);
-    server.listen(0, "127.0.0.1", resolvePromise);
+    server.listen(port, "127.0.0.1", resolvePromise);
   });
   return server.address().port;
 }
 
-async function unusedLoopbackPort(excludedPort) {
+async function unusedLoopbackPort(excludedPorts) {
   while (true) {
     const server = createServer();
     const port = await listen(server);
     await new Promise((resolvePromise, rejectPromise) => {
       server.close((error) => error ? rejectPromise(error) : resolvePromise());
     });
-    if (port !== excludedPort) return port;
+    if (!excludedPorts.has(port)) return port;
+  }
+}
+
+async function assertLoopbackPortsReleased(ports) {
+  for (const port of ports) {
+    const server = createServer();
+    await listen(server, port);
+    await new Promise((resolvePromise, rejectPromise) => {
+      server.close((error) => error ? rejectPromise(error) : resolvePromise());
+    });
   }
 }
 
@@ -2576,22 +2586,32 @@ test("production BrowserRuntime keeps automatic login alive through the MCP read
   assert.equal(authenticated, true);
 });
 
-test("production BrowserRuntime captures click geometry from the installed Playwright MCP 0.0.78 response", {
+test("production BrowserRuntime retries a stolen port then captures click geometry from Playwright MCP 0.0.78", {
   skip: process.platform !== "win32",
   timeout: 60_000,
 }, async (t) => {
   let server;
   let runtime;
-  const jobId = randomUUID();
+  let collisionServer;
+  let jobId;
+  let active;
+  const jobIds = new Set();
   const studioRoot = path.resolve(".");
   t.after(async () => {
     if (runtime) await runtime.stop().catch(() => undefined);
+    collisionServer?.closeIdleConnections?.();
+    collisionServer?.closeAllConnections?.();
+    if (collisionServer?.listening) {
+      await new Promise((resolvePromise) => collisionServer.close(resolvePromise));
+    }
     server?.closeIdleConnections?.();
     server?.closeAllConnections?.();
     if (server?.listening) {
       await new Promise((resolvePromise) => server.close(resolvePromise));
     }
-    await rm(path.join(studioRoot, "data", "jobs", jobId), { recursive: true, force: true });
+    for (const id of jobIds) {
+      await rm(path.join(studioRoot, "data", "jobs", id), { recursive: true, force: true });
+    }
   });
 
   server = createServer((_request, response) => {
@@ -2604,24 +2624,62 @@ test("production BrowserRuntime captures click geometry from the installed Playw
   const fixturePort = await listen(server);
   const origin = `http://127.0.0.1:${fixturePort}`;
   const targetUrl = `${origin}/app`;
-  const publicPort = await unusedLoopbackPort();
-  const rawPort = await unusedLoopbackPort(publicPort);
-  runtime = new BrowserRuntime({
-    studioRoot,
-    mcpPackageDir: path.join(studioRoot, "node_modules", "@playwright", "mcp"),
-    port: publicPort,
-    rawPort,
-    env: { Path: process.env.Path ?? "" },
-    readinessTimeoutMs: 15_000,
-  });
+  collisionServer = createServer();
+  const stolenPublicPort = await listen(collisionServer);
+  const attemptedPorts = new Set([fixturePort, stolenPublicPort]);
   const originPolicy = createOriginPolicy({ targetOrigin: origin, authOrigins: [], resourceOrigins: [] });
-  const active = await startRuntime(runtime, {
-    id: jobId,
-    targetUrl,
-    originPolicy,
-    blockedOrigins: [],
-    auth: { mode: "manual" },
-  });
+  let startFailures = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    jobId = randomUUID();
+    jobIds.add(jobId);
+    const publicPort = attempt === 0
+      ? stolenPublicPort
+      : await unusedLoopbackPort(attemptedPorts);
+    attemptedPorts.add(publicPort);
+    const rawPort = await unusedLoopbackPort(attemptedPorts);
+    attemptedPorts.add(rawPort);
+    const candidate = new BrowserRuntime({
+      studioRoot,
+      mcpPackageDir: path.join(studioRoot, "node_modules", "@playwright", "mcp"),
+      port: publicPort,
+      rawPort,
+      env: { Path: process.env.Path ?? "" },
+      readinessTimeoutMs: 15_000,
+    });
+    runtime = candidate;
+    try {
+      active = await startRuntime(candidate, {
+        id: jobId,
+        targetUrl,
+        originPolicy,
+        blockedOrigins: [],
+        auth: { mode: "manual" },
+      });
+      break;
+    } catch (error) {
+      startFailures += 1;
+      await candidate.stop();
+      runtime = undefined;
+      const jobDirectory = path.join(studioRoot, "data", "jobs", jobId);
+      await rm(jobDirectory, { recursive: true, force: true });
+      await assert.rejects(stat(jobDirectory), (candidateError) => candidateError?.code === "ENOENT");
+      await assert.rejects(
+        stat(path.join(studioRoot, ".runtime", "browser", jobId)),
+        (candidateError) => candidateError?.code === "ENOENT",
+      );
+      if (attempt === 0) {
+        collisionServer.closeIdleConnections?.();
+        collisionServer.closeAllConnections?.();
+        await new Promise((resolvePromise) => collisionServer.close(resolvePromise));
+        collisionServer = undefined;
+        await assertLoopbackPortsReleased([publicPort, rawPort]);
+      }
+      if (error?.code !== "BROWSER_RUNTIME_START_FAILED" || attempt === 2) throw error;
+    }
+  }
+  assert.equal(startFailures >= 1, true);
+  assert.ok(active);
+  assert.ok(runtime);
   const compiled = compileExecutionCalls({
     schemaVersion: "1.1",
     targetUrl,
