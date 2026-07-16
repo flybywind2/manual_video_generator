@@ -107,7 +107,13 @@ test("startStudio assembles and closes the production workflow graph", async (t)
   const calls = [];
   const port = await availablePort();
   const runtimeFactory = async (options) => {
-    calls.push(["create", options.config.root, typeof options.producerFactory]);
+    calls.push([
+      "create",
+      options.config.root,
+      typeof options.producerFactory,
+      options.env.MANUAL_STUDIO_OPENCODE_PATH,
+      options.env.MANUAL_STUDIO_OPENCODE_VERSION,
+    ]);
     return Object.freeze({
       paths: Object.freeze({ opencode: join(root, "opencode.exe") }),
       runtime: Object.freeze({
@@ -171,7 +177,11 @@ test("startStudio assembles and closes the production workflow graph", async (t)
 
   const studio = await within(startStudio({
     root,
-    env: { MANUAL_STUDIO_PORT: String(port) },
+    env: {
+      MANUAL_STUDIO_PORT: String(port),
+      MANUAL_STUDIO_OPENCODE_PATH: join(root, "opencode.exe"),
+      MANUAL_STUDIO_OPENCODE_VERSION: "1.18.2",
+    },
     healthCheck: async () => ({ ready: true, checks: {} }),
     runtimeFactory,
   }), "startStudio");
@@ -183,11 +193,23 @@ test("startStudio assembles and closes the production workflow graph", async (t)
   assert.equal(studio.runtime.runtime.producer !== null, true);
   assert.equal(typeof studio.studioService.execute, "function");
   assert.equal(typeof studio.taskSupervisor.schedule, "function");
-  assert.deepEqual(calls, [["create", root, "function"]]);
+  assert.deepEqual(calls, [[
+    "create",
+    root,
+    "function",
+    join(root, "opencode.exe"),
+    "1.18.2",
+  ]]);
 
   await studio.close();
   await studio.close();
-  assert.deepEqual(calls, [["create", root, "function"], ["close"]]);
+  assert.deepEqual(calls, [[
+    "create",
+    root,
+    "function",
+    join(root, "opencode.exe"),
+    "1.18.2",
+  ], ["close"]]);
 });
 
 test("startStudio removes stale per-job browser profiles before creating a runtime", async (t) => {

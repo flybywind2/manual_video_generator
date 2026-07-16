@@ -24,9 +24,12 @@ import {
   sanitizeOpenCodeServerEnvironment,
 } from "./opencode-client.js";
 import { killProcessTree, runProcess } from "../process/process-runner.js";
+import {
+  resolveOpenCodeExecutable,
+  supportsOpenCodeVersion,
+} from "../runtime/opencode-installation.js";
 import { createRedactor } from "../security/redactor.js";
 
-const EXPECTED_VERSION = "1.4.1";
 const MAX_READINESS_LINE_BYTES = 64 * 1024;
 const MAX_READINESS_BYTES = 512 * 1024;
 const MAX_CONTRACT_BYTES = 2 * 1024 * 1024;
@@ -85,6 +88,7 @@ const RESOLVED_CONFIG_KEYS = Object.freeze([
 ]);
 const OPTION_KEYS = new Set([
   "opencodePath",
+  "expectedVersion",
   "studioRoot",
   "port",
   "env",
@@ -157,6 +161,7 @@ function inspectOptions(options) {
     throw new Error("unknown");
   }
   const opencodePath = dataValue(options, "opencodePath", true);
+  const expectedVersion = dataValue(options, "expectedVersion", true);
   const studioRoot = dataValue(options, "studioRoot", true);
   const port = dataValue(options, "port") ?? 4096;
   const rawEnvironment = dataValue(options, "env") ?? process.env;
@@ -191,6 +196,7 @@ function inspectOptions(options) {
     typeof opencodePath !== "string" ||
     !path.isAbsolute(opencodePath) ||
     path.extname(opencodePath).toLowerCase() !== ".exe" ||
+    !supportsOpenCodeVersion(expectedVersion) ||
     typeof studioRoot !== "string" ||
     !path.isAbsolute(studioRoot) ||
     !Number.isSafeInteger(port) ||
@@ -214,6 +220,7 @@ function inspectOptions(options) {
   }
   return Object.freeze({
     opencodePath,
+    expectedVersion,
     studioRoot,
     port,
     env,
@@ -887,16 +894,31 @@ async function defaultPreflightConfig(details) {
     mcpCapabilityToken,
   );
   try {
-    const version = await runDebugProcess(
-      details.processRunner,
-      opencodePath,
-      ["--version"],
-      studioRoot,
-      isolated.environment,
-      details.signal,
-      10_000,
-    );
-    if (version.exitCode !== 0 || version.signal !== null || version.stdout.trim() !== EXPECTED_VERSION) {
+    const selection = await resolveOpenCodeExecutable({
+      environment: isolated.environment,
+      explicitPath: opencodePath,
+      runVersion: async (command, args, execution) => {
+        const result = await details.processRunner({
+          command,
+          args,
+          cwd: studioRoot,
+          env: execution.env,
+          signal: details.signal,
+          timeoutMs: execution.timeout,
+        });
+        if (
+          !isPlain(result) ||
+          !Number.isInteger(dataValue(result, "exitCode", true)) ||
+          dataValue(result, "signal", true) !== null ||
+          typeof dataValue(result, "stdout", true) !== "string" ||
+          typeof dataValue(result, "stderr", true) !== "string"
+        ) {
+          throw new Error("version process");
+        }
+        return result;
+      },
+    });
+    if (selection.version !== details.expectedVersion) {
       throw new Error("version");
     }
     const config = await runDebugJson(
@@ -1134,7 +1156,11 @@ export class OpenCodeServer {
       },
     );
     const value = await boundedResponseJson(response);
-    if (!isPlain(value) || value.healthy !== true || value.version !== EXPECTED_VERSION) {
+    if (
+      !isPlain(value) ||
+      value.healthy !== true ||
+      value.version !== this.#settings.expectedVersion
+    ) {
       throw new Error("health");
     }
     return value.version;
@@ -1152,6 +1178,7 @@ export class OpenCodeServer {
     if (!this.#password || !this.#jobEnvironment) throw new Error("inactive contract");
     return Object.freeze({
       baseUrl: `http://127.0.0.1:${this.#settings.port}`,
+      expectedVersion: this.#settings.expectedVersion,
       studioRoot: this.#settings.studioRoot,
       username: this.#username,
       password: this.#password,
@@ -1256,6 +1283,7 @@ export class OpenCodeServer {
         : this.#settings.env;
       preflight = await this.#settings.preflightConfig(Object.freeze({
         opencodePath: this.#settings.opencodePath,
+        expectedVersion: this.#settings.expectedVersion,
         studioRoot: this.#settings.studioRoot,
         env: preflightEnvironment,
         originalConfigHome: this.#settings.originalConfigHome,

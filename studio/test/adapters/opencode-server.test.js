@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { promisify } from "node:util";
 import test from "node:test";
 
 import { runOpenCode } from "../../src/adapters/opencode-client.js";
 import { OpenCodeServer } from "../../src/adapters/opencode-server.js";
+import { resolveOpenCodeInstallation } from "../../src/runtime/opencode-installation.js";
 
-const execFileAsync = promisify(execFile);
 const sourceStudioRoot = path.resolve(".");
 const MCP_CAPABILITY_TOKEN = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 const OTHER_MCP_CAPABILITY_TOKEN = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
@@ -21,15 +19,12 @@ function jobOptions(jobId, additional = {}) {
 }
 
 async function selectedOpenCode() {
-  const { stdout } = await execFileAsync("where.exe", ["opencode"], {
-    encoding: "utf8",
-    timeout: 5_000,
-    windowsHide: true,
+  return resolveOpenCodeInstallation({
+    environment: process.env,
+    mode: "check",
+    runtimeRoot: path.join(sourceStudioRoot, ".runtime", "opencode"),
+    studioRoot: sourceStudioRoot,
   });
-  const executable = stdout.split(/\r?\n/u).map((line) => line.trim())
-    .find((line) => line.toLowerCase().endsWith(".exe"));
-  assert.ok(executable && path.isAbsolute(executable));
-  return executable;
 }
 
 async function trustedStudioFixture(t, { crlf = false, mutateExecutor = false } = {}) {
@@ -151,20 +146,24 @@ class FakeChild extends EventEmitter {
   }
 }
 
-function healthyResponse() {
+function healthyResponse(version = "1.18.2") {
   return {
     ok: true,
     status: 200,
-    json: async () => ({ healthy: true, version: "1.4.1" }),
+    json: async () => ({ healthy: true, version }),
   };
 }
 
 function createHarness(overrides = {}) {
   const calls = { spawn: [], fetch: [], owner: [], kill: [], closed: [], preflight: [], live: [], order: [] };
   const child = new FakeChild();
+  const expectedVersion = Object.hasOwn(overrides, "expectedVersion")
+    ? overrides.expectedVersion
+    : "1.18.2";
   const server = new OpenCodeServer({
     opencodePath: path.resolve("C:\\Users\\xiro1\\.bun\\bin\\opencode.exe"),
     studioRoot: path.resolve("."),
+    expectedVersion,
     port: 4096,
     env: {
       Path: process.env.Path ?? "",
@@ -188,7 +187,7 @@ function createHarness(overrides = {}) {
     fetchImpl: async (url, options) => {
       calls.order.push("fetch");
       calls.fetch.push({ url, options });
-      return healthyResponse();
+      return healthyResponse(expectedVersion);
     },
     verifyPortOwner: async (port, pid) => {
       calls.order.push("owner");
@@ -243,12 +242,13 @@ test("OpenCodeServer starts exact production serve command and verifies healthy 
   assert.equal("GITHUB_TOKEN" in calls.spawn[0].options.env, false);
   assert.equal("AWS_SECRET_ACCESS_KEY" in calls.spawn[0].options.env, false);
   assert.equal(calls.preflight.length, 1);
+  assert.equal(calls.preflight[0].expectedVersion, "1.18.2");
   assert.equal(calls.live.length, 1);
   assert.deepEqual(calls.owner, [{ port: 4096, pid: 43170 }]);
   assert.deepEqual(calls.order.slice(0, 2), ["owner", "fetch"]);
   assert.equal(calls.fetch[0].url, "http://127.0.0.1:4096/global/health");
   assert.equal(active.baseUrl, "http://127.0.0.1:4096");
-  assert.equal(active.version, "1.4.1");
+  assert.equal(active.version, "1.18.2");
   assert.deepEqual(Object.keys(active).sort(), ["baseUrl", "jobId", "version"]);
   assert.equal("serverPassword" in active, false);
   assert.equal(JSON.stringify(active).includes(MCP_CAPABILITY_TOKEN), false);
@@ -256,6 +256,27 @@ test("OpenCodeServer starts exact production serve command and verifies healthy 
   assert.equal(JSON.stringify(calls.live).includes(MCP_CAPABILITY_TOKEN), false);
   assert.equal(server.activeJobId, "job-0123456789abcdef");
   await server.stop();
+});
+
+test("OpenCodeServer binds either supported exact expected version", async (t) => {
+  for (const expectedVersion of ["1.17.19", "1.18.2"]) {
+    await t.test(expectedVersion, async () => {
+      const { calls, server } = createHarness({ expectedVersion });
+      const active = await server.startJob(jobOptions(`job-version${expectedVersion.replaceAll(".", "")}000000`));
+      assert.equal(calls.preflight[0].expectedVersion, expectedVersion);
+      assert.equal(active.version, expectedVersion);
+      await server.stop();
+    });
+  }
+});
+
+test("OpenCodeServer requires a supported stable expectedVersion", () => {
+  for (const expectedVersion of [undefined, "", "1.17.18", "1.18.2-beta.1", "v1.18.2"]) {
+    assert.throws(
+      () => createHarness({ expectedVersion }),
+      (error) => error.code === "INVALID_OPENCODE_SERVER_OPTIONS",
+    );
+  }
 });
 
 test("OpenCodeServer exposes Basic auth only inside a generation-bound attach callback", async () => {
@@ -404,11 +425,11 @@ test("OpenCodeServer rejects false health, wrong version, dead child, and port o
   const samples = [
     {
       name: "unhealthy",
-      override: { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ healthy: false, version: "1.4.1" }) }) },
+      override: { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ healthy: false, version: "1.18.2" }) }) },
     },
     {
       name: "wrong version",
-      override: { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ healthy: true, version: "1.5.0" }) }) },
+      override: { fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ healthy: true, version: "1.17.19" }) }) },
     },
     {
       name: "owner mismatch",
@@ -748,7 +769,7 @@ test("OpenCodeServer stop supersedes an awaited preflight and prevents a late sp
   await server.stop();
 });
 
-test("default preflight canonicalizes CRLF and isolates custom and default data homes", {
+test("default preflight canonicalizes CRLF, revalidates the executable, and isolates data homes", {
   skip: process.platform !== "win32",
   timeout: 120_000,
 }, async (t) => {
@@ -806,7 +827,8 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
     "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
     "webfetch", "todowrite", "websearch", "codesearch", "skill", "apply_patch",
   ];
-  const opencodePath = await selectedOpenCode();
+  const openCodeSelection = await selectedOpenCode();
+  const opencodePath = openCodeSelection.path;
   const defaultHome = path.join(studioRoot, "default-user-home");
   const scenarios = [
     {
@@ -828,6 +850,88 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
     },
   ];
 
+  await t.test("rejects framed version output at the first process boundary", async () => {
+    const calls = [];
+    let serveCalls = 0;
+    const server = new OpenCodeServer({
+      opencodePath,
+      expectedVersion: openCodeSelection.version,
+      studioRoot,
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: xdgConfig,
+        XDG_DATA_HOME: path.join(studioRoot, "framed-version-data"),
+      },
+      preflightProcessRunner: async (options) => {
+        calls.push(options);
+        return {
+          exitCode: 0,
+          lines: [],
+          signal: null,
+          stderr: "",
+          stdout: ` ${openCodeSelection.version} \n`,
+        };
+      },
+      spawnProcess: () => {
+        serveCalls += 1;
+        throw new Error("must not serve");
+      },
+      validateLiveContract: async () => ({ valid: true }),
+    });
+
+    await assert.rejects(
+      server.startJob(jobOptions("job-framedversion001")),
+      (error) => error.code === "OPENCODE_SERVER_PREFLIGHT_FAILED",
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, opencodePath);
+    assert.deepEqual(calls[0].args, ["--version"]);
+    assert.equal(calls[0].cwd, studioRoot);
+    assert.equal(calls[0].timeoutMs, 5_000);
+    assert.equal(calls[0].signal instanceof AbortSignal, true);
+    assert.equal("OPENAI_API_KEY" in calls[0].env, false);
+    assert.equal(serveCalls, 0);
+  });
+
+  await t.test("rejects a non-regular executable before running it", async () => {
+    const unsafeExecutable = path.join(studioRoot, "unsafe-opencode.exe");
+    await mkdir(unsafeExecutable);
+    let processCalls = 0;
+    let serveCalls = 0;
+    const server = new OpenCodeServer({
+      opencodePath: unsafeExecutable,
+      expectedVersion: openCodeSelection.version,
+      studioRoot,
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: xdgConfig,
+        XDG_DATA_HOME: path.join(studioRoot, "unsafe-executable-data"),
+      },
+      preflightProcessRunner: async () => {
+        processCalls += 1;
+        return {
+          exitCode: 0,
+          lines: [],
+          signal: null,
+          stderr: "",
+          stdout: `${openCodeSelection.version}\n`,
+        };
+      },
+      spawnProcess: () => {
+        serveCalls += 1;
+        throw new Error("must not serve");
+      },
+      validateLiveContract: async () => ({ valid: true }),
+    });
+
+    await assert.rejects(
+      server.startJob(jobOptions("job-unsafebinary0001")),
+      (error) => error.code === "OPENCODE_SERVER_PREFLIGHT_FAILED",
+    );
+    assert.equal(processCalls, 0);
+    assert.equal(serveCalls, 0);
+  });
+
   for (const [index, scenario] of scenarios.entries()) {
     await t.test(scenario.name, async () => {
       await mkdir(scenario.dataHome, { recursive: true });
@@ -847,6 +951,7 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
       });
       const serverOptions = {
         opencodePath,
+        expectedVersion: openCodeSelection.version,
         studioRoot,
         env: scenario.environment(),
         readinessTimeoutMs: 120_000,
@@ -873,7 +978,7 @@ test("default preflight canonicalizes CRLF and isolates custom and default data 
         fetchImpl: async (url, options) => {
           assert.match(options.headers.Authorization, /^Basic\s/u);
           const pathname = new URL(url).pathname;
-          if (pathname === "/global/health") return healthyResponse();
+          if (pathname === "/global/health") return healthyResponse(openCodeSelection.version);
           if (pathname === "/config") {
             configCalls += 1;
             if (configCalls === 1) return jsonResponse({ retry: true }, 503);
@@ -987,6 +1092,7 @@ test("default preflight rejects a changed trusted agent before invoking OpenCode
   let serveCalls = 0;
   const server = new OpenCodeServer({
     opencodePath: path.resolve("C:\\tools\\opencode.exe"),
+    expectedVersion: "1.18.2",
     studioRoot,
     env: { ...process.env },
     preflightProcessRunner: async () => {
@@ -1009,12 +1115,14 @@ test("default preflight rejects a changed trusted agent before invoking OpenCode
 
 test("stop aborts and awaits the supervised default preflight before resolving", async () => {
   const before = new Set((await readdir(os.tmpdir())).filter((name) => name.startsWith("manual-video-opencode-")));
+  const openCodeSelection = await selectedOpenCode();
   let entered;
   let runnerAborts = 0;
   let serveCalls = 0;
   const enteredPromise = new Promise((resolvePromise) => { entered = resolvePromise; });
   const server = new OpenCodeServer({
-    opencodePath: path.resolve("C:\\tools\\opencode.exe"),
+    opencodePath: openCodeSelection.path,
+    expectedVersion: openCodeSelection.version,
     studioRoot: sourceStudioRoot,
     env: { ...process.env },
     preflightProcessRunner: async (options) => {
