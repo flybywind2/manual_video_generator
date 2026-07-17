@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateFinalMedia } from "../src/media/quality-gate.js";
+import { validateCompositionMediaPlan } from "../src/media/composition.js";
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const defaultStudioRoot = resolve(scriptRoot, "..");
@@ -32,7 +33,7 @@ function validateCaptions(mediaPlan, expectedDurationMs) {
     mediaPlan === null ||
     typeof mediaPlan !== "object" ||
     Array.isArray(mediaPlan) ||
-    mediaPlan.schemaVersion !== "1.0" ||
+    mediaPlan.schemaVersion !== "1.1" ||
     mediaPlan.video?.durationMs !== expectedDurationMs ||
     !Array.isArray(mediaPlan.captions) ||
     mediaPlan.captions.length < 1 ||
@@ -62,6 +63,19 @@ function validateCaptions(mediaPlan, expectedDurationMs) {
 export function validateArtifactEvidence({ probe, analysis, mediaPlan } = {}) {
   const expectedDurationMs = mediaPlan?.video?.durationMs;
   const captionCount = validateCaptions(mediaPlan, expectedDurationMs);
+  let manifest;
+  try {
+    manifest = validateCompositionMediaPlan(mediaPlan);
+  } catch {
+    verificationError(
+      "VERIFY_MEDIA_PLAN",
+      "The selected final artifact has no valid click-highlight media plan.",
+    );
+  }
+  const highlightCount = manifest.scenes.reduce(
+    (count, scene) => count + scene.highlights.length,
+    0,
+  );
   let quality;
   try {
     quality = validateFinalMedia(probe, { expectedDurationMs });
@@ -100,6 +114,7 @@ export function validateArtifactEvidence({ probe, analysis, mediaPlan } = {}) {
   return Object.freeze({
     ...quality,
     captionCount,
+    highlightCount,
     meanVolumeDb: analysis.meanVolumeDb,
     maxVolumeDb: analysis.maxVolumeDb,
     frozenMs: analysis.frozenMs,
@@ -310,7 +325,7 @@ function parseArguments(argv) {
 }
 
 export async function runVerification({ studioRoot = defaultStudioRoot, artifactPath, planPath } = {}) {
-  await run(process.execPath, ["--test"], { cwd: studioRoot });
+  await run(process.execPath, ["--test", "--test-concurrency=1"], { cwd: studioRoot });
   await run(process.execPath, ["scripts/doctor.mjs"], { cwd: studioRoot });
   const artifact = await selectFinalArtifact({ studioRoot, artifactPath });
   const mediaPlan = await loadMediaPlan({ studioRoot, artifactPath: artifact, planPath });

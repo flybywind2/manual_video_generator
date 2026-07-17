@@ -221,7 +221,7 @@ function canonicalValue(value, state = { nodes: 0 }) {
   return result;
 }
 
-function normalizedManifest(mediaPlan) {
+export function validateCompositionMediaPlan(mediaPlan) {
   const root = exactObject(
     mediaPlan,
     ["schemaVersion", "video", "recordingPath", "scenes", "captions", "chapters"],
@@ -469,7 +469,7 @@ function sceneClips(
 }
 
 export function mediaPlanDigest(mediaPlan) {
-  normalizedManifest(mediaPlan);
+  validateCompositionMediaPlan(mediaPlan);
   const canonical = JSON.stringify(canonicalValue(mediaPlan));
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
@@ -481,7 +481,7 @@ export function compositionId(mediaPlan) {
 export function compileComposition({ template, mediaPlan, projectPath }) {
   const approvedTemplate = validateTemplate(template);
   const project = relativeProjectPath(projectPath, "unsafe_project_path");
-  const manifest = normalizedManifest(mediaPlan);
+  const manifest = validateCompositionMediaPlan(mediaPlan);
   const recordingUrl = projectAssetUrl(project, manifest.recordingPath);
   const highlightCount = manifest.scenes.reduce(
     (count, scene) => count + scene.highlights.length,

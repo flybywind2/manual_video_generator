@@ -42,11 +42,56 @@ function validProbe(overrides = {}) {
 
 function validPlan(overrides = {}) {
   return {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     video: { width: 1920, height: 1080, fps: 30, durationMs: 4200 },
+    recordingPath: "media/normalized.mp4",
+    scenes: [
+      {
+        id: "step-1",
+        source: { startMs: 1000, endMs: 3000, durationMs: 2000, playbackRate: 1.052632 },
+        output: { startMs: 0, endMs: 1900, durationMs: 1900 },
+        narration: {
+          path: "narration/step-1.wav",
+          durationMs: 1900,
+          text: "프로젝트 메뉴를 선택합니다.",
+        },
+        caption: { text: "프로젝트 메뉴를 선택합니다.", startMs: 0, endMs: 1900 },
+        chapter: "프로젝트 열기",
+        highlights: [
+          {
+            callId: "step-1.click",
+            startMs: 570,
+            durationMs: 900,
+            x: 120,
+            y: 160,
+            width: 320,
+            height: 72,
+          },
+        ],
+        driftMs: 0,
+      },
+      {
+        id: "step-2",
+        source: { startMs: 4000, endMs: 6000, durationMs: 2000, playbackRate: 0.9 },
+        output: { startMs: 1900, endMs: 4200, durationMs: 2300 },
+        narration: {
+          path: "narration/step-2.wav",
+          durationMs: 2300,
+          text: "완료 화면을 확인합니다.",
+        },
+        caption: { text: "완료 화면을 확인합니다.", startMs: 1900, endMs: 4200 },
+        chapter: "완료 확인",
+        highlights: [],
+        driftMs: 78,
+      },
+    ],
     captions: [
-      { sceneId: "step-1", startMs: 0, endMs: 2000, text: "프로젝트 메뉴를 선택합니다." },
-      { sceneId: "step-2", startMs: 2000, endMs: 4200, text: "완료 화면을 확인합니다." },
+      { sceneId: "step-1", startMs: 0, endMs: 1900, text: "프로젝트 메뉴를 선택합니다." },
+      { sceneId: "step-2", startMs: 1900, endMs: 4200, text: "완료 화면을 확인합니다." },
+    ],
+    chapters: [
+      { sceneId: "step-1", startMs: 0, label: "프로젝트 열기" },
+      { sceneId: "step-2", startMs: 1900, label: "완료 확인" },
     ],
     ...overrides,
   };
@@ -171,6 +216,7 @@ test("npm start delegates to the only supported PowerShell entrypoint", async ()
   const manifest = JSON.parse(await source("package.json"));
 
   assert.match(manifest.scripts.start, /powershell[^\r\n]*scripts[\\/]start\.ps1/iu);
+  assert.equal(manifest.scripts.test, "node --test --test-concurrency=1");
   assert.doesNotMatch(manifest.scripts.start, /node[^\r\n]*src[\\/]index\.js/iu);
   assert.equal(manifest.scripts.verify, "node scripts/verify.mjs");
 });
@@ -233,6 +279,7 @@ test("artifact evidence rejects silence, placeholders, wrong codecs, and missing
   });
   assert.equal(accepted.durationMs, 4200);
   assert.equal(accepted.captionCount, 2);
+  assert.equal(accepted.highlightCount, 1);
 
   assert.throws(
     () => validateArtifactEvidence({
@@ -278,6 +325,48 @@ test("artifact evidence rejects silence, placeholders, wrong codecs, and missing
   );
 });
 
+test("artifact evidence requires the exact media plan 1.1 click-highlight contract", async () => {
+  const { validateArtifactEvidence } = await import("../../scripts/verify.mjs");
+  const analysis = {
+    meanVolumeDb: -20,
+    maxVolumeDb: -1,
+    frozenMs: 0,
+    longestFrozenMs: 0,
+    blackMs: 0,
+    longestBlackMs: 0,
+  };
+  const evidence = (mediaPlan) => ({ probe: validProbe(), analysis, mediaPlan });
+
+  assert.throws(
+    () => validateArtifactEvidence(evidence(validPlan({ schemaVersion: "1.0" }))),
+    { code: "VERIFY_MISSING_CAPTIONS" },
+  );
+
+  for (const mutate of [
+    (plan) => { plan.scenes[0].highlights[0].durationMs = 899; },
+    (plan) => { plan.scenes[0].highlights[0].startMs = 1_500; },
+    (plan) => { plan.scenes[0].highlights[0].x = 1_800; },
+    (plan) => { plan.scenes[0].highlights[0].width = 0; },
+    (plan) => {
+      plan.scenes[1].highlights.push({
+        ...plan.scenes[0].highlights[0],
+        startMs: 2_000,
+      });
+    },
+    (plan) => {
+      const sparse = new Array(1);
+      plan.scenes[0].highlights = sparse;
+    },
+  ]) {
+    const plan = structuredClone(validPlan());
+    mutate(plan);
+    assert.throws(
+      () => validateArtifactEvidence(evidence(plan)),
+      { code: "VERIFY_MEDIA_PLAN" },
+    );
+  }
+});
+
 test("FFmpeg diagnostics are parsed without echoing arbitrary process output", async () => {
   const { parseFfmpegAnalysis } = await import("../../scripts/verify.mjs");
   const parsed = parseFfmpegAnalysis(`
@@ -301,7 +390,10 @@ test("FFmpeg diagnostics are parsed without echoing arbitrary process output", a
 
 test("artifact verification runs the Node test runner directly on Windows", async () => {
   const script = await source("scripts/verify.mjs");
-  assert.match(script, /run\(process\.execPath, \["--test"\]/u);
+  assert.match(
+    script,
+    /run\(process\.execPath, \["--test", "--test-concurrency=1"\]/u,
+  );
   assert.doesNotMatch(script, /npm\.cmd/u);
 });
 

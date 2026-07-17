@@ -65,6 +65,7 @@ test("normalization argv fixes the browser recording contract without shell quot
     ["cfr", "libx264", "18", "30", "30", "yuv420p", "+faststart"],
   );
   assert.equal(args.includes("-an"), true);
+  assert.equal(args[args.indexOf("-threads") + 1], "2");
 });
 
 test("normalization refuses input or output outside the job root", () => {

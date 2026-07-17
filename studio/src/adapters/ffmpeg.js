@@ -375,6 +375,8 @@ export function buildNormalizeArgs({ jobRoot, inputPath, outputPath }) {
     "cfr",
     "-c:v",
     "libx264",
+    "-threads",
+    "2",
     "-preset",
     "medium",
     "-crf",

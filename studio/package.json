@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "doctor": "node scripts/doctor.mjs",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1",
     "supertonic:ensure": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/supertonic.ps1 -Ensure",
