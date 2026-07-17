@@ -59,6 +59,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 
 각 승인 화면에 표시된 digest는 현재 계획 또는 미리보기에 결합됩니다. 인증·리소스 origin 허용 목록도 계획에 포함되어 함께 고정되며, 다른 탭이나 이전 화면의 오래된 승인 값은 거부됩니다.
 
+클릭 강조는 사이트별 좌표를 하드코딩하지 않습니다. 승인된 각 `browser_click` 직전에 coordinator가 같은 Playwright locator의 실제 viewport 사각형을 수집하고, 측정된 클릭 시작 시각과 결합합니다. HyperFrames는 이 신뢰된 좌표에 900ms 보라-파랑 테두리와 중심 ripple을 후처리하므로 클릭 뒤 페이지가 이동해도 강조가 영상에 남고, 한 단계의 여러 클릭도 각각 표시됩니다. 대상은 화면의 `target URL`, 사용자 프롬프트, 완료 조건으로 정해지므로 로컬 fixture나 특정 포털에 종속되지 않습니다.
+
 ## 로그인과 DPAPI
 
 ### 수동 로그인
@@ -93,6 +95,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ## 검증과 라이브 스모크
 
 `scripts/verify.mjs`는 전체 테스트와 doctor를 먼저 통과시킨 뒤 선택된 `final.mp4`를 검사합니다. FFprobe 계약은 MP4/H.264/yuv420p/1920×1080/30 fps/AAC/44.1 또는 48 kHz와 영상·음성 길이를 확인합니다. FFmpeg 분석은 무음이나 단일 연속 정지·검정 구간이 거의 전 구간을 차지하는 placeholder를 거부하고, 결합된 media plan에 유효한 캡션이 없으면 실패합니다. 여러 실제 장면 사이의 의도된 정적 설명 구간은 합산해 placeholder로 오인하지 않습니다.
+
+클릭 강조 검증은 media plan `1.1`의 각 `scenes[].highlights[]`에 절대 `startMs`, 900ms `durationMs`, locator에서 수집한 `x/y/width/height`가 있는지 확인합니다. 실제 렌더 회귀 테스트는 각 cue 전·중·후의 target ROI 픽셀을 비교해 강조가 cue 동안에만 나타나는지 검증합니다.
 
 검증할 작업을 명시하려면 다음처럼 최종 영상과 그 영상에 결합된 media plan을 함께 전달합니다. 인자를 생략하면 가장 최근 `final.mp4`를 선택합니다. `npm run verify -- --artifact ... --plan ...`도 같은 검증기를 실행합니다.
 
