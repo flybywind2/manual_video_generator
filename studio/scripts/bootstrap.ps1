@@ -2,7 +2,8 @@
 param(
     [switch]$Check,
     [string]$RuntimeRoot,
-    [string]$CacheRoot
+    [string]$CacheRoot,
+    [string]$FFmpegRuntimeRoot
 )
 
 Set-StrictMode -Version Latest
@@ -15,6 +16,9 @@ if (-not $RuntimeRoot) {
 if (-not $CacheRoot) {
     $CacheRoot = Join-Path $StudioRoot "data\cache\supertonic-3"
 }
+if (-not $FFmpegRuntimeRoot) {
+    $FFmpegRuntimeRoot = Join-Path $StudioRoot ".runtime\ffmpeg"
+}
 
 $ExpectedNodeMajor = 22
 $ExpectedOpenCodeMinimum = "1.17.19"
@@ -24,6 +28,9 @@ $ExpectedSupertonic = "1.3.1"
 $ExpectedPlaywrightMcp = "0.0.78" # @playwright/mcp
 $ExpectedHyperFrames = "0.7.57"
 $ExpectedFFmpeg = "8.1.1"
+$FFmpegArchiveUrl = "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip"
+$FFmpegArchiveSha256 = "6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541"
+$FFmpegArchiveDirectory = "ffmpeg-8.1.1-essentials_build"
 $SupertonicScript = Join-Path $PSScriptRoot "supertonic.ps1"
 $OpenCodeRuntimeScript = Join-Path $PSScriptRoot "opencode-runtime.mjs"
 $OpenCodeRuntimeRoot = Join-Path $StudioRoot ".runtime\opencode"
@@ -88,6 +95,144 @@ function Get-SemanticVersion {
         return $null
     }
     return $match.Groups[1].Value
+}
+
+function Test-SafeFFmpegExecutablePath {
+    param([string]$PathValue)
+
+    if (
+        -not $PathValue -or
+        $PathValue.Length -gt 32767 -or
+        $PathValue.Contains([char]0) -or
+        -not [System.IO.Path]::IsPathRooted($PathValue) -or
+        [System.IO.Path]::GetExtension($PathValue) -ine ".exe"
+    ) {
+        return $false
+    }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($PathValue)
+        return $fullPath -ceq $PathValue -and (Test-Path -LiteralPath $fullPath -PathType Leaf)
+    } catch {
+        return $false
+    }
+}
+
+function Get-FFmpegPairInspection {
+    param(
+        [string]$FfmpegPath,
+        [string]$FfprobePath,
+        [Parameter(Mandatory = $true)][string]$Source
+    )
+
+    if (
+        -not (Test-SafeFFmpegExecutablePath -PathValue $FfmpegPath) -or
+        -not (Test-SafeFFmpegExecutablePath -PathValue $FfprobePath)
+    ) {
+        return [pscustomobject]@{
+            ready = $false
+            source = $Source
+            ffmpegPath = $FfmpegPath
+            ffprobePath = $FfprobePath
+            ffmpegVersion = $null
+            ffprobeVersion = $null
+        }
+    }
+
+    $ffmpegOutput = Get-VersionOutput -FilePath $FfmpegPath -Arguments @("-version")
+    $ffprobeOutput = Get-VersionOutput -FilePath $FfprobePath -Arguments @("-version")
+    $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
+    $ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
+    return [pscustomobject]@{
+        ready = $ffmpegVersion -eq $ExpectedFFmpeg -and $ffprobeVersion -eq $ExpectedFFmpeg
+        source = $Source
+        ffmpegPath = $FfmpegPath
+        ffprobePath = $FfprobePath
+        ffmpegVersion = $ffmpegVersion
+        ffprobeVersion = $ffprobeVersion
+    }
+}
+
+function Get-FFmpegStatus {
+    $explicitFfmpeg = $env:MANUAL_STUDIO_FFMPEG_PATH
+    $explicitFfprobe = $env:MANUAL_STUDIO_FFPROBE_PATH
+    if ($explicitFfmpeg -or $explicitFfprobe) {
+        return Get-FFmpegPairInspection -FfmpegPath $explicitFfmpeg -FfprobePath $explicitFfprobe -Source "explicit"
+    }
+
+    $local = Get-FFmpegPairInspection `
+        -FfmpegPath (Join-Path $FFmpegRuntimeRoot "bin\ffmpeg.exe") `
+        -FfprobePath (Join-Path $FFmpegRuntimeRoot "bin\ffprobe.exe") `
+        -Source "project"
+    if ($local.ready) {
+        return $local
+    }
+
+    return Get-FFmpegPairInspection `
+        -FfmpegPath (Get-CommandPath "ffmpeg.exe") `
+        -FfprobePath (Get-CommandPath "ffprobe.exe") `
+        -Source "path"
+}
+
+function Set-FFmpegEnvironment {
+    param([Parameter(Mandatory = $true)]$Status)
+    if (-not $Status.ready) {
+        return
+    }
+    $env:MANUAL_STUDIO_FFMPEG_PATH = $Status.ffmpegPath
+    $env:MANUAL_STUDIO_FFPROBE_PATH = $Status.ffprobePath
+}
+
+function Install-ProjectFFmpeg {
+    if (-not $PSCmdlet.ShouldProcess($FFmpegRuntimeRoot, "Download and verify pinned FFmpeg $ExpectedFFmpeg")) {
+        return
+    }
+
+    $runtimeParent = Split-Path -Parent $FFmpegRuntimeRoot
+    $stageId = [Guid]::NewGuid().ToString("N")
+    $archivePath = Join-Path $runtimeParent ".ffmpeg-$stageId.zip"
+    $stageRoot = Join-Path $runtimeParent ".ffmpeg-stage-$stageId"
+    $sourceRoot = Join-Path $stageRoot $FFmpegArchiveDirectory
+    $sourceFfmpeg = Join-Path $sourceRoot "bin\ffmpeg.exe"
+    $sourceFfprobe = Join-Path $sourceRoot "bin\ffprobe.exe"
+
+    $null = New-Item -ItemType Directory -Force -Path $runtimeParent
+    $null = New-Item -ItemType Directory -Force -Path $stageRoot
+    try {
+        $previousProgressPreference = $ProgressPreference
+        $ProgressPreference = "SilentlyContinue"
+        try {
+            $null = Invoke-WebRequest -UseBasicParsing -Uri $FFmpegArchiveUrl -OutFile $archivePath -TimeoutSec 600
+        } finally {
+            $ProgressPreference = $previousProgressPreference
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $FFmpegArchiveSha256) {
+            throw "The downloaded FFmpeg archive failed SHA-256 verification."
+        }
+
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $stageRoot -Force
+        $staged = Get-FFmpegPairInspection -FfmpegPath $sourceFfmpeg -FfprobePath $sourceFfprobe -Source "staged"
+        if (-not $staged.ready) {
+            throw "The downloaded FFmpeg runtime did not match version $ExpectedFFmpeg."
+        }
+
+        if (Test-Path -LiteralPath $FFmpegRuntimeRoot) {
+            $existingRuntime = Get-Item -LiteralPath $FFmpegRuntimeRoot -Force
+            if (($existingRuntime.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "The project FFmpeg runtime path must not be a reparse point."
+            }
+            Remove-Item -LiteralPath $FFmpegRuntimeRoot -Recurse -Force
+        }
+        Move-Item -LiteralPath $sourceRoot -Destination $FFmpegRuntimeRoot
+    } finally {
+        if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+            Remove-Item -LiteralPath $archivePath -Force
+        }
+        if (Test-Path -LiteralPath $stageRoot -PathType Container) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force
+        }
+    }
 }
 
 function Test-ExactPropertySet {
@@ -361,21 +506,18 @@ function Prepare-Runtime {
         }
     }
 
-    $ffmpegPath = Get-CommandPath "ffmpeg.exe"
-    $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
-    $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
-    if ($ffmpegVersion -ne $ExpectedFFmpeg) {
-        Install-WingetPackage -Id "Gyan.FFmpeg" -Version $ExpectedFFmpeg
-        $ffmpegPath = Get-CommandPath "ffmpeg.exe"
+    $ffmpeg = Get-FFmpegStatus
+    if (-not $ffmpeg.ready) {
+        if ($ffmpeg.source -eq "explicit") {
+            throw "MANUAL_STUDIO_FFMPEG_PATH and MANUAL_STUDIO_FFPROBE_PATH must both select FFmpeg $ExpectedFFmpeg executables."
+        }
+        Install-ProjectFFmpeg
+        $ffmpeg = Get-FFmpegStatus
     }
-    $ffprobePath = Get-CommandPath "ffprobe.exe"
-    $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
-    $ffprobeOutput = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
-    $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
-    $ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
-    if ($ffmpegVersion -ne $ExpectedFFmpeg -or $ffprobeVersion -ne $ExpectedFFmpeg) {
-        throw "FFmpeg and FFprobe 8.1.1 are required. Reopen the terminal and run start.ps1 again."
+    if (-not $ffmpeg.ready) {
+        throw "The pinned project-local FFmpeg $ExpectedFFmpeg runtime could not be prepared."
     }
+    Set-FFmpegEnvironment -Status $ffmpeg
 
     if ($PSCmdlet.ShouldProcess($RuntimeRoot, "Prepare Supertonic 1.3.1 and download supertonic-3")) {
         $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SupertonicScript -Ensure -Download -RuntimeRoot $RuntimeRoot
@@ -393,12 +535,16 @@ if (-not $ReadOnly) {
 $node = Get-NodeStatus
 $python = Get-PythonStatus
 $supertonic = Get-SupertonicStatus
-$ffmpegPath = Get-CommandPath "ffmpeg.exe"
-$ffprobePath = Get-CommandPath "ffprobe.exe"
+$ffmpeg = Get-FFmpegStatus
+$ffmpegPath = $ffmpeg.ffmpegPath
+$ffprobePath = $ffmpeg.ffprobePath
 $ffmpegOutput = Get-VersionOutput -FilePath $ffmpegPath -Arguments @("-version")
 $ffprobeOutput = Get-VersionOutput -FilePath $ffprobePath -Arguments @("-version")
 $ffmpegVersion = Get-SemanticVersion -Output $ffmpegOutput
 $ffprobeVersion = Get-SemanticVersion -Output $ffprobeOutput
+if ($ffmpeg.ready) {
+    Set-FFmpegEnvironment -Status $ffmpeg
+}
 $playwrightVersion = Get-InstalledPackageVersion "@playwright/mcp"
 $hyperframesVersion = Get-InstalledPackageVersion "hyperframes"
 
@@ -436,8 +582,8 @@ $checks = [ordered]@{
     supertonic = [ordered]@{ ready = $supertonic.ready; expected = $ExpectedSupertonic; actual = $supertonic.actual; modelReady = $supertonic.modelReady }
     playwrightMcp = [ordered]@{ ready = $playwrightVersion -eq $ExpectedPlaywrightMcp; expected = $ExpectedPlaywrightMcp; actual = $playwrightVersion }
     hyperframes = [ordered]@{ ready = $hyperframesVersion -eq $ExpectedHyperFrames; expected = $ExpectedHyperFrames; actual = $hyperframesVersion }
-    ffmpeg = [ordered]@{ ready = $ffmpegVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffmpegVersion }
-    ffprobe = [ordered]@{ ready = $ffprobeVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffprobeVersion }
+    ffmpeg = [ordered]@{ ready = $ffmpegVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffmpegVersion; source = $ffmpeg.source }
+    ffprobe = [ordered]@{ ready = $ffprobeVersion -eq $ExpectedFFmpeg; expected = $ExpectedFFmpeg; actual = $ffprobeVersion; source = $ffmpeg.source }
 }
 $ready = @($checks.Values | Where-Object { -not $_.ready }).Count -eq 0
 [ordered]@{

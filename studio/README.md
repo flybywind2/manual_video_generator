@@ -32,7 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 
 Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 호환되는 네이티브 `opencode.exe`를 재사용합니다. 명시적으로 지정된 실행 파일, 프로젝트 런타임, PATH의 모든 네이티브 실행 파일, 전역 npm 패키지가 선언한 네이티브 실행 파일을 순서대로 검증하며, 버전이 `1.17.19` 이상인 첫 후보를 선택합니다. 이미 설치된 호환 후보가 없을 때만 정확한 프로젝트 로컬 폴백 `1.18.2`를 `.runtime/opencode`에 준비합니다. `opencode.cmd`와 `opencode.ps1` 같은 command shim은 패키지 위치를 찾기 위한 단서로만 확인하고 실행하지 않습니다.
 
-Python·FFmpeg가 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
+Python이 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. FFmpeg는 winget 없이 공식 Gyan 8.1.1 essentials ZIP을 내려받아 SHA-256을 검증한 뒤 `.runtime/ffmpeg`에 프로젝트 로컬 폴백으로 준비합니다. 이미 PATH에 정확한 8.1.1이 있으면 다운로드하지 않고 재사용합니다. Python 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
 
 ### 회사 PC에서 OpenCode 진단과 시작
 
@@ -81,10 +81,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 - DPAPI 암호문: `data/credentials/`
 - Supertonic 모델 캐시: `data/cache/supertonic-3/`
 - 격리 Python 환경과 일시 런타임: `.runtime/supertonic/`
+- 프로젝트 로컬 FFmpeg/FFprobe 폴백: `.runtime/ffmpeg/`
 - 수동 로그인 Playwright 브라우저 프로필: `data/browser-profile/`
 - 자동 로그인 일회용 프로필: `.runtime/browser/<job-id>/profile/` (작업 종료 시 폐기)
 
-첫 실행 시 Supertonic 모델 다운로드가 발생합니다. 공식 Python SDK 안내는 현재 모델 다운로드를 약 400 MB로 설명하지만, 실제 용량은 모델·패키지 버전에 따라 달라질 수 있으므로 충분한 여유 공간을 확보하세요. 이 서비스는 `SUPERTONIC_CACHE_DIR`을 위의 프로젝트 로컬 캐시로 고정합니다. 다운로드에는 네트워크가 필요하지만 합성은 준비 완료 후 loopback에서 로컬로 처리됩니다.
+첫 실행 시 Supertonic 모델 다운로드가 발생합니다. 공식 Python SDK 안내는 현재 모델 다운로드를 약 400 MB로 설명하지만, 실제 용량은 모델·패키지 버전에 따라 달라질 수 있으므로 충분한 여유 공간을 확보하세요. 정확한 FFmpeg 8.1.1이 PC에 없으면 약 109 MB의 프로젝트 로컬 ZIP도 한 번 다운로드합니다. 이 서비스는 `SUPERTONIC_CACHE_DIR`을 위의 프로젝트 로컬 캐시로 고정합니다. 다운로드에는 네트워크가 필요하지만 합성과 영상 처리는 준비 완료 후 loopback에서 로컬로 처리됩니다.
 
 ## 실패와 재시도
 

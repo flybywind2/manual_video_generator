@@ -123,7 +123,6 @@ test("bootstrap delegates compatible OpenCode selection to the project runtime w
   assert.match(script, /@playwright\/mcp[^\r\n]*0\.0\.78|0\.0\.78[^\r\n]*@playwright\/mcp/iu);
   assert.match(script, /hyperframes[^\r\n]*0\.7\.57|0\.7\.57[^\r\n]*hyperframes/iu);
   assert.match(script, /ExpectedFFmpeg\s*=\s*"8\.1\.1"/iu);
-  assert.match(script, /Install-WingetPackage\s+-Id\s+"Gyan\.FFmpeg"\s+-Version\s+\$ExpectedFFmpeg/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffmpegPath/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffprobePath/iu);
   assert.doesNotMatch(script, /opencode-ai|npm[^\r\n]*(?:--global|-g)[^\r\n]*opencode/iu);
@@ -134,6 +133,22 @@ test("bootstrap delegates compatible OpenCode selection to the project runtime w
   assert.match(script, /npm(?:\.cmd)?[^\r\n]*ci/iu);
   assert.match(script, /SUPERTONIC_CACHE_DIR/u);
   assert.match(script, /data[\\/]cache[\\/]supertonic-3/iu);
+});
+
+test("bootstrap prepares pinned project-local FFmpeg without requiring winget", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(script, /FFmpegRuntimeRoot[^\r\n]*\.runtime[\\/]ffmpeg/iu);
+  assert.match(
+    script,
+    /https:\/\/github\.com\/GyanD\/codexffmpeg\/releases\/download\/8\.1\.1\/ffmpeg-8\.1\.1-essentials_build\.zip/u,
+  );
+  assert.match(script, /6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541/iu);
+  assert.match(script, /Get-FileHash[^\r\n]*SHA256/iu);
+  assert.match(script, /Expand-Archive/iu);
+  assert.match(script, /MANUAL_STUDIO_FFMPEG_PATH/iu);
+  assert.match(script, /MANUAL_STUDIO_FFPROBE_PATH/iu);
+  assert.doesNotMatch(script, /Install-WingetPackage\s+-Id\s+"Gyan\.FFmpeg"/iu);
 });
 
 test("bootstrap validates one sanitized resolver report and never embeds raw child output in errors", async () => {
@@ -543,4 +558,13 @@ test("README documents the supported OpenCode runtime contract and company PC di
   assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_17_19_PATH/u);
   assert.match(readme, /MANUAL_STUDIO_TEST_OPENCODE_1_18_2_PATH/u);
   assert.doesNotMatch(readme, /OpenCode\s*\|\s*`1\.4\.1`/iu);
+});
+
+test("README documents the winget-free project-local FFmpeg fallback", async () => {
+  const readme = await source("README.md");
+
+  assert.match(readme, /FFmpeg[^\r\n]*winget[^\r\n]*(?:없이|필요하지)/iu);
+  assert.match(readme, /\.runtime[\\/]ffmpeg/iu);
+  assert.match(readme, /SHA-256/iu);
+  assert.match(readme, /약\s*109\s*MB/iu);
 });
