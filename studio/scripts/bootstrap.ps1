@@ -296,6 +296,65 @@ function Test-UnsafeFFmpegRuntimeLink {
     return -not [string]::IsNullOrWhiteSpace($linkType) -or $targets.Count -ne 0
 }
 
+function Remove-TransientFFmpegPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$PathValue,
+        [switch]$Recurse
+    )
+
+    for ($attempt = 1; $attempt -le 10; $attempt += 1) {
+        if (-not (Test-Path -LiteralPath $PathValue)) {
+            return $true
+        }
+        try {
+            if ($Recurse) {
+                Remove-Item -LiteralPath $PathValue -Recurse -Force -ErrorAction Stop
+            } else {
+                Remove-Item -LiteralPath $PathValue -Force -ErrorAction Stop
+            }
+            return $true
+        } catch {
+            if ($attempt -lt 10) {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+    return $false
+}
+
+function Remove-ExistingFFmpegRuntime {
+    for ($attempt = 1; $attempt -le 10; $attempt += 1) {
+        try {
+            Remove-Item -LiteralPath $FFmpegRuntimeRoot -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -lt 10) {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+    throw "The existing project FFmpeg runtime is temporarily locked. Close FFmpeg processes and run start.ps1 again."
+}
+
+function Move-StagedFFmpegRuntime {
+    param([Parameter(Mandatory = $true)][string]$SourcePath)
+
+    for ($attempt = 1; $attempt -le 10; $attempt += 1) {
+        try {
+            Move-Item -LiteralPath $SourcePath -Destination $FFmpegRuntimeRoot -ErrorAction Stop
+            return
+        } catch {
+            if (-not (Test-Path -LiteralPath $SourcePath) -and (Test-Path -LiteralPath $FFmpegRuntimeRoot -PathType Container)) {
+                return
+            }
+            if ($attempt -lt 10) {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+    throw "The verified FFmpeg runtime is temporarily locked. Close security scans or FFmpeg processes and run start.ps1 again."
+}
+
 function Install-ProjectFFmpeg {
     if (-not $PSCmdlet.ShouldProcess($FFmpegRuntimeRoot, "Download and verify pinned FFmpeg $ExpectedFFmpeg")) {
         return
@@ -318,9 +377,11 @@ function Install-ProjectFFmpeg {
         }
 
         Expand-Archive -LiteralPath $archivePath -DestinationPath $stageRoot -Force
-        $staged = Get-FFmpegPairInspection -FfmpegPath $sourceFfmpeg -FfprobePath $sourceFfprobe -Source "staged"
-        if (-not $staged.ready) {
-            throw "The downloaded FFmpeg runtime did not match version $ExpectedFFmpeg."
+        if (
+            -not (Test-SafeFFmpegExecutablePath -PathValue $sourceFfmpeg) -or
+            -not (Test-SafeFFmpegExecutablePath -PathValue $sourceFfprobe)
+        ) {
+            throw "The downloaded FFmpeg archive did not contain the required executables."
         }
 
         if (Test-Path -LiteralPath $FFmpegRuntimeRoot) {
@@ -328,16 +389,18 @@ function Install-ProjectFFmpeg {
             if (Test-UnsafeFFmpegRuntimeLink -Item $existingRuntime) {
                 throw "The project FFmpeg runtime path must not be a reparse point."
             }
-            Remove-Item -LiteralPath $FFmpegRuntimeRoot -Recurse -Force
+            Remove-ExistingFFmpegRuntime
         }
-        Move-Item -LiteralPath $sourceRoot -Destination $FFmpegRuntimeRoot
+        Move-StagedFFmpegRuntime -SourcePath $sourceRoot
+        $installedFfmpeg = Join-Path $FFmpegRuntimeRoot "bin\ffmpeg.exe"
+        $installedFfprobe = Join-Path $FFmpegRuntimeRoot "bin\ffprobe.exe"
+        $installed = Get-FFmpegPairInspection -FfmpegPath $installedFfmpeg -FfprobePath $installedFfprobe -Source "project"
+        if (-not $installed.ready) {
+            throw "The installed FFmpeg runtime did not match version $ExpectedFFmpeg."
+        }
     } finally {
-        if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
-            Remove-Item -LiteralPath $archivePath -Force
-        }
-        if (Test-Path -LiteralPath $stageRoot -PathType Container) {
-            Remove-Item -LiteralPath $stageRoot -Recurse -Force
-        }
+        $null = Remove-TransientFFmpegPath -PathValue $archivePath
+        $null = Remove-TransientFFmpegPath -PathValue $stageRoot -Recurse
     }
 }
 

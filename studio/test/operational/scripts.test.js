@@ -171,6 +171,36 @@ test("bootstrap distinguishes OneDrive cloud reparse markers from directory link
   );
 });
 
+test("bootstrap publishes FFmpeg before executing its version probes", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+  const install = script.slice(
+    script.indexOf("function Install-ProjectFFmpeg"),
+    script.indexOf("function Test-ExactPropertySet"),
+  );
+
+  assert.doesNotMatch(install, /Get-FFmpegPairInspection[^\r\n]*\$sourceFfmpeg/iu);
+  assert.match(
+    script,
+    /function Move-StagedFFmpegRuntime[\s\S]*?Move-Item[^\r\n]*\$SourcePath[^\r\n]*\$FFmpegRuntimeRoot/iu,
+  );
+  assert.match(
+    install,
+    /Move-StagedFFmpegRuntime[^\r\n]*\$sourceRoot[\s\S]*?Get-FFmpegPairInspection[^\r\n]*\$installedFfmpeg/iu,
+  );
+});
+
+test("bootstrap cleanup retries transient locks without masking the install result", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(script, /function Remove-TransientFFmpegPath/iu);
+  assert.match(script, /Start-Sleep\s+-Milliseconds/iu);
+  assert.match(script, /Remove-TransientFFmpegPath\s+-PathValue\s+\$stageRoot/iu);
+  assert.doesNotMatch(
+    script,
+    /finally\s*\{[\s\S]*?Remove-Item\s+-LiteralPath\s+\$stageRoot\s+-Recurse\s+-Force/iu,
+  );
+});
+
 test("bootstrap validates one sanitized resolver report and never embeds raw child output in errors", async () => {
   const script = await source("scripts/bootstrap.ps1");
 
