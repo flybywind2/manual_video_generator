@@ -27,10 +27,13 @@ $ExpectedPython = "3.13.14"
 $ExpectedSupertonic = "1.3.1"
 $ExpectedPlaywrightMcp = "0.0.78" # @playwright/mcp
 $ExpectedHyperFrames = "0.7.57"
-$ExpectedFFmpeg = "8.1.1"
-$FFmpegArchiveUrl = "https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip"
-$FFmpegArchiveSha256 = "6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541"
-$FFmpegArchiveDirectory = "ffmpeg-8.1.1-essentials_build"
+$ExpectedFFmpeg = "8.1.2"
+$FFmpegArchiveUrls = @(
+    "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
+    "https://github.com/GyanD/codexffmpeg/releases/download/8.1.2/ffmpeg-8.1.2-essentials_build.zip"
+)
+$FFmpegArchiveSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
+$FFmpegArchiveDirectory = "ffmpeg-8.1.2-essentials_build"
 $SupertonicScript = Join-Path $PSScriptRoot "supertonic.ps1"
 $OpenCodeRuntimeScript = Join-Path $PSScriptRoot "opencode-runtime.mjs"
 $OpenCodeRuntimeRoot = Join-Path $StudioRoot ".runtime\opencode"
@@ -182,6 +185,117 @@ function Set-FFmpegEnvironment {
     $env:MANUAL_STUDIO_FFPROBE_PATH = $Status.ffprobePath
 }
 
+function Test-SafeFFmpegArchivePath {
+    param([string]$PathValue)
+
+    if (
+        -not $PathValue -or
+        $PathValue.Length -gt 32767 -or
+        $PathValue.Contains([char]0) -or
+        $PathValue.Trim() -cne $PathValue -or
+        -not [System.IO.Path]::IsPathRooted($PathValue) -or
+        [System.IO.Path]::GetExtension($PathValue) -ine ".zip"
+    ) {
+        return $false
+    }
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($PathValue)
+        return $fullPath -ceq $PathValue -and (Test-Path -LiteralPath $fullPath -PathType Leaf)
+    } catch {
+        return $false
+    }
+}
+
+function Test-FFmpegArchiveHash {
+    param([Parameter(Mandatory = $true)][string]$ArchivePath)
+    try {
+        return (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $FFmpegArchiveSha256
+    } catch {
+        return $false
+    }
+}
+
+function Copy-FFmpegArchive {
+    param([Parameter(Mandatory = $true)][string]$DestinationPath)
+
+    $offlineArchive = $env:MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH
+    if ($offlineArchive) {
+        if (-not (Test-SafeFFmpegArchivePath -PathValue $offlineArchive)) {
+            throw "MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH must be an absolute path to the pinned FFmpeg ZIP."
+        }
+        Copy-Item -LiteralPath $offlineArchive -Destination $DestinationPath -Force
+        if (-not (Test-FFmpegArchiveHash -ArchivePath $DestinationPath)) {
+            throw "MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH did not match the pinned FFmpeg SHA-256."
+        }
+        return
+    }
+
+    $bitsAvailable = $null -ne (Get-Command "Start-BitsTransfer" -ErrorAction SilentlyContinue)
+    foreach ($archiveUrl in $FFmpegArchiveUrls) {
+        if ($bitsAvailable) {
+            try {
+                $null = Start-BitsTransfer `
+                    -Source $archiveUrl `
+                    -Destination $DestinationPath `
+                    -TransferType Download `
+                    -RetryInterval 60 `
+                    -RetryTimeout 120 `
+                    -MaxDownloadTime 600 `
+                    -ErrorAction Stop
+                if (Test-FFmpegArchiveHash -ArchivePath $DestinationPath) {
+                    return
+                }
+            } catch {
+                # Try the next bounded transport without exposing a proxy block page.
+            }
+            if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+                Remove-Item -LiteralPath $DestinationPath -Force
+            }
+        }
+
+        try {
+            $previousProgressPreference = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            try {
+                $null = Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $DestinationPath -TimeoutSec 600
+            } finally {
+                $ProgressPreference = $previousProgressPreference
+            }
+            if (Test-FFmpegArchiveHash -ArchivePath $DestinationPath) {
+                return
+            }
+        } catch {
+            # A corporate proxy may replace this response with an authentication block page.
+        }
+        if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+            Remove-Item -LiteralPath $DestinationPath -Force
+        }
+    }
+
+    throw "FFmpeg download was blocked. Download the pinned ZIP in a browser, set MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH to its absolute path, and run start.ps1 again."
+}
+
+function Test-UnsafeFFmpegRuntimeLink {
+    param([Parameter(Mandatory = $true)]$Item)
+
+    if (-not $Item.PSIsContainer) {
+        return $true
+    }
+    if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+        return $false
+    }
+
+    $linkTypeProperty = $Item.PSObject.Properties["LinkType"]
+    $targetProperty = $Item.PSObject.Properties["Target"]
+    if ($null -eq $linkTypeProperty -or $null -eq $targetProperty) {
+        return $true
+    }
+
+    $linkType = [string]$linkTypeProperty.Value
+    $targets = @($targetProperty.Value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    return -not [string]::IsNullOrWhiteSpace($linkType) -or $targets.Count -ne 0
+}
+
 function Install-ProjectFFmpeg {
     if (-not $PSCmdlet.ShouldProcess($FFmpegRuntimeRoot, "Download and verify pinned FFmpeg $ExpectedFFmpeg")) {
         return
@@ -198,16 +312,8 @@ function Install-ProjectFFmpeg {
     $null = New-Item -ItemType Directory -Force -Path $runtimeParent
     $null = New-Item -ItemType Directory -Force -Path $stageRoot
     try {
-        $previousProgressPreference = $ProgressPreference
-        $ProgressPreference = "SilentlyContinue"
-        try {
-            $null = Invoke-WebRequest -UseBasicParsing -Uri $FFmpegArchiveUrl -OutFile $archivePath -TimeoutSec 600
-        } finally {
-            $ProgressPreference = $previousProgressPreference
-        }
-
-        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -cne $FFmpegArchiveSha256) {
+        Copy-FFmpegArchive -DestinationPath $archivePath
+        if (-not (Test-FFmpegArchiveHash -ArchivePath $archivePath)) {
             throw "The downloaded FFmpeg archive failed SHA-256 verification."
         }
 
@@ -219,7 +325,7 @@ function Install-ProjectFFmpeg {
 
         if (Test-Path -LiteralPath $FFmpegRuntimeRoot) {
             $existingRuntime = Get-Item -LiteralPath $FFmpegRuntimeRoot -Force
-            if (($existingRuntime.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            if (Test-UnsafeFFmpegRuntimeLink -Item $existingRuntime) {
                 throw "The project FFmpeg runtime path must not be a reparse point."
             }
             Remove-Item -LiteralPath $FFmpegRuntimeRoot -Recurse -Force

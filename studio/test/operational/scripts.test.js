@@ -122,7 +122,7 @@ test("bootstrap delegates compatible OpenCode selection to the project runtime w
   assert.match(script, /supertonic[^\r\n]*1\.3\.1|1\.3\.1[^\r\n]*supertonic/iu);
   assert.match(script, /@playwright\/mcp[^\r\n]*0\.0\.78|0\.0\.78[^\r\n]*@playwright\/mcp/iu);
   assert.match(script, /hyperframes[^\r\n]*0\.7\.57|0\.7\.57[^\r\n]*hyperframes/iu);
-  assert.match(script, /ExpectedFFmpeg\s*=\s*"8\.1\.1"/iu);
+  assert.match(script, /ExpectedFFmpeg\s*=\s*"8\.1\.2"/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffmpegPath/iu);
   assert.match(script, /Get-VersionOutput\s+-FilePath\s+\$ffprobePath/iu);
   assert.doesNotMatch(script, /opencode-ai|npm[^\r\n]*(?:--global|-g)[^\r\n]*opencode/iu);
@@ -135,20 +135,40 @@ test("bootstrap delegates compatible OpenCode selection to the project runtime w
   assert.match(script, /data[\\/]cache[\\/]supertonic-3/iu);
 });
 
-test("bootstrap prepares pinned project-local FFmpeg without requiring winget", async () => {
+test("bootstrap prepares pinned project-local FFmpeg across corporate and offline networks", async () => {
   const script = await source("scripts/bootstrap.ps1");
 
   assert.match(script, /FFmpegRuntimeRoot[^\r\n]*\.runtime[\\/]ffmpeg/iu);
   assert.match(
     script,
-    /https:\/\/github\.com\/GyanD\/codexffmpeg\/releases\/download\/8\.1\.1\/ffmpeg-8\.1\.1-essentials_build\.zip/u,
+    /https:\/\/www\.gyan\.dev\/ffmpeg\/builds\/packages\/ffmpeg-8\.1\.2-essentials_build\.zip/u,
   );
-  assert.match(script, /6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541/iu);
+  assert.match(
+    script,
+    /https:\/\/github\.com\/GyanD\/codexffmpeg\/releases\/download\/8\.1\.2\/ffmpeg-8\.1\.2-essentials_build\.zip/u,
+  );
+  assert.ok(script.indexOf("https://www.gyan.dev/") < script.indexOf("https://github.com/GyanD/"));
+  assert.match(script, /db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec/iu);
+  assert.match(script, /Start-BitsTransfer/iu);
+  assert.match(script, /MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH/iu);
+  assert.match(script, /IsPathRooted/iu);
   assert.match(script, /Get-FileHash[^\r\n]*SHA256/iu);
   assert.match(script, /Expand-Archive/iu);
   assert.match(script, /MANUAL_STUDIO_FFMPEG_PATH/iu);
   assert.match(script, /MANUAL_STUDIO_FFPROBE_PATH/iu);
   assert.doesNotMatch(script, /Install-WingetPackage\s+-Id\s+"Gyan\.FFmpeg"/iu);
+});
+
+test("bootstrap distinguishes OneDrive cloud reparse markers from directory links", async () => {
+  const script = await source("scripts/bootstrap.ps1");
+
+  assert.match(script, /Test-UnsafeFFmpegRuntimeLink/iu);
+  assert.match(script, /PSObject\.Properties\["LinkType"\]/iu);
+  assert.match(script, /PSObject\.Properties\["Target"\]/iu);
+  assert.doesNotMatch(
+    script,
+    /\$existingRuntime\.Attributes\s+-band\s+\[System\.IO\.FileAttributes\]::ReparsePoint/iu,
+  );
 });
 
 test("bootstrap validates one sanitized resolver report and never embeds raw child output in errors", async () => {
@@ -560,11 +580,15 @@ test("README documents the supported OpenCode runtime contract and company PC di
   assert.doesNotMatch(readme, /OpenCode\s*\|\s*`1\.4\.1`/iu);
 });
 
-test("README documents the winget-free project-local FFmpeg fallback", async () => {
+test("README documents corporate-network and offline FFmpeg recovery", async () => {
   const readme = await source("README.md");
 
   assert.match(readme, /FFmpeg[^\r\n]*winget[^\r\n]*(?:없이|필요하지)/iu);
+  assert.match(readme, /FFmpeg[^\r\n]*8\.1\.2/iu);
+  assert.match(readme, /gyan\.dev/iu);
   assert.match(readme, /\.runtime[\\/]ffmpeg/iu);
   assert.match(readme, /SHA-256/iu);
   assert.match(readme, /약\s*109\s*MB/iu);
+  assert.match(readme, /MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH/u);
+  assert.match(readme, /회사[^\r\n]*(?:프록시|보안망)|(?:프록시|보안망)[^\r\n]*회사/iu);
 });

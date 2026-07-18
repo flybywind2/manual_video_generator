@@ -14,8 +14,8 @@ export const VERSION_PINS = Object.freeze({
   python: "3.13.14",
   supertonic: "1.3.1",
   hyperframes: "0.7.57",
-  ffmpeg: "8.1.1",
-  ffprobe: "8.1.1",
+  ffmpeg: "8.1.2",
+  ffprobe: "8.1.2",
 });
 
 function parsePort(rawPort) {

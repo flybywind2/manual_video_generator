@@ -28,11 +28,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Check
 | Playwright MCP | `0.0.78` | 허용된 origin과 정확히 승인된 호출만 수행하는 브라우저 조작·녹화 |
 | Supertonic | `1.3.1` / Python `3.13.14` | 로컬 한국어 44.1 kHz 내레이션 합성 |
 | HyperFrames | `0.7.57` | 캡션·챕터·하이라이트 타임라인 구성과 렌더링 |
-| FFmpeg / FFprobe | `8.1.1` | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
+| FFmpeg / FFprobe | `8.1.2` | 녹화 정규화, 최종 MP4 검사, H.264/AAC 품질 게이트 |
 
 Node.js는 22 이상이어야 합니다. 시작 스크립트는 모든 엔진의 실제 버전을 확인하고, `@playwright/mcp`와 `hyperframes`를 lockfile 그대로 준비합니다. OpenCode는 호환되는 네이티브 `opencode.exe`를 재사용합니다. 명시적으로 지정된 실행 파일, 프로젝트 런타임, PATH의 모든 네이티브 실행 파일, 전역 npm 패키지가 선언한 네이티브 실행 파일을 순서대로 검증하며, 버전이 `1.17.19` 이상인 첫 후보를 선택합니다. 이미 설치된 호환 후보가 없을 때만 정확한 프로젝트 로컬 폴백 `1.18.2`를 `.runtime/opencode`에 준비합니다. `opencode.cmd`와 `opencode.ps1` 같은 command shim은 패키지 위치를 찾기 위한 단서로만 확인하고 실행하지 않습니다.
 
-Python이 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. FFmpeg는 winget 없이 공식 Gyan 8.1.1 essentials ZIP을 내려받아 SHA-256을 검증한 뒤 `.runtime/ffmpeg`에 프로젝트 로컬 폴백으로 준비합니다. 이미 PATH에 정확한 8.1.1이 있으면 다운로드하지 않고 재사용합니다. Python 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
+Python이 누락되거나 버전이 다르면 Windows 패키지 도구를 통해 준비를 시도한 뒤 다시 검증합니다. FFmpeg는 winget 없이 공식 Gyan 8.1.2 essentials ZIP을 Gyan 직접 경로에서 우선 내려받고 GitHub 미러를 보조 경로로 사용합니다. Windows BITS와 일반 웹 요청을 순서대로 시도하며, SHA-256을 검증한 뒤 `.runtime/ffmpeg`에 프로젝트 로컬 폴백으로 준비합니다. 이미 PATH에 정확한 8.1.2가 있으면 다운로드하지 않고 재사용합니다. Python 설치 뒤 PATH가 바뀌면 터미널을 다시 열고 시작 명령을 한 번 더 실행하세요.
 
 ### 회사 PC에서 OpenCode 진단과 시작
 
@@ -47,6 +47,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ```
 
 두 `where.exe` 명령은 네이티브 후보와 npm shim 배치 여부를 읽기 전용으로 조회할 뿐입니다. 발견된 command shim은 위치만 확인하고 실행하지 않습니다. 실행 파일 검증은 Studio의 제한 시간·출력 크기·버전 규칙을 모두 적용하는 `scripts/start.ps1 -Check` 하나만 사용하세요. `-Check` 결과의 `checks.opencode.actual`은 Studio가 실제 선택한 버전을 보여 줍니다. PATH의 첫 후보가 오래된 `1.4.1`이어도 뒤에 있는 호환 후보를 계속 검사합니다. 첫 실행 전 호환 후보가 전혀 없으면 `-Check`는 설치 없이 불일치를 보고할 수 있으며, 일반 시작 명령이 프로젝트 폴백을 준비합니다.
+
+회사 프록시나 보안망이 두 FFmpeg 자동 다운로드를 모두 403으로 차단하면, 조직에서 허용한 브라우저 다운로드 방식으로 [공식 Gyan FFmpeg 8.1.2 essentials ZIP](https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip)을 저장한 뒤 아래처럼 절대 경로를 지정하세요. Studio가 고정 SHA-256과 내부 실행 파일 버전을 다시 검증하므로 다른 ZIP은 허용되지 않습니다.
+
+```powershell
+$env:MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH = "$HOME\Downloads\ffmpeg-8.1.2-essentials_build.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
+Remove-Item Env:MANUAL_STUDIO_FFMPEG_ARCHIVE_PATH
+```
 
 ## 사용 흐름
 
@@ -85,7 +93,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1
 - 수동 로그인 Playwright 브라우저 프로필: `data/browser-profile/`
 - 자동 로그인 일회용 프로필: `.runtime/browser/<job-id>/profile/` (작업 종료 시 폐기)
 
-첫 실행 시 Supertonic 모델 다운로드가 발생합니다. 공식 Python SDK 안내는 현재 모델 다운로드를 약 400 MB로 설명하지만, 실제 용량은 모델·패키지 버전에 따라 달라질 수 있으므로 충분한 여유 공간을 확보하세요. 정확한 FFmpeg 8.1.1이 PC에 없으면 약 109 MB의 프로젝트 로컬 ZIP도 한 번 다운로드합니다. 이 서비스는 `SUPERTONIC_CACHE_DIR`을 위의 프로젝트 로컬 캐시로 고정합니다. 다운로드에는 네트워크가 필요하지만 합성과 영상 처리는 준비 완료 후 loopback에서 로컬로 처리됩니다.
+첫 실행 시 Supertonic 모델 다운로드가 발생합니다. 공식 Python SDK 안내는 현재 모델 다운로드를 약 400 MB로 설명하지만, 실제 용량은 모델·패키지 버전에 따라 달라질 수 있으므로 충분한 여유 공간을 확보하세요. 정확한 FFmpeg 8.1.2가 PC에 없으면 약 109 MB의 프로젝트 로컬 ZIP도 한 번 다운로드합니다. 이 서비스는 `SUPERTONIC_CACHE_DIR`을 위의 프로젝트 로컬 캐시로 고정합니다. 다운로드에는 네트워크가 필요하지만 합성과 영상 처리는 준비 완료 후 loopback에서 로컬로 처리됩니다.
 
 ## 실패와 재시도
 

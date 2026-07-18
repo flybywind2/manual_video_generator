@@ -46,8 +46,8 @@ function readyRuntimeOverrides(overrides = {}) {
     python: "3.13.14",
     supertonic: "1.3.1",
     hyperframes: "0.7.57",
-    ffmpeg: "8.1.1",
-    ffprobe: "8.1.1",
+    ffmpeg: "8.1.2",
+    ffprobe: "8.1.2",
   };
 
   return {
@@ -68,8 +68,8 @@ test("buildConfig records the OpenCode minimum and fallback versions", () => {
     python: "3.13.14",
     supertonic: "1.3.1",
     hyperframes: "0.7.57",
-    ffmpeg: "8.1.1",
-    ffprobe: "8.1.1",
+    ffmpeg: "8.1.2",
+    ffprobe: "8.1.2",
   });
   assert.equal(Object.isFrozen(config), true);
   assert.equal(Object.isFrozen(config.versions), true);
@@ -130,8 +130,8 @@ test("inspectRuntime discovers the project-owned Supertonic sidecar without a gl
         python: "3.13.14",
         supertonic: "1.3.1",
         hyperframes: "0.7.57",
-        ffmpeg: "8.1.1",
-        ffprobe: "8.1.1",
+        ffmpeg: "8.1.2",
+        ffprobe: "8.1.2",
       })[tool];
     },
   });
@@ -151,8 +151,8 @@ test("the production Supertonic probe uses its real version subcommand", async (
     python: "3.13.14",
     supertonic: "1.3.1",
     hyperframes: "0.7.57",
-    ffmpeg: "8.1.1",
-    ffprobe: "8.1.1",
+    ffmpeg: "8.1.2",
+    ffprobe: "8.1.2",
   };
   const report = await inspectRuntime({
     config: buildConfig({ root, env: {} }),
